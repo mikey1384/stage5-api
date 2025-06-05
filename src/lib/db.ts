@@ -29,22 +29,15 @@ export const ensureDatabase = async (env: { DB: D1Database }) => {
     db = env.DB; // ① bind the Worker's D1 instance
   }
   if (!tablesCreated) {
-    // ② run migrations exactly once - split into separate exec() calls
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS credits (
-        device_id         TEXT PRIMARY KEY,
-        minutes_remaining INTEGER NOT NULL DEFAULT 0,
-        updated_at        TEXT DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+    // ② run migrations exactly once - single-line to avoid D1 newline issues
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS credits(device_id TEXT PRIMARY KEY, minutes_remaining INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    );
 
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS processed_events (
-        event_id     TEXT PRIMARY KEY,
-        event_type   TEXT NOT NULL,
-        processed_at TEXT DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS processed_events(event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, processed_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    );
+
     tablesCreated = true;
   }
 };
@@ -154,15 +147,15 @@ export const deductCredits = async ({
   if (!db) throw new Error("Database not initialized");
 
   try {
-    const stmt = db.prepare(`
-      UPDATE credits 
-      SET minutes_remaining = minutes_remaining - ?, 
-          updated_at = CURRENT_TIMESTAMP
-      WHERE device_id = ? AND minutes_remaining >= ?
-    `);
+    const stmt = db.prepare(
+      `UPDATE credits
+         SET minutes_remaining = minutes_remaining - ?,
+             updated_at        = CURRENT_TIMESTAMP
+       WHERE device_id = ? AND minutes_remaining >= ?`
+    );
 
-    const result = await stmt.bind(minutes, deviceId, minutes).run();
-    return (result.meta?.changes ?? 0) > 0;
+    const res = await stmt.bind(minutes, deviceId, minutes).run();
+    return (res.meta?.changes ?? 0) > 0;
   } catch (error) {
     console.error("Error deducting credits:", error);
     throw error;
