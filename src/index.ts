@@ -71,7 +71,12 @@ app.onError((err, c) => {
 // Export for Cloudflare Workers
 export default {
   async fetch(req: Request, env: Bindings, ctx: ExecutionContext) {
-    await ensureDatabase(env); // initialise D1 once
+    try {
+      await ensureDatabase(env);
+    } catch (err) {
+      console.error("⚠️  DB init failed", err); // <-- will show up in tail
+      return new Response("db-init-error", { status: 500 });
+    }
     return app.fetch(req, env, ctx);
   },
 };
