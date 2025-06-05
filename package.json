@@ -1,0 +1,29 @@
+{
+  "name": "stage5-api",
+  "version": "1.0.0",
+  "description": "Stage 5 API service for payments, credits, and shared features",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "hono": "^4.0.0",
+    "zod": "^3.22.0",
+    "stripe": "^14.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@cloudflare/workers-types": "^4.0.0",
+    "@types/node": "^20.0.0",
+    "wrangler": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
