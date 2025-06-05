@@ -1,10 +1,15 @@
 import { Hono } from "hono";
 import type Stripe from "stripe";
-import { constructWebhookEvent, isTestMode } from "../lib/stripe";
+import { getStripe } from "../lib/stripe";
 import { creditDevice, isEventProcessed, markEventProcessed } from "../lib/db";
 import { isValidPackId, type PackId } from "../types/packs";
 
-const router = new Hono();
+type Bindings = {
+  STRIPE_SECRET_KEY: string;
+  STRIPE_WEBHOOK_SECRET: string;
+};
+
+const router = new Hono<{ Bindings: Bindings }>();
 
 router.post("/", async (c) => {
   const signature = c.req.header("stripe-signature");
@@ -14,22 +19,18 @@ router.post("/", async (c) => {
     return c.json({ error: "Missing signature" }, 400);
   }
 
-  if (!process.env.STRIPE_WEBHOOK_SECRET) {
-    console.error("Missing STRIPE_WEBHOOK_SECRET environment variable");
-    return c.json({ error: "Server configuration error" }, 500);
-  }
-
   try {
     // Get raw body as ArrayBuffer
     const rawBody = await c.req.arrayBuffer();
     const bodyBuffer = Buffer.from(rawBody);
 
-    // Construct and verify the webhook event
-    const event = constructWebhookEvent({
-      payload: bodyBuffer,
+    // Get Stripe instance and construct webhook event
+    const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
+    const event = stripe.webhooks.constructEvent(
+      bodyBuffer,
       signature,
-      secret: process.env.STRIPE_WEBHOOK_SECRET,
-    });
+      c.env.STRIPE_WEBHOOK_SECRET
+    );
 
     console.log(`Received webhook: ${event.type}`);
 
@@ -104,11 +105,7 @@ const handleCheckoutCompleted = async ({
 
   try {
     await creditDevice({ deviceId, packId: packId as PackId });
-    console.log(
-      `Successfully credited ${packId} to device ${deviceId} (${
-        isTestMode() ? "TEST" : "LIVE"
-      } mode)`
-    );
+    console.log(`Successfully credited ${packId} to device ${deviceId}`);
   } catch (error) {
     console.error("Error crediting device:", error);
     throw error;

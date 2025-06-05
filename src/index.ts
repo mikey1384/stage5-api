@@ -6,62 +6,44 @@ import { prettyJSON } from "hono/pretty-json";
 import paymentsRouter from "./routes/payments";
 import webhookRouter from "./routes/webhook";
 import creditsRouter from "./routes/credits";
-import { initDatabase, createTables } from "./lib/db";
+import { ensureDatabase } from "./lib/db";
 
 // Types for Cloudflare Workers environment
 type Bindings = {
   DB: D1Database;
+  STRIPE_SECRET_KEY: string;
+  STRIPE_WEBHOOK_SECRET: string;
+  ALLOWED_ORIGINS?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
 
 // Middleware
-app.use("*", logger());
-app.use("*", prettyJSON());
+app.use("*", logger(), prettyJSON());
 
 // CORS configuration
 app.use(
   "*",
   cors({
     origin: (origin, c) => {
-      const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",").map((o) =>
-        o.trim()
-      ) || ["https://stage5.tools", "http://localhost:3000"];
-
-      if (!origin || allowedOrigins.includes(origin)) {
-        return origin || "*";
-      }
-
-      return null;
+      const list = (c.env.ALLOWED_ORIGINS ?? "")
+        .split(",")
+        .map((s: string) => s.trim());
+      return !origin || list.includes(origin) ? origin || "*" : null;
     },
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
+    allowHeaders: ["Content-Type", "Stripe-Signature"],
+    allowMethods: ["GET", "POST", "OPTIONS"],
     credentials: true,
   })
 );
 
 // Health check endpoint
-app.get("/", (c) => {
-  return c.json({
-    service: "stage5-api",
-    version: "1.0.0",
-    status: "healthy",
-    timestamp: new Date().toISOString(),
-  });
-});
-
-app.get("/health", (c) => {
-  return c.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime?.() || 0,
-  });
-});
+app.get("/health", (c) => c.json({ status: "ok", ts: Date.now() }));
 
 // Routes
 app.route("/payments", paymentsRouter);
-app.route("/stripe/webhook", webhookRouter);
 app.route("/credits", creditsRouter);
+app.route("/stripe/webhook", webhookRouter);
 
 // 404 handler
 app.notFound((c) => {
@@ -86,19 +68,11 @@ app.onError((err, c) => {
   );
 });
 
-// Initialize database (for Cloudflare Workers)
-const initializeApp = async (env?: Bindings) => {
-  if (env?.DB) {
-    await initDatabase({ database: env.DB });
-    await createTables();
-  }
-};
-
 // Export for Cloudflare Workers
 export default {
-  async fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
-    await initializeApp(env);
-    return app.fetch(request, env, ctx);
+  async fetch(req: Request, env: Bindings, ctx: ExecutionContext) {
+    await ensureDatabase(env); // initialise D1 once
+    return app.fetch(req, env, ctx);
   },
 };
 

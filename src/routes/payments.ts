@@ -1,9 +1,13 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { stripe } from "../lib/stripe";
+import { getStripe } from "../lib/stripe";
 import { packs, PACK_IDS, type PackId } from "../types/packs";
 
-const router = new Hono();
+type Bindings = {
+  STRIPE_SECRET_KEY: string;
+};
+
+const router = new Hono<{ Bindings: Bindings }>();
 
 const createSessionSchema = z.object({
   packId: z.enum(PACK_IDS),
@@ -16,7 +20,8 @@ router.post("/create-session", async (c) => {
     const { packId, deviceId } = createSessionSchema.parse(body);
 
     const pack = packs[packId];
-    const uiOrigin = process.env.UI_ORIGIN || "http://localhost:3000";
+    const uiOrigin = "https://stage5.tools";
+    const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",

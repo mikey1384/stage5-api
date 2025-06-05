@@ -22,44 +22,27 @@ interface Database {
 
 // Initialize database (D1 in Workers, SQLite elsewhere)
 let db: Database | undefined;
+let tablesCreated = false;
 
-export const initDatabase = async ({ database }: { database?: Database }) => {
-  if (database) {
-    db = database;
-    return;
+export const ensureDatabase = async (env: { DB: D1Database }) => {
+  if (!db) {
+    db = env.DB; // ① bind the Worker's D1 instance
   }
-
-  // For Workers environment without database binding, just warn
-  console.warn("No database provided to initDatabase");
-};
-
-// Create tables if they don't exist
-export const createTables = async () => {
-  if (!db) throw new Error("Database not initialized");
-
-  const createCreditsTable = `
-    CREATE TABLE IF NOT EXISTS credits (
-      device_id TEXT PRIMARY KEY,
-      minutes_remaining INTEGER NOT NULL DEFAULT 0,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `;
-
-  const createProcessedEventsTable = `
-    CREATE TABLE IF NOT EXISTS processed_events (
-      event_id TEXT PRIMARY KEY,
-      event_type TEXT NOT NULL,
-      processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `;
-
-  try {
-    await db.exec(createCreditsTable);
-    await db.exec(createProcessedEventsTable);
-    console.log("Database tables created successfully");
-  } catch (error) {
-    console.error("Error creating database tables:", error);
-    throw error;
+  if (!tablesCreated) {
+    // ② run migrations exactly once
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS credits (
+        device_id TEXT PRIMARY KEY,
+        minutes_remaining INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS processed_events (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    tablesCreated = true;
   }
 };
 

@@ -1,19 +1,22 @@
 name = "stage5-api"
-main = "src/index-minimal.ts"
+main = "dist/index.js"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Environment variables (runtime-accessed ENV)
 [vars]
-UI_ORIGIN = "https://stage5.tools"
 ALLOWED_ORIGINS = "https://stage5.tools,http://localhost:3000"
-STRIPE_LIVE = "false"
 
 # D1 Database binding
 [[d1_databases]]
 binding = "DB"
 database_name = "stage5_db"
 database_id = "84286ce2-3c1f-45ba-8183-a8540bd5b32b"
+
+# Worker route (leave this in!)
+routes = [
+  { pattern = "api.stage5.tools/*", custom_domain = true }
+]
 
 # Secrets (set these using `wrangler secret put`)
 # STRIPE_SECRET_KEY
