@@ -21,17 +21,33 @@ interface Database {
 }
 
 // Initialize database (D1 in Workers, SQLite elsewhere)
-let db: Database;
+let db: Database | undefined;
 
-export const initDatabase = ({ database }: { database?: Database }) => {
+export const initDatabase = async ({ database }: { database?: Database }) => {
   if (database) {
     db = database;
+    return;
   }
-  // In Workers, this will be available as env.DB
+
+  // Fallback to in-memory SQLite for local development/testing
+  if (!database && typeof process !== "undefined") {
+    try {
+      // Try to use better-sqlite3 for Node.js environments
+      const DatabaseModule = await import("better-sqlite3");
+      const Database = DatabaseModule.default;
+      db = new Database(":memory:") as any;
+    } catch (error) {
+      console.warn(
+        "better-sqlite3 not available, database operations will fail in Node.js"
+      );
+    }
+  }
 };
 
 // Create tables if they don't exist
 export const createTables = async () => {
+  if (!db) throw new Error("Database not initialized");
+
   const createCreditsTable = `
     CREATE TABLE IF NOT EXISTS credits (
       device_id TEXT PRIMARY KEY,
@@ -40,11 +56,64 @@ export const createTables = async () => {
     )
   `;
 
+  const createProcessedEventsTable = `
+    CREATE TABLE IF NOT EXISTS processed_events (
+      event_id TEXT PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+
   try {
     await db.exec(createCreditsTable);
+    await db.exec(createProcessedEventsTable);
     console.log("Database tables created successfully");
   } catch (error) {
     console.error("Error creating database tables:", error);
+    throw error;
+  }
+};
+
+// Check if webhook event has been processed (idempotency)
+export const isEventProcessed = async ({
+  eventId,
+}: {
+  eventId: string;
+}): Promise<boolean> => {
+  if (!db) throw new Error("Database not initialized");
+
+  try {
+    const stmt = db.prepare(
+      "SELECT event_id FROM processed_events WHERE event_id = ?"
+    );
+    const result = await stmt.bind(eventId).first();
+    return !!result;
+  } catch (error) {
+    console.error("Error checking event processing:", error);
+    throw error;
+  }
+};
+
+// Mark webhook event as processed
+export const markEventProcessed = async ({
+  eventId,
+  eventType,
+}: {
+  eventId: string;
+  eventType: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO processed_events (event_id, event_type, processed_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(event_id) DO NOTHING
+    `);
+
+    await stmt.bind(eventId, eventType).run();
+  } catch (error) {
+    console.error("Error marking event as processed:", error);
     throw error;
   }
 };
@@ -55,6 +124,8 @@ export const getCredits = async ({
 }: {
   deviceId: string;
 }): Promise<CreditRecord | null> => {
+  if (!db) throw new Error("Database not initialized");
+
   try {
     const stmt = db.prepare("SELECT * FROM credits WHERE device_id = ?");
     const result = await stmt.bind(deviceId).first();
@@ -73,6 +144,8 @@ export const creditDevice = async ({
   deviceId: string;
   packId: PackId;
 }): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
   const pack = packs[packId];
   if (!pack) {
     throw new Error(`Invalid pack ID: ${packId}`);
@@ -103,6 +176,8 @@ export const deductCredits = async ({
   deviceId: string;
   minutes: number;
 }): Promise<boolean> => {
+  if (!db) throw new Error("Database not initialized");
+
   try {
     const stmt = db.prepare(`
       UPDATE credits 

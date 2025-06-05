@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type Stripe from "stripe";
-import { constructWebhookEvent } from "../lib/stripe";
-import { creditDevice } from "../lib/db";
+import { constructWebhookEvent, isTestMode } from "../lib/stripe";
+import { creditDevice, isEventProcessed, markEventProcessed } from "../lib/db";
 import { isValidPackId, type PackId } from "../types/packs";
 
 const router = new Hono();
@@ -32,6 +32,15 @@ router.post("/", async (c) => {
     });
 
     console.log(`Received webhook: ${event.type}`);
+
+    // Check idempotency - prevent duplicate processing
+    if (await isEventProcessed({ eventId: event.id })) {
+      console.log(`Event ${event.id} already processed, skipping`);
+      return c.json({ received: true, message: "Already processed" });
+    }
+
+    // Mark event as being processed
+    await markEventProcessed({ eventId: event.id, eventType: event.type });
 
     // Handle different event types
     switch (event.type) {
@@ -88,7 +97,11 @@ const handleCheckoutCompleted = async ({
 
   try {
     await creditDevice({ deviceId, packId: packId as PackId });
-    console.log(`Successfully credited ${packId} to device ${deviceId}`);
+    console.log(
+      `Successfully credited ${packId} to device ${deviceId} (${
+        isTestMode() ? "TEST" : "LIVE"
+      } mode)`
+    );
   } catch (error) {
     console.error("Error crediting device:", error);
     throw error;

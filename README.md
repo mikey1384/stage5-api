@@ -254,8 +254,11 @@ All endpoints return consistent error responses:
 
 - All webhook signatures are verified
 - Device IDs must be valid UUIDs
-- CORS is properly configured
+- CORS is properly configured with Stripe-Signature header
+- Webhook idempotency prevents duplicate processing
+- Test/Live mode detection for safe development
 - Rate limiting should be added for production
+- Consider adding bearer token auth for `/deduct` endpoint
 
 ## 📊 Monitoring
 

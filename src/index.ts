@@ -36,7 +36,7 @@ app.use(
       return null;
     },
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
     credentials: true,
   })
 );
@@ -106,13 +106,11 @@ export default {
 // Export app for other environments (Node.js, etc.)
 export { app };
 
-// For Node.js environments
-if (typeof process !== "undefined" && process.env.NODE_ENV !== "test") {
-  const port = parseInt(process.env.PORT || "8787");
-
-  console.log(`🚀 Stage5 API starting on port ${port}`);
-  console.log(`📊 Health check: http://localhost:${port}/health`);
-
-  // In a real Node.js environment, you might use a different server
-  // This is just for compatibility
-}
+// For Node.js environments (commented out until proper server is implemented)
+// if (typeof process !== "undefined" && process.env.NODE_ENV !== "test") {
+//   const port = parseInt(process.env.PORT || "8787");
+//   console.log(`🚀 Stage5 API starting on port ${port}`);
+//   console.log(`📊 Health check: http://localhost:${port}/health`);
+//
+//   // TODO: Add proper Node.js server with serve(app.fetch)
+// }

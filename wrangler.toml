@@ -19,6 +19,7 @@ database_id = "your-database-id-here"
 [vars]
 UI_ORIGIN = "https://stage5.tools"
 ALLOWED_ORIGINS = "https://stage5.tools,http://localhost:3000"
+STRIPE_LIVE = "false"
 
 # Secrets (set these using `wrangler secret put`)
 # STRIPE_SECRET_KEY

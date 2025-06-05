@@ -37,6 +37,6 @@ export const packs: Record<PackId, Pack> = {
   },
 };
 
-export const isValidPackId = (packId: string): packId is PackId => {
-  return PACK_IDS.includes(packId as PackId);
+export const isValidPackId = (id: string): id is PackId => {
+  return PACK_IDS.includes(id as PackId);
 };
