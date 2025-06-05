@@ -1,6 +1,9 @@
 export const PACK_IDS = ["HOUR_1", "HOUR_5", "HOUR_10"] as const;
 export type PackId = (typeof PACK_IDS)[number];
 
+// Branded type for better UUID validation and autocomplete
+export type DeviceId = string & { __brand: "uuid" };
+
 export interface Pack {
   id: PackId;
   name: string;

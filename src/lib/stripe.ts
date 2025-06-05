@@ -11,7 +11,9 @@ export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
 
 // Check if we're in test mode
 export const isTestMode = () => {
-  return process.env.STRIPE_SECRET_KEY?.startsWith("sk_test_") || false;
+  return (
+    /^(sk_test_|rk_test_)/.test(process.env.STRIPE_SECRET_KEY || "") || false
+  );
 };
 
 // Check if we should process live payments

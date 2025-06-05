@@ -33,9 +33,23 @@ export const initDatabase = async ({ database }: { database?: Database }) => {
   if (!database && typeof process !== "undefined") {
     try {
       // Try to use better-sqlite3 for Node.js environments
-      const DatabaseModule = await import("better-sqlite3");
-      const Database = DatabaseModule.default;
-      db = new Database(":memory:") as any;
+      const { default: SQLite } = await import("better-sqlite3");
+      const mem = new SQLite(":memory:");
+
+      // Adapter to make better-sqlite3 compatible with D1 API
+      db = {
+        prepare: (q: string) => {
+          const s = mem.prepare(q);
+          return {
+            bind: (...params: any[]) => ({
+              first: () => Promise.resolve(s.get(...params)),
+              run: () => Promise.resolve(s.run(...params)),
+              all: () => Promise.resolve(s.all(...params)),
+            }),
+          };
+        },
+        exec: (q: string) => Promise.resolve(mem.exec(q)),
+      };
     } catch (error) {
       console.warn(
         "better-sqlite3 not available, database operations will fail in Node.js"

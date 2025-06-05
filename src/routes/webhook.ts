@@ -39,34 +39,41 @@ router.post("/", async (c) => {
       return c.json({ received: true, message: "Already processed" });
     }
 
-    // Mark event as being processed
-    await markEventProcessed({ eventId: event.id, eventType: event.type });
+    let processed = false;
 
-    // Handle different event types
-    switch (event.type) {
-      case "checkout.session.completed": {
-        const session = event.data.object as Stripe.Checkout.Session;
-        await handleCheckoutCompleted({ session });
-        break;
+    try {
+      // Handle different event types
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object as Stripe.Checkout.Session;
+          await handleCheckoutCompleted({ session });
+          break;
+        }
+
+        case "payment_intent.succeeded": {
+          const paymentIntent = event.data.object as Stripe.PaymentIntent;
+          await handlePaymentSucceeded({ paymentIntent });
+          break;
+        }
+
+        case "payment_intent.payment_failed": {
+          const paymentIntent = event.data.object as Stripe.PaymentIntent;
+          await handlePaymentFailed({ paymentIntent });
+          break;
+        }
+
+        default:
+          console.log(`Unhandled event type: ${event.type}`);
       }
 
-      case "payment_intent.succeeded": {
-        const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        await handlePaymentSucceeded({ paymentIntent });
-        break;
+      processed = true;
+      return c.json({ received: true });
+    } finally {
+      // Mark event as processed only after successful handling
+      if (processed) {
+        await markEventProcessed({ eventId: event.id, eventType: event.type });
       }
-
-      case "payment_intent.payment_failed": {
-        const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        await handlePaymentFailed({ paymentIntent });
-        break;
-      }
-
-      default:
-        console.log(`Unhandled event type: ${event.type}`);
     }
-
-    return c.json({ received: true });
   } catch (error) {
     console.error("Webhook error:", error);
 

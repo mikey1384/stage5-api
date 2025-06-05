@@ -24,10 +24,9 @@ app.use(
   "*",
   cors({
     origin: (origin, c) => {
-      const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",") || [
-        "https://stage5.tools",
-        "http://localhost:3000",
-      ];
+      const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",").map((o) =>
+        o.trim()
+      ) || ["https://stage5.tools", "http://localhost:3000"];
 
       if (!origin || allowedOrigins.includes(origin)) {
         return origin || "*";
@@ -90,7 +89,7 @@ app.onError((err, c) => {
 // Initialize database (for Cloudflare Workers)
 const initializeApp = async (env?: Bindings) => {
   if (env?.DB) {
-    initDatabase({ database: env.DB });
+    await initDatabase({ database: env.DB });
     await createTables();
   }
 };
