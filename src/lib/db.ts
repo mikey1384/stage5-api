@@ -29,33 +29,8 @@ export const initDatabase = async ({ database }: { database?: Database }) => {
     return;
   }
 
-  // Fallback to in-memory SQLite for local development/testing
-  if (!database && typeof process !== "undefined") {
-    try {
-      // Try to use better-sqlite3 for Node.js environments
-      const { default: SQLite } = await import("better-sqlite3");
-      const mem = new SQLite(":memory:");
-
-      // Adapter to make better-sqlite3 compatible with D1 API
-      db = {
-        prepare: (q: string) => {
-          const s = mem.prepare(q);
-          return {
-            bind: (...params: any[]) => ({
-              first: () => Promise.resolve(s.get(...params)),
-              run: () => Promise.resolve(s.run(...params)),
-              all: () => Promise.resolve(s.all(...params)),
-            }),
-          };
-        },
-        exec: (q: string) => Promise.resolve(mem.exec(q)),
-      };
-    } catch (error) {
-      console.warn(
-        "better-sqlite3 not available, database operations will fail in Node.js"
-      );
-    }
-  }
+  // For Workers environment without database binding, just warn
+  console.warn("No database provided to initDatabase");
 };
 
 // Create tables if they don't exist

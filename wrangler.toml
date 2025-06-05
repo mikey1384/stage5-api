@@ -1,25 +1,19 @@
 name = "stage5-api"
-main = "src/index.ts"
-compatibility_date = "2024-01-01"
+main = "src/index-minimal.ts"
+compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
-[env.production]
-name = "stage5-api"
-
-[env.staging]
-name = "stage5-api-staging"
-
-# D1 Database binding
-[[d1_databases]]
-binding = "DB"
-database_name = "stage5-credits"
-database_id = "your-database-id-here"
-
-# Environment variables (set these in Cloudflare dashboard)
+# Environment variables (runtime-accessed ENV)
 [vars]
 UI_ORIGIN = "https://stage5.tools"
 ALLOWED_ORIGINS = "https://stage5.tools,http://localhost:3000"
 STRIPE_LIVE = "false"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "stage5_db"
+database_id = "84286ce2-3c1f-45ba-8183-a8540bd5b32b"
 
 # Secrets (set these using `wrangler secret put`)
 # STRIPE_SECRET_KEY
