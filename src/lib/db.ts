@@ -29,17 +29,20 @@ export const ensureDatabase = async (env: { DB: D1Database }) => {
     db = env.DB; // ① bind the Worker's D1 instance
   }
   if (!tablesCreated) {
-    // ② run migrations exactly once
+    // ② run migrations exactly once - split into separate exec() calls
     await db.exec(`
       CREATE TABLE IF NOT EXISTS credits (
         device_id TEXT PRIMARY KEY,
         minutes_remaining INTEGER NOT NULL DEFAULT 0,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       );
+    `);
+
+    await db.exec(`
       CREATE TABLE IF NOT EXISTS processed_events (
         event_id TEXT PRIMARY KEY,
         event_type TEXT NOT NULL,
-        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        processed_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       );
     `);
     tablesCreated = true;
