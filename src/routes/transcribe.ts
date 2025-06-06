@@ -53,6 +53,7 @@ router.post("/", async (c) => {
     const file = formData.get("file");
     const model = formData.get("model")?.toString() || "whisper-1";
     const language = formData.get("language")?.toString();
+    const prompt = formData.get("prompt")?.toString();
     const response_format = "verbose_json";
 
     if (!(file instanceof File)) {
@@ -67,7 +68,9 @@ router.post("/", async (c) => {
       file,
       model,
       language,
+      prompt,
       response_format,
+      timestamp_granularities: ["word", "segment"],
     });
 
     const duration = (transcription as any).duration;

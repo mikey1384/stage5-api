@@ -2,10 +2,7 @@ import { Hono, Next } from "hono";
 import { z } from "zod";
 import OpenAI from "openai";
 import { Context } from "hono";
-import {
-  getUserByApiKey,
-  deductCredits, // Using the general deductCredits function
-} from "../lib/db";
+import { getUserByApiKey, deductCredits } from "../lib/db";
 import { cors } from "hono/cors";
 
 type Bindings = {
