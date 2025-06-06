@@ -18,7 +18,7 @@ export const packs: Record<PackId, Pack> = {
     id: "HOUR_5",
     name: "Standard Credit Pack",
     price: 1000, // $10.00
-    stripePriceId: "price_1PEXQyRxH3a5E6S7kL5zJ8bF", // Replace with your actual Stripe Price ID
+    stripePriceId: "price_1RUh1SHrR3MuIlfbCgVgiZMS", // ← new ID
     credits: 250000,
     description: "250,000 credits, enough for about 5 hours of typical use.",
   },
