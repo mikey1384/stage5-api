@@ -29,16 +29,14 @@ router.get("/:deviceId", async (c) => {
     if (!credits) {
       return c.json({
         deviceId,
-        minutesRemaining: 0,
-        hasCredits: false,
+        creditBalance: 0,
         updatedAt: null,
       });
     }
 
     return c.json({
       deviceId: credits.device_id,
-      minutesRemaining: credits.minutes_remaining,
-      hasCredits: credits.minutes_remaining > 0,
+      creditBalance: credits.credit_balance,
       updatedAt: credits.updated_at,
     });
   } catch (error) {
@@ -55,7 +53,9 @@ router.get("/:deviceId", async (c) => {
 
 // Deduct credits (for internal use by translation service)
 const deductCreditsSchema = z.object({
-  minutes: z.number().min(1).max(1440), // Max 24 hours per request
+  transcriptionMinutes: z.number().min(0),
+  translationInputTokens: z.number().min(0),
+  translationOutputTokens: z.number().min(0),
   reason: z.string().optional(),
 });
 
@@ -79,23 +79,33 @@ router.post("/:deviceId/deduct", async (c) => {
 
   try {
     const body = await c.req.json();
-    const { minutes, reason } = deductCreditsSchema.parse(body);
+    const {
+      transcriptionMinutes,
+      translationInputTokens,
+      translationOutputTokens,
+      reason,
+    } = deductCreditsSchema.parse(body);
 
-    const success = await deductCredits({ deviceId, minutes });
+    const success = await deductCredits({
+      deviceId,
+      transcriptionMinutes,
+      translationInputTokens,
+      translationOutputTokens,
+    });
 
     if (!success) {
       return c.json(
         {
           error: "Insufficient credits",
-          message: `Cannot deduct ${minutes} minutes. Check available credits.`,
+          message: "Failed to deduct credits. Check available balance.",
         },
-        402
-      ); // Payment Required
+        402 // Payment Required
+      );
     }
 
     console.log(
-      `Deducted ${minutes} minutes from device ${deviceId}${
-        reason ? ` (${reason})` : ""
+      `Deducted credits from device ${deviceId}${
+        reason ? ` for ${reason}` : ""
       }`
     );
 
@@ -104,8 +114,7 @@ router.post("/:deviceId/deduct", async (c) => {
 
     return c.json({
       success: true,
-      deductedMinutes: minutes,
-      remainingMinutes: updatedCredits?.minutes_remaining || 0,
+      newBalance: updatedCredits?.credit_balance || 0,
       reason,
     });
   } catch (error) {

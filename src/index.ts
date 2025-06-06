@@ -6,6 +6,8 @@ import { prettyJSON } from "hono/pretty-json";
 import paymentsRouter from "./routes/payments";
 import webhookRouter from "./routes/webhook";
 import creditsRouter from "./routes/credits";
+import transcribeRouter from "./routes/transcribe";
+import translateRouter from "./routes/translate";
 import { ensureDatabase } from "./lib/db";
 
 // Types for Cloudflare Workers environment
@@ -44,6 +46,8 @@ app.get("/health", (c) => c.json({ status: "ok", ts: Date.now() }));
 app.route("/payments", paymentsRouter);
 app.route("/credits", creditsRouter);
 app.route("/stripe/webhook", webhookRouter);
+app.route("/transcribe", transcribeRouter);
+app.route("/translate", translateRouter);
 
 // 404 handler
 app.notFound((c) => {

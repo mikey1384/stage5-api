@@ -1,9 +1,9 @@
-import { packs, type PackId } from "../types/packs";
+import { type PackId } from "../types/packs";
 
 // Types for database operations
 export interface CreditRecord {
   device_id: string;
-  minutes_remaining: number;
+  credit_balance: number;
   updated_at: string;
 }
 
@@ -31,7 +31,7 @@ export const ensureDatabase = async (env: { DB: D1Database }) => {
   if (!tablesCreated) {
     // ② run migrations exactly once - single-line to avoid D1 newline issues
     await db.exec(
-      "CREATE TABLE IF NOT EXISTS credits(device_id TEXT PRIMARY KEY, minutes_remaining INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+      "CREATE TABLE IF NOT EXISTS credits(device_id TEXT PRIMARY KEY, credit_balance INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
     );
 
     await db.exec(
@@ -104,6 +104,8 @@ export const getCredits = async ({
   }
 };
 
+const CREDIT_PACK_AMOUNT = 250000;
+
 // Add credits to a device (upsert)
 export const creditDevice = async ({
   deviceId,
@@ -114,48 +116,82 @@ export const creditDevice = async ({
 }): Promise<void> => {
   if (!db) throw new Error("Database not initialized");
 
-  const pack = packs[packId];
-  if (!pack) {
-    throw new Error(`Invalid pack ID: ${packId}`);
+  if (packId !== "HOUR_5") {
+    throw new Error(`Invalid pack ID for credit system: ${packId}`);
   }
 
   try {
     const stmt = db.prepare(`
-      INSERT INTO credits (device_id, minutes_remaining, updated_at)
+      INSERT INTO credits (device_id, credit_balance, updated_at)
       VALUES (?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(device_id) DO UPDATE SET
-        minutes_remaining = minutes_remaining + ?,
+        credit_balance = credit_balance + ?,
         updated_at = CURRENT_TIMESTAMP
     `);
 
-    await stmt.bind(deviceId, pack.minutes, pack.minutes).run();
-    console.log(`Added ${pack.minutes} minutes to device ${deviceId}`);
+    await stmt.bind(deviceId, CREDIT_PACK_AMOUNT, CREDIT_PACK_AMOUNT).run();
+    console.log(`Added ${CREDIT_PACK_AMOUNT} credits to device ${deviceId}`);
   } catch (error) {
     console.error("Error crediting device:", error);
     throw error;
   }
 };
 
-// Deduct credits from a device
+const TRANSCRIPTION_COST_PER_MINUTE = 600;
+const TRANSLATION_COST_PER_1K_INPUT_TOKENS = 200;
+const TRANSLATION_COST_PER_1K_OUTPUT_TOKENS = 800;
+
+interface DeductCreditsParams {
+  deviceId: string;
+  transcriptionMinutes: number;
+  translationInputTokens: number;
+  translationOutputTokens: number;
+}
+
+// Deduct credits from a device based on usage
 export const deductCredits = async ({
   deviceId,
-  minutes,
-}: {
-  deviceId: string;
-  minutes: number;
-}): Promise<boolean> => {
+  transcriptionMinutes,
+  translationInputTokens,
+  translationOutputTokens,
+}: DeductCreditsParams): Promise<boolean> => {
   if (!db) throw new Error("Database not initialized");
+
+  const transcriptionCost = Math.ceil(
+    transcriptionMinutes * TRANSCRIPTION_COST_PER_MINUTE
+  );
+  const translationCost =
+    Math.ceil(translationInputTokens / 1000) *
+      TRANSLATION_COST_PER_1K_INPUT_TOKENS +
+    Math.ceil(translationOutputTokens / 1000) *
+      TRANSLATION_COST_PER_1K_OUTPUT_TOKENS;
+
+  const totalCost = transcriptionCost + translationCost;
+
+  if (totalCost <= 0) {
+    console.log(`No credits to deduct for device ${deviceId}. Usage was zero.`);
+    return true; // Nothing to deduct
+  }
 
   try {
     const stmt = db.prepare(
       `UPDATE credits
-         SET minutes_remaining = minutes_remaining - ?,
-             updated_at        = CURRENT_TIMESTAMP
-       WHERE device_id = ? AND minutes_remaining >= ?`
+         SET credit_balance = credit_balance - ?,
+             updated_at      = CURRENT_TIMESTAMP
+       WHERE device_id = ? AND credit_balance >= ?`
     );
 
-    const res = await stmt.bind(minutes, deviceId, minutes).run();
-    return (res.meta?.changes ?? 0) > 0;
+    const res = await stmt.bind(totalCost, deviceId, totalCost).run();
+
+    if ((res.meta?.changes ?? 0) > 0) {
+      console.log(`Deducted ${totalCost} credits from device ${deviceId}.`);
+      return true;
+    } else {
+      console.warn(
+        `Failed to deduct ${totalCost} credits for device ${deviceId}. Insufficient balance.`
+      );
+      return false;
+    }
   } catch (error) {
     console.error("Error deducting credits:", error);
     throw error;
