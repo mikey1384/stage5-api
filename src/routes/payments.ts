@@ -36,14 +36,14 @@ router.post("/create-session", async (c) => {
       metadata: {
         deviceId,
         packId,
-        minutes: pack.minutes.toString(),
+        credits: pack.credits.toString(),
       },
       customer_creation: "if_required",
       payment_intent_data: {
         metadata: {
           deviceId,
           packId,
-          minutes: pack.minutes.toString(),
+          credits: pack.credits.toString(),
         },
       },
     });
