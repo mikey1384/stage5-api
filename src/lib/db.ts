@@ -1,4 +1,4 @@
-import { type PackId } from "../types/packs";
+import { type PackId, packs } from "../types/packs";
 
 // Types for database operations
 export interface CreditRecord {
@@ -104,8 +104,6 @@ export const getCredits = async ({
   }
 };
 
-const CREDIT_PACK_AMOUNT = 250000;
-
 // Add credits to a device (upsert)
 export const creditDevice = async ({
   deviceId,
@@ -116,9 +114,13 @@ export const creditDevice = async ({
 }): Promise<void> => {
   if (!db) throw new Error("Database not initialized");
 
-  if (packId !== "HOUR_5") {
+  // Get credits amount from pack definition
+  const pack = packs[packId];
+  if (!pack) {
     throw new Error(`Invalid pack ID for credit system: ${packId}`);
   }
+
+  const creditsToAdd = pack.credits;
 
   try {
     const stmt = db.prepare(`
@@ -129,8 +131,10 @@ export const creditDevice = async ({
         updated_at = CURRENT_TIMESTAMP
     `);
 
-    await stmt.bind(deviceId, CREDIT_PACK_AMOUNT, CREDIT_PACK_AMOUNT).run();
-    console.log(`Added ${CREDIT_PACK_AMOUNT} credits to device ${deviceId}`);
+    await stmt.bind(deviceId, creditsToAdd, creditsToAdd).run();
+    console.log(
+      `Added ${creditsToAdd} credits (${packId}) to device ${deviceId}`
+    );
   } catch (error) {
     console.error("Error crediting device:", error);
     throw error;

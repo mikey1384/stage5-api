@@ -31,8 +31,8 @@ router.post("/create-session", async (c) => {
           quantity: 1,
         },
       ],
-      success_url: `${uiOrigin}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${uiOrigin}/?cancelled=1`,
+      success_url: `${uiOrigin}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${uiOrigin}/checkout/cancelled`,
       metadata: {
         deviceId,
         packId,
