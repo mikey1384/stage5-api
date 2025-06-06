@@ -197,3 +197,58 @@ export const deductCredits = async ({
     throw error;
   }
 };
+
+// Get user by API key (which is the device_id)
+export const getUserByApiKey = async ({
+  apiKey,
+}: {
+  apiKey: string;
+}): Promise<CreditRecord | null> => {
+  return getCredits({ deviceId: apiKey });
+};
+
+// Deduct credits for transcription
+export const deductTranscriptionCredits = async ({
+  deviceId,
+  transcriptionDurationSeconds,
+}: {
+  deviceId: string;
+  transcriptionDurationSeconds: number;
+}): Promise<boolean> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const totalCost = Math.ceil(
+    (transcriptionDurationSeconds / 60) * TRANSCRIPTION_COST_PER_MINUTE
+  );
+
+  if (totalCost <= 0) {
+    console.log(`No credits to deduct for device ${deviceId}. Usage was zero.`);
+    return true;
+  }
+
+  try {
+    const stmt = db.prepare(
+      `UPDATE credits
+         SET credit_balance = credit_balance - ?,
+             updated_at      = CURRENT_TIMESTAMP
+       WHERE device_id = ? AND credit_balance >= ?`
+    );
+
+    const res = await stmt.bind(totalCost, deviceId, totalCost).run();
+
+    if ((res.meta?.changes ?? 0) > 0) {
+      console.log(
+        `Deducted ${totalCost} credits from device ${deviceId} for transcription.`
+      );
+      return true;
+    } else {
+      console.warn(
+        `Failed to deduct ${totalCost} credits for device ${deviceId}. Insufficient balance.`
+      );
+      return false;
+    }
+  } catch (error) {
+    console.error("Error deducting transcription credits:", error);
+    throw error;
+  }
+};

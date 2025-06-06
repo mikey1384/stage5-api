@@ -1,13 +1,26 @@
-import { Hono } from "hono";
+import { Hono, Next } from "hono";
 import { z } from "zod";
 import OpenAI from "openai";
+import { Context } from "hono";
+import {
+  getUserByApiKey,
+  deductCredits, // Using the general deductCredits function
+} from "../lib/db";
 import { cors } from "hono/cors";
 
 type Bindings = {
   OPENAI_API_KEY: string;
+  DB: D1Database;
 };
 
-const router = new Hono<{ Bindings: Bindings }>();
+type Variables = {
+  user: {
+    deviceId: string;
+    creditBalance: number;
+  };
+};
+
+const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // Add CORS middleware
 router.use(
@@ -19,21 +32,51 @@ router.use(
   })
 );
 
+// Authentication middleware
+router.use("*", async (c: Context, next: Next) => {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return c.json({ error: "Unauthorized", message: "Missing API key" }, 401);
+  }
+
+  const apiKey = authHeader.substring(7);
+  const user = await getUserByApiKey({ apiKey });
+
+  if (!user) {
+    return c.json({ error: "Unauthorized", message: "Invalid API key" }, 401);
+  }
+
+  c.set("user", {
+    deviceId: user.device_id,
+    creditBalance: user.credit_balance,
+  });
+
+  await next();
+});
+
 const translateSchema = z.object({
   messages: z.array(
     z.object({
-      role: z.enum(["system", "user", "assistant"]),
+      role: z.enum(["user", "system", "assistant"]),
       content: z.string(),
     })
   ),
-  model: z.string().default("gpt-4.1"),
+  model: z.string(),
   temperature: z.number().optional(),
 });
 
-router.post("/translate", async (c) => {
+router.post("/", async (c) => {
+  const user = c.get("user");
+
   try {
     const body = await c.req.json();
-    const { messages, model, temperature } = translateSchema.parse(body);
+    const parsedBody = translateSchema.safeParse(body);
+
+    if (!parsedBody.success) {
+      return c.json({ error: "Invalid request body" }, 400);
+    }
+
+    const { messages, model, temperature } = parsedBody.data;
 
     const openai = new OpenAI({
       apiKey: c.env.OPENAI_API_KEY,
@@ -45,17 +88,28 @@ router.post("/translate", async (c) => {
       temperature,
     });
 
-    return c.json(completion);
-  } catch (error) {
-    console.error("Error creating translation:", error);
+    const usage = completion.usage;
+    if (!usage) {
+      console.error("Could not get usage from translation result");
+      return c.json(completion); // Return result anyway, but don't charge
+    }
 
-    if (error instanceof z.ZodError) {
-      return c.json(
-        { error: "Invalid request data", details: error.errors },
-        400
+    const success = await deductCredits({
+      deviceId: user.deviceId,
+      transcriptionMinutes: 0,
+      translationInputTokens: usage.prompt_tokens,
+      translationOutputTokens: usage.completion_tokens,
+    });
+
+    if (!success) {
+      console.error(
+        `CRITICAL: Failed to deduct credits for user ${user.deviceId} after a successful translation.`
       );
     }
 
+    return c.json(completion);
+  } catch (error) {
+    console.error("Error creating translation:", error);
     return c.json(
       {
         error: "Failed to create translation",
