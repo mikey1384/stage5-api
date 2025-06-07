@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { getCredits, deductCredits } from "../lib/db";
-import { CREDITS_PER_HOUR } from "../types/packs";
+import { getCredits } from "../lib/db";
+import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
 
 const router = new Hono();
 
@@ -32,18 +32,18 @@ router.get("/:deviceId", async (c) => {
         deviceId,
         creditBalance: 0,
         hoursBalance: 0,
-        creditsPerHour: CREDITS_PER_HOUR,
+        creditsPerHour: CREDITS_PER_AUDIO_HOUR,
         updatedAt: null,
       });
     }
 
-    const hoursBalance = credits.credit_balance / CREDITS_PER_HOUR;
+    const hoursBalance = credits.credit_balance / CREDITS_PER_AUDIO_HOUR;
 
     return c.json({
       deviceId: credits.device_id,
       creditBalance: credits.credit_balance,
       hoursBalance: hoursBalance,
-      creditsPerHour: CREDITS_PER_HOUR,
+      creditsPerHour: CREDITS_PER_AUDIO_HOUR,
       updatedAt: credits.updated_at,
     });
   } catch (error) {
@@ -93,37 +93,17 @@ router.post("/:deviceId/deduct", async (c) => {
       reason,
     } = deductCreditsSchema.parse(body);
 
-    const success = await deductCredits({
-      deviceId,
-      transcriptionMinutes,
-      translationInputTokens,
-      translationOutputTokens,
-    });
-
-    if (!success) {
-      return c.json(
-        {
-          error: "Insufficient credits",
-          message: "Failed to deduct credits. Check available balance.",
-        },
-        402 // Payment Required
-      );
-    }
-
-    console.log(
-      `Deducted credits from device ${deviceId}${
-        reason ? ` for ${reason}` : ""
-      }`
+    // Note: This endpoint is deprecated. Credit deduction now happens
+    // directly in the translate and transcribe routes using the new
+    // cost calculation functions.
+    return c.json(
+      {
+        error: "Deprecated endpoint",
+        message:
+          "Credit deduction now happens automatically in translate/transcribe endpoints",
+      },
+      410 // Gone
     );
-
-    // Return updated credits
-    const updatedCredits = await getCredits({ deviceId });
-
-    return c.json({
-      success: true,
-      newBalance: updatedCredits?.credit_balance || 0,
-      reason,
-    });
   } catch (error) {
     console.error("Error deducting credits:", error);
 

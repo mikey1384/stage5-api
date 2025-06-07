@@ -75,6 +75,11 @@ router.post("/", async (c) => {
 
     const { messages, model, temperature } = parsedBody.data;
 
+    // Server-side model guard
+    if (model !== "gpt-4.1") {
+      return c.json({ error: "Only model gpt-4.1 is allowed" }, 400);
+    }
+
     const openai = new OpenAI({
       apiKey: c.env.OPENAI_API_KEY,
     });

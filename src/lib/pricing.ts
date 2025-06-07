@@ -11,3 +11,7 @@ export const MODEL_PRICES = {
     perSecond: 0.006 / 60, // 0.0001
   },
 } as const;
+
+export const CREDITS_PER_AUDIO_HOUR = Math.round(
+  (60 * 60 * MODEL_PRICES["whisper-1"].perSecond * MARGIN) / CREDIT_USD
+); // 17 999.999… → 18 000
