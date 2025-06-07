@@ -23,6 +23,12 @@ router.post("/", async (c) => {
     // Get raw body as pristine bytes (no middleware has consumed it now)
     const rawBody = await c.req.arrayBuffer();
 
+    // TEMP - verify webhook secret (remove after confirmation)
+    console.log(
+      "Using webhook secret prefix:",
+      c.env.STRIPE_WEBHOOK_SECRET.slice(0, 8)
+    );
+
     // Get Stripe instance and construct webhook event
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
     const event = await stripe.webhooks.constructEventAsync(
