@@ -20,13 +20,13 @@ router.post("/", async (c) => {
   }
 
   try {
-    // Get raw body as Uint8Array (constructEventAsync accepts Uint8Array | Buffer)
-    const rawBody = new Uint8Array(await c.req.arrayBuffer());
+    // Get raw body as string - this is the canonical, untouched payload
+    const rawBody = await c.req.text();
 
     // Get Stripe instance and construct webhook event
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
     const event = await stripe.webhooks.constructEventAsync(
-      rawBody as any,
+      rawBody,
       signature,
       c.env.STRIPE_WEBHOOK_SECRET
     );
