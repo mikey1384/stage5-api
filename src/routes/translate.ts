@@ -2,7 +2,7 @@ import { Hono, Next } from "hono";
 import { z } from "zod";
 import OpenAI from "openai";
 import { Context } from "hono";
-import { getUserByApiKey, deductCredits } from "../lib/db";
+import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
 import { cors } from "hono/cors";
 
 type Bindings = {
@@ -91,11 +91,10 @@ router.post("/", async (c) => {
       return c.json(completion); // Return result anyway, but don't charge
     }
 
-    const success = await deductCredits({
+    const success = await deductTranslationCredits({
       deviceId: user.deviceId,
-      transcriptionMinutes: 0,
-      translationInputTokens: usage.prompt_tokens,
-      translationOutputTokens: usage.completion_tokens,
+      promptTokens: usage.prompt_tokens,
+      completionTokens: usage.completion_tokens,
     });
 
     if (!success) {

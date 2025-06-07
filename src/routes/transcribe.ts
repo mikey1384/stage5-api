@@ -81,7 +81,7 @@ router.post("/", async (c) => {
 
     const success = await deductTranscriptionCredits({
       deviceId: user.deviceId,
-      transcriptionDurationSeconds: duration,
+      seconds: duration,
     });
 
     if (!success) {

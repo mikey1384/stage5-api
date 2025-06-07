@@ -1,4 +1,5 @@
 import { type PackId, packs } from "../types/packs";
+import { tokensToCredits, secondsToCredits } from "./cost";
 
 // Types for database operations
 export interface CreditRecord {
@@ -141,67 +142,6 @@ export const creditDevice = async ({
   }
 };
 
-const TRANSCRIPTION_COST_PER_MINUTE = 600;
-const TRANSLATION_COST_PER_1K_INPUT_TOKENS = 200;
-const TRANSLATION_COST_PER_1K_OUTPUT_TOKENS = 800;
-
-interface DeductCreditsParams {
-  deviceId: string;
-  transcriptionMinutes: number;
-  translationInputTokens: number;
-  translationOutputTokens: number;
-}
-
-// Deduct credits from a device based on usage
-export const deductCredits = async ({
-  deviceId,
-  transcriptionMinutes,
-  translationInputTokens,
-  translationOutputTokens,
-}: DeductCreditsParams): Promise<boolean> => {
-  if (!db) throw new Error("Database not initialized");
-
-  const transcriptionCost = Math.ceil(
-    transcriptionMinutes * TRANSCRIPTION_COST_PER_MINUTE
-  );
-  const translationCost =
-    Math.ceil(translationInputTokens / 1000) *
-      TRANSLATION_COST_PER_1K_INPUT_TOKENS +
-    Math.ceil(translationOutputTokens / 1000) *
-      TRANSLATION_COST_PER_1K_OUTPUT_TOKENS;
-
-  const totalCost = transcriptionCost + translationCost;
-
-  if (totalCost <= 0) {
-    console.log(`No credits to deduct for device ${deviceId}. Usage was zero.`);
-    return true; // Nothing to deduct
-  }
-
-  try {
-    const stmt = db.prepare(
-      `UPDATE credits
-         SET credit_balance = credit_balance - ?,
-             updated_at      = CURRENT_TIMESTAMP
-       WHERE device_id = ? AND credit_balance >= ?`
-    );
-
-    const res = await stmt.bind(totalCost, deviceId, totalCost).run();
-
-    if ((res.meta?.changes ?? 0) > 0) {
-      console.log(`Deducted ${totalCost} credits from device ${deviceId}.`);
-      return true;
-    } else {
-      console.warn(
-        `Failed to deduct ${totalCost} credits for device ${deviceId}. Insufficient balance.`
-      );
-      return false;
-    }
-  } catch (error) {
-    console.error("Error deducting credits:", error);
-    throw error;
-  }
-};
-
 // Get user by API key (which is the device_id)
 export const getUserByApiKey = async ({
   apiKey,
@@ -211,21 +151,14 @@ export const getUserByApiKey = async ({
   return getCredits({ deviceId: apiKey });
 };
 
-// Deduct credits for transcription
-export const deductTranscriptionCredits = async ({
-  deviceId,
-  transcriptionDurationSeconds,
-}: {
-  deviceId: string;
-  transcriptionDurationSeconds: number;
-}): Promise<boolean> => {
+// Helper function for updating balance
+const updateBalance = async (
+  deviceId: string,
+  spend: number
+): Promise<boolean> => {
   if (!db) throw new Error("Database not initialized");
 
-  const totalCost = Math.ceil(
-    (transcriptionDurationSeconds / 60) * TRANSCRIPTION_COST_PER_MINUTE
-  );
-
-  if (totalCost <= 0) {
+  if (spend <= 0) {
     console.log(`No credits to deduct for device ${deviceId}. Usage was zero.`);
     return true;
   }
@@ -238,21 +171,47 @@ export const deductTranscriptionCredits = async ({
        WHERE device_id = ? AND credit_balance >= ?`
     );
 
-    const res = await stmt.bind(totalCost, deviceId, totalCost).run();
+    const res = await stmt.bind(spend, deviceId, spend).run();
 
     if ((res.meta?.changes ?? 0) > 0) {
-      console.log(
-        `Deducted ${totalCost} credits from device ${deviceId} for transcription.`
-      );
+      console.log(`Deducted ${spend} credits from device ${deviceId}.`);
       return true;
     } else {
       console.warn(
-        `Failed to deduct ${totalCost} credits for device ${deviceId}. Insufficient balance.`
+        `Failed to deduct ${spend} credits for device ${deviceId}. Insufficient balance.`
       );
       return false;
     }
   } catch (error) {
-    console.error("Error deducting transcription credits:", error);
+    console.error("Error deducting credits:", error);
     throw error;
   }
+};
+
+// New deduction functions using the cost calculation helpers
+export const deductTranslationCredits = async ({
+  deviceId,
+  promptTokens,
+  completionTokens,
+}: {
+  deviceId: string;
+  promptTokens: number;
+  completionTokens: number;
+}): Promise<boolean> => {
+  const spend = tokensToCredits({
+    prompt: promptTokens,
+    completion: completionTokens,
+  });
+  return updateBalance(deviceId, spend);
+};
+
+export const deductTranscriptionCredits = async ({
+  deviceId,
+  seconds,
+}: {
+  deviceId: string;
+  seconds: number;
+}): Promise<boolean> => {
+  const spend = secondsToCredits({ seconds });
+  return updateBalance(deviceId, spend);
 };
