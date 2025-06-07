@@ -20,14 +20,13 @@ router.post("/", async (c) => {
   }
 
   try {
-    // Get raw body as ArrayBuffer
-    const rawBody = await c.req.arrayBuffer();
-    const bodyBuffer = Buffer.from(rawBody);
+    // Get raw body as Uint8Array (constructEventAsync accepts Uint8Array | Buffer)
+    const rawBody = new Uint8Array(await c.req.arrayBuffer());
 
     // Get Stripe instance and construct webhook event
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
-    const event = stripe.webhooks.constructEvent(
-      bodyBuffer,
+    const event = await stripe.webhooks.constructEventAsync(
+      rawBody as any,
       signature,
       c.env.STRIPE_WEBHOOK_SECRET
     );
@@ -64,7 +63,8 @@ router.post("/", async (c) => {
         }
 
         default:
-          console.log(`Unhandled event type: ${event.type}`);
+          // Unhandled event type - will return success below
+          break;
       }
 
       processed = true;
