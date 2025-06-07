@@ -8,6 +8,7 @@ import webhookRouter from "./routes/webhook";
 import creditsRouter from "./routes/credits";
 import transcribeRouter from "./routes/transcribe";
 import translateRouter from "./routes/translate";
+import adminRouter from "./routes/admin";
 import { ensureDatabase } from "./lib/db";
 
 // Types for Cloudflare Workers environment
@@ -16,6 +17,7 @@ type Bindings = {
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   ALLOWED_ORIGINS?: string;
+  ADMIN_DEVICE_ID?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -50,6 +52,7 @@ app.route("/payments", paymentsRouter);
 app.route("/credits", creditsRouter);
 app.route("/transcribe", transcribeRouter);
 app.route("/translate", translateRouter);
+app.route("/admin", adminRouter);
 
 // Pretty printing only AFTER routes so it never eats request bodies
 app.use("*", prettyJSON());
