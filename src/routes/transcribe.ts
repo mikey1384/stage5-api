@@ -54,6 +54,11 @@ router.post("/", async (c) => {
     const model = formData.get("model")?.toString() || "whisper-1";
     const language = formData.get("language")?.toString();
     const prompt = formData.get("prompt")?.toString();
+
+    // Server-side model guard
+    if (model !== "whisper-1") {
+      return c.json({ error: "Only whisper-1 is allowed" }, 400);
+    }
     const response_format = "verbose_json";
 
     if (!(file instanceof File)) {
