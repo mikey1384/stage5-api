@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { getCredits } from "../lib/db";
+import { getCredits, getLedgerEntries } from "../lib/db";
 import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
 
 const router = new Hono();
@@ -58,15 +58,8 @@ router.get("/:deviceId", async (c) => {
   }
 });
 
-// Deduct credits (for internal use by translation service)
-const deductCreditsSchema = z.object({
-  transcriptionMinutes: z.number().min(0),
-  translationInputTokens: z.number().min(0),
-  translationOutputTokens: z.number().min(0),
-  reason: z.string().optional(),
-});
-
-router.post("/:deviceId/deduct", async (c) => {
+// Get ledger entries for a device
+router.get("/:deviceId/ledger", async (c) => {
   const deviceId = c.req.param("deviceId");
 
   // Validate UUID format
@@ -85,41 +78,13 @@ router.post("/:deviceId/deduct", async (c) => {
   }
 
   try {
-    const body = await c.req.json();
-    const {
-      transcriptionMinutes,
-      translationInputTokens,
-      translationOutputTokens,
-      reason,
-    } = deductCreditsSchema.parse(body);
-
-    // Note: This endpoint is deprecated. Credit deduction now happens
-    // directly in the translate and transcribe routes using the new
-    // cost calculation functions.
-    return c.json(
-      {
-        error: "Deprecated endpoint",
-        message:
-          "Credit deduction now happens automatically in translate/transcribe endpoints",
-      },
-      410 // Gone
-    );
+    const rows = await getLedgerEntries({ deviceId });
+    return c.json(rows);
   } catch (error) {
-    console.error("Error deducting credits:", error);
-
-    if (error instanceof z.ZodError) {
-      return c.json(
-        {
-          error: "Invalid request data",
-          details: error.errors,
-        },
-        400
-      );
-    }
-
+    console.error("Error fetching ledger entries:", error);
     return c.json(
       {
-        error: "Failed to deduct credits",
+        error: "Failed to fetch ledger entries",
         message: error instanceof Error ? error.message : "Unknown error",
       },
       500

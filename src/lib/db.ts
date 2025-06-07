@@ -1,5 +1,5 @@
 import { type PackId, packs } from "../types/packs";
-import { tokensToCredits, secondsToCredits } from "./cost";
+import { tokensToCredits, secondsToCredits } from "./pricing";
 
 // Types for database operations
 export interface CreditRecord {
@@ -37,6 +37,11 @@ export const ensureDatabase = async (env: { DB: D1Database }) => {
 
     await db.exec(
       "CREATE TABLE IF NOT EXISTS processed_events(event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, processed_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    );
+
+    // Add credit ledger table
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS credit_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, delta INTEGER NOT NULL, reason TEXT NOT NULL, meta TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
     );
 
     tablesCreated = true;
@@ -109,9 +114,11 @@ export const getCredits = async ({
 export const creditDevice = async ({
   deviceId,
   packId,
+  isAdminReset = false,
 }: {
   deviceId: string;
   packId: PackId;
+  isAdminReset?: boolean;
 }): Promise<void> => {
   if (!db) throw new Error("Database not initialized");
 
@@ -133,6 +140,15 @@ export const creditDevice = async ({
     `);
 
     await stmt.bind(deviceId, creditsToAdd, creditsToAdd).run();
+
+    // Record ledger entry for pack top-up or admin reset
+    await recordLedger({
+      deviceId,
+      delta: +creditsToAdd,
+      reason: isAdminReset ? "ADMIN_RESET" : `PACK_${packId.toUpperCase()}`,
+      meta: isAdminReset ? { pack: packId } : undefined,
+    });
+
     console.log(
       `Added ${creditsToAdd} credits (${packId}) to device ${deviceId}`
     );
@@ -154,7 +170,8 @@ export const getUserByApiKey = async ({
 // Helper function for updating balance
 const updateBalance = async (
   deviceId: string,
-  spend: number
+  spend: number,
+  { reason, meta }: { reason: string; meta?: unknown }
 ): Promise<boolean> => {
   if (!db) throw new Error("Database not initialized");
 
@@ -175,6 +192,15 @@ const updateBalance = async (
 
     if ((res.meta?.changes ?? 0) > 0) {
       console.log(`Deducted ${spend} credits from device ${deviceId}.`);
+
+      // Record ledger entry for deduction
+      await recordLedger({
+        deviceId,
+        delta: -spend,
+        reason,
+        meta, // pass in tokens / seconds etc.
+      });
+
       return true;
     } else {
       console.warn(
@@ -202,7 +228,10 @@ export const deductTranslationCredits = async ({
     prompt: promptTokens,
     completion: completionTokens,
   });
-  return updateBalance(deviceId, spend);
+  return updateBalance(deviceId, spend, {
+    reason: "TRANSLATE",
+    meta: { promptTokens, completionTokens },
+  });
 };
 
 export const deductTranscriptionCredits = async ({
@@ -213,5 +242,57 @@ export const deductTranscriptionCredits = async ({
   seconds: number;
 }): Promise<boolean> => {
   const spend = secondsToCredits({ seconds });
-  return updateBalance(deviceId, spend);
+  return updateBalance(deviceId, spend, {
+    reason: "TRANSCRIBE",
+    meta: { seconds },
+  });
+};
+
+// NEW helper – generic ledger insert
+const recordLedger = async ({
+  deviceId,
+  delta,
+  reason,
+  meta,
+}: {
+  deviceId: string;
+  delta: number; // + or - credits
+  reason: string; // "PACK_HOUR_5" | "TRANSLATE" | "TRANSCRIBE" | …
+  meta?: unknown; // optional blob -> JSON.stringify()
+}): Promise<void> => {
+  if (!db) throw new Error("DB not initialised");
+
+  await db
+    .prepare(
+      `INSERT INTO credit_ledger (device_id, delta, reason, meta)
+       VALUES (?, ?, ?, ?)`
+    )
+    .bind(deviceId, delta, reason, JSON.stringify(meta ?? null))
+    .run();
+};
+
+// Get ledger entries for a device
+export const getLedgerEntries = async ({
+  deviceId,
+  limit = 100,
+}: {
+  deviceId: string;
+  limit?: number;
+}): Promise<any[]> => {
+  if (!db) throw new Error("Database not initialized");
+
+  try {
+    const stmt = db.prepare(
+      `SELECT delta, reason, meta, created_at 
+       FROM credit_ledger 
+       WHERE device_id = ? 
+       ORDER BY id DESC 
+       LIMIT ?`
+    );
+    const result = await stmt.bind(deviceId, limit).all();
+    return result.results || [];
+  } catch (error) {
+    console.error("Error getting ledger entries:", error);
+    throw error;
+  }
 };

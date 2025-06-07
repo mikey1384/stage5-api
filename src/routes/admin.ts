@@ -27,7 +27,7 @@ router.post("/reset", async (c) => {
       return c.json({ error: "invalid-pack" }, 400);
     }
 
-    await creditDevice({ deviceId, packId: pack });
+    await creditDevice({ deviceId, packId: pack, isAdminReset: true });
 
     console.log(
       `Admin reset: Added ${packs[pack].credits} credits to device ${deviceId}`

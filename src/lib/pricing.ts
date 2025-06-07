@@ -12,6 +12,26 @@ export const MODEL_PRICES = {
   },
 } as const;
 
-export const CREDITS_PER_AUDIO_HOUR = Math.round(
-  (60 * 60 * MODEL_PRICES["whisper-1"].perSecond * MARGIN) / CREDIT_USD
-); // 17 999.999… → 18 000
+/** Users should get ≈10 h for a $10 pack → 25 000 credits per h */
+export const CREDITS_PER_AUDIO_HOUR = 25_000;
+
+/* Helpers ------------------------------------------------------*/
+
+export function secondsToCredits({ seconds }: { seconds: number }): number {
+  // Direct conversion: 25,000 credits per hour
+  return Math.ceil(seconds * (CREDITS_PER_AUDIO_HOUR / 3600));
+}
+
+/* Translation stays cost-based, no change needed */
+export function tokensToCredits({
+  prompt,
+  completion,
+}: {
+  prompt: number;
+  completion: number;
+}): number {
+  const usd =
+    prompt * MODEL_PRICES["gpt-4.1"].in +
+    completion * MODEL_PRICES["gpt-4.1"].out;
+  return Math.ceil((usd * MARGIN) / CREDIT_USD);
+}
