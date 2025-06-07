@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { getCredits, deductCredits } from "../lib/db";
+import { CREDITS_PER_HOUR } from "../types/packs";
 
 const router = new Hono();
 
@@ -30,13 +31,19 @@ router.get("/:deviceId", async (c) => {
       return c.json({
         deviceId,
         creditBalance: 0,
+        hoursBalance: 0,
+        creditsPerHour: CREDITS_PER_HOUR,
         updatedAt: null,
       });
     }
 
+    const hoursBalance = credits.credit_balance / CREDITS_PER_HOUR;
+
     return c.json({
       deviceId: credits.device_id,
       creditBalance: credits.credit_balance,
+      hoursBalance: hoursBalance,
+      creditsPerHour: CREDITS_PER_HOUR,
       updatedAt: credits.updated_at,
     });
   } catch (error) {

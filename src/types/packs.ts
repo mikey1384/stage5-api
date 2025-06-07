@@ -3,6 +3,8 @@ export type PackId = (typeof PACK_IDS)[number];
 
 export type DeviceId = string & { __brand: "uuid" };
 
+export const CREDITS_PER_HOUR = 50000;
+
 export interface Pack {
   id: PackId;
   name: string;
