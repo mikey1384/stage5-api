@@ -20,8 +20,8 @@ type Bindings = {
 
 const app = new Hono<{ Bindings: Bindings }>();
 
-// Middleware
-app.use("*", logger(), prettyJSON());
+// Middleware that does NOT consume the body
+app.use("*", logger());
 
 // CORS configuration
 app.use(
@@ -42,12 +42,17 @@ app.use(
 // Health check endpoint
 app.get("/health", (c) => c.json({ status: "ok", ts: Date.now() }));
 
-// Routes
+// Webhook first - needs raw body before any middleware consumes it
+app.route("/stripe/webhook", webhookRouter);
+
+// The rest of the API routes
 app.route("/payments", paymentsRouter);
 app.route("/credits", creditsRouter);
-app.route("/stripe/webhook", webhookRouter);
 app.route("/transcribe", transcribeRouter);
 app.route("/translate", translateRouter);
+
+// Pretty printing only AFTER routes so it never eats request bodies
+app.use("*", prettyJSON());
 
 // 404 handler
 app.notFound((c) => {

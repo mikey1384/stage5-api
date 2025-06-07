@@ -20,13 +20,13 @@ router.post("/", async (c) => {
   }
 
   try {
-    // Get raw body as string - this is the canonical, untouched payload
-    const rawBody = await c.req.text();
+    // Get raw body as pristine bytes (no middleware has consumed it now)
+    const rawBody = await c.req.arrayBuffer();
 
     // Get Stripe instance and construct webhook event
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
     const event = await stripe.webhooks.constructEventAsync(
-      rawBody,
+      new Uint8Array(rawBody) as any, // Zero-copy view, TS types need updating
       signature,
       c.env.STRIPE_WEBHOOK_SECRET
     );
