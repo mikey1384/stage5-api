@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { getStripe } from "../lib/stripe";
-import { packs, PACK_IDS, type PackId } from "../types/packs";
+import { packs, PACK_IDS } from "../types/packs";
 
 type Bindings = {
   STRIPE_SECRET_KEY: string;
@@ -27,7 +27,7 @@ router.post("/create-session", async (c) => {
       mode: "payment",
       line_items: [
         {
-          price: pack.stripePrice,
+          price: pack.priceId,
           quantity: 1,
         },
       ],
@@ -81,7 +81,7 @@ router.post("/create-session", async (c) => {
 
 // Get available packs
 router.get("/packs", async (c) => {
-  return c.json({ packs: Object.values(packs) });
+  return c.json({ packs });
 });
 
 export default router;

@@ -257,7 +257,7 @@ const recordLedger = async ({
 }: {
   deviceId: string;
   delta: number; // + or - credits
-  reason: string; // "PACK_HOUR_5" | "TRANSLATE" | "TRANSCRIBE" | …
+  reason: string; // "PACK_HOUR_1_5" | "PACK_HOUR_3" | "PACK_HOUR_24" | "TRANSLATE" | "TRANSCRIBE" | …
   meta?: unknown; // optional blob -> JSON.stringify()
 }): Promise<void> => {
   if (!db) throw new Error("DB not initialised");
