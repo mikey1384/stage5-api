@@ -1,4 +1,4 @@
-export const USD_PER_CREDIT = 0.00004; // $10 pack → 250,000 credits. Starter ($5) = 125k, Pro ($50) = 2M
+export const USD_PER_CREDIT = 0.00004; // $10 pack → 300,000 credits. Starter ($5) = 150k, Pro ($50) = 2.4M
 export const MARGIN = 2; // 2× markup  (= 50 000 credits ≈ $2)
 
 export const MODEL_PRICES = {
@@ -12,13 +12,11 @@ export const MODEL_PRICES = {
   },
 } as const;
 
-/** Users should get ≈3 h for a $10 pack → 83 333 credits per h */
-export const CREDITS_PER_AUDIO_HOUR = 83_333;
+export const CREDITS_PER_AUDIO_HOUR = 100_000;
 
 /* Helpers ------------------------------------------------------*/
 
 export function secondsToCredits({ seconds }: { seconds: number }): number {
-  // Direct conversion: 83,333 credits per hour
   return Math.ceil(seconds * (CREDITS_PER_AUDIO_HOUR / 3600));
 }
 
