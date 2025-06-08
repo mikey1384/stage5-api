@@ -21,11 +21,11 @@ const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // Add CORS middleware
 router.use(
-  "/translate",
+  "*",
   cors({
     origin: "*", // Restrict in production
     allowMethods: ["POST", "OPTIONS"],
-    allowHeaders: ["Content-Type"],
+    allowHeaders: ["Content-Type", "Authorization"],
   })
 );
 
@@ -107,6 +107,9 @@ router.post("/", async (c) => {
           402 /* Payment Required */
         );
       }
+    } else {
+      console.error("Could not get usage from translation result");
+      // Return result anyway if we can't determine usage
     }
 
     return c.json(completion);

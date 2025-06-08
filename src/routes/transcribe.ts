@@ -3,6 +3,7 @@ import { z } from "zod";
 import OpenAI from "openai";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranscriptionCredits } from "../lib/db";
+import { cors } from "hono/cors";
 
 type Bindings = {
   OPENAI_API_KEY: string;
@@ -17,6 +18,16 @@ type Variables = {
 };
 
 const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+// Add CORS middleware
+router.use(
+  "*",
+  cors({
+    origin: "*", // Restrict in production
+    allowMethods: ["POST", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
 // Authentication middleware
 router.use("*", async (c: Context, next: Next) => {
@@ -81,9 +92,10 @@ router.post("/", async (c) => {
     /* -------------------------------------------------- */
     /* Deduct by audio length                             */
     /* -------------------------------------------------- */
-    const duration = (transcription as any).duration;
-    if (typeof duration === "number") {
-      const seconds = Math.ceil(duration);
+    const rawDur =
+      (transcription as any).duration ?? (transcription as any).approx_duration;
+    if (typeof rawDur === "number") {
+      const seconds = Math.ceil(rawDur);
       const ok = await deductTranscriptionCredits({
         deviceId: user.deviceId,
         seconds,
@@ -96,7 +108,9 @@ router.post("/", async (c) => {
         );
       }
     } else {
-      console.error("Could not get duration from transcription result");
+      console.error(
+        "Could not get duration from transcription result (checked both duration and approx_duration)"
+      );
       // Return result anyway if we can't determine duration
     }
 
