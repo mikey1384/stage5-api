@@ -3,6 +3,7 @@ import { z } from "zod";
 import OpenAI from "openai";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranscriptionCredits } from "../lib/db";
+import { ALLOWED_TRANSCRIPTION_MODEL } from "../lib/constants";
 import { cors } from "hono/cors";
 
 type Bindings = {
@@ -28,6 +29,9 @@ router.use(
     allowHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+// OPTIONS early-exit (before auth middleware)
+router.options("*", (c) => new Response("", { status: 204 }));
 
 // Authentication middleware
 router.use("*", async (c: Context, next: Next) => {
@@ -67,8 +71,11 @@ router.post("/", async (c) => {
     const prompt = formData.get("prompt")?.toString();
 
     // Server-side model guard
-    if (model !== "whisper-1") {
-      return c.json({ error: "Only whisper-1 is allowed" }, 400);
+    if (model !== ALLOWED_TRANSCRIPTION_MODEL) {
+      return c.json(
+        { error: `Only ${ALLOWED_TRANSCRIPTION_MODEL} is allowed` },
+        400
+      );
     }
     const response_format = "verbose_json";
 

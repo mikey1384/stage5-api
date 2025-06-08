@@ -3,6 +3,7 @@ import { z } from "zod";
 import OpenAI from "openai";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
+import { ALLOWED_TRANSLATION_MODEL } from "../lib/constants";
 import { cors } from "hono/cors";
 
 type Bindings = {
@@ -28,6 +29,9 @@ router.use(
     allowHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+// OPTIONS early-exit (before auth middleware)
+router.options("*", (c) => new Response("", { status: 204 }));
 
 // Authentication middleware
 router.use("*", async (c: Context, next: Next) => {
@@ -70,14 +74,23 @@ router.post("/", async (c) => {
     const parsedBody = translateSchema.safeParse(body);
 
     if (!parsedBody.success) {
-      return c.json({ error: "Invalid request body" }, 400);
+      return c.json(
+        {
+          error: "Invalid request body",
+          details: parsedBody.error.flatten(),
+        },
+        400
+      );
     }
 
     const { messages, model, temperature } = parsedBody.data;
 
     // Server-side model guard
-    if (model !== "gpt-4.1") {
-      return c.json({ error: "Only model gpt-4.1 is allowed" }, 400);
+    if (model !== ALLOWED_TRANSLATION_MODEL) {
+      return c.json(
+        { error: `Only model ${ALLOWED_TRANSLATION_MODEL} is allowed` },
+        400
+      );
     }
 
     const openai = new OpenAI({
