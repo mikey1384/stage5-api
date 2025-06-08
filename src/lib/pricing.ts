@@ -1,4 +1,4 @@
-export const CREDIT_USD = 0.00004; // $10 pack → 250 000 credits
+export const USD_PER_CREDIT = 0.00004; // $10 pack → 250,000 credits. Starter ($5) = 125k, Pro ($50) = 2M
 export const MARGIN = 2; // 2× markup  (= 50 000 credits ≈ $2)
 
 export const MODEL_PRICES = {
@@ -18,7 +18,7 @@ export const CREDITS_PER_AUDIO_HOUR = 83_333;
 /* Helpers ------------------------------------------------------*/
 
 export function secondsToCredits({ seconds }: { seconds: number }): number {
-  // Direct conversion: 25,000 credits per hour
+  // Direct conversion: 83,333 credits per hour
   return Math.ceil(seconds * (CREDITS_PER_AUDIO_HOUR / 3600));
 }
 
@@ -33,5 +33,5 @@ export function tokensToCredits({
   const usd =
     prompt * MODEL_PRICES["gpt-4.1"].in +
     completion * MODEL_PRICES["gpt-4.1"].out;
-  return Math.ceil((usd * MARGIN) / CREDIT_USD);
+  return Math.ceil((usd * MARGIN) / USD_PER_CREDIT);
 }
