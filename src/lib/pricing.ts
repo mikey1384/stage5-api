@@ -12,8 +12,8 @@ export const MODEL_PRICES = {
   },
 } as const;
 
-/** Users should get ≈10 h for a $10 pack → 25 000 credits per h */
-export const CREDITS_PER_AUDIO_HOUR = 25_000;
+/** Users should get ≈3 h for a $10 pack → 83 333 credits per h */
+export const CREDITS_PER_AUDIO_HOUR = 83_333;
 
 /* Helpers ------------------------------------------------------*/
 

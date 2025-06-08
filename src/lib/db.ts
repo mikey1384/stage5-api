@@ -248,7 +248,6 @@ export const deductTranscriptionCredits = async ({
   });
 };
 
-// NEW helper – generic ledger insert
 const recordLedger = async ({
   deviceId,
   delta,
@@ -256,9 +255,9 @@ const recordLedger = async ({
   meta,
 }: {
   deviceId: string;
-  delta: number; // + or - credits
-  reason: string; // "PACK_HOUR_1_5" | "PACK_HOUR_3" | "PACK_HOUR_24" | "TRANSLATE" | "TRANSCRIBE" | …
-  meta?: unknown; // optional blob -> JSON.stringify()
+  delta: number;
+  reason: string;
+  meta?: unknown;
 }): Promise<void> => {
   if (!db) throw new Error("DB not initialised");
 
