@@ -11,6 +11,8 @@ routes = [
 # Environment variables (runtime-accessed ENV)
 [vars]
 ALLOWED_ORIGINS = "https://stage5.tools,http://localhost:3000"
+AUDIO_CREDIT_CALIBRATION = "1"
+TOKEN_CREDIT_CALIBRATION = "1"
 
 # D1 Database binding
 [[d1_databases]]
