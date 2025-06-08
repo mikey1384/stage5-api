@@ -3,7 +3,13 @@ import { z } from "zod";
 import OpenAI from "openai";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
-import { ALLOWED_TRANSLATION_MODEL } from "../lib/constants";
+import {
+  ALLOWED_TRANSLATION_MODEL,
+  MIN_TEMPERATURE,
+  MAX_TEMPERATURE,
+  DEFAULT_TEMPERATURE,
+  API_ERRORS,
+} from "../lib/constants";
 import { cors } from "hono/cors";
 
 type Bindings = {
@@ -30,21 +36,34 @@ router.use(
   })
 );
 
-// OPTIONS early-exit (before auth middleware)
-router.options("*", (c) => new Response("", { status: 204 }));
+// OPTIONS early-exit (before auth middleware) - explicit content-type for Safari
+router.options(
+  "*",
+  (c) =>
+    new Response("", {
+      status: 204,
+      headers: { "Content-Type": "text/plain" },
+    })
+);
 
 // Authentication middleware
 router.use("*", async (c: Context, next: Next) => {
   const authHeader = c.req.header("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json({ error: "Unauthorized", message: "Missing API key" }, 401);
+    return c.json(
+      { error: API_ERRORS.UNAUTHORIZED, message: "Missing API key" },
+      401
+    );
   }
 
   const apiKey = authHeader.substring(7);
   const user = await getUserByApiKey({ apiKey });
 
   if (!user) {
-    return c.json({ error: "Unauthorized", message: "Invalid API key" }, 401);
+    return c.json(
+      { error: API_ERRORS.UNAUTHORIZED, message: "Invalid API key" },
+      401
+    );
   }
 
   c.set("user", {
@@ -76,7 +95,7 @@ router.post("/", async (c) => {
     if (!parsedBody.success) {
       return c.json(
         {
-          error: "Invalid request body",
+          error: API_ERRORS.INVALID_REQUEST,
           details: parsedBody.error.flatten(),
         },
         400
@@ -88,10 +107,19 @@ router.post("/", async (c) => {
     // Server-side model guard
     if (model !== ALLOWED_TRANSLATION_MODEL) {
       return c.json(
-        { error: `Only model ${ALLOWED_TRANSLATION_MODEL} is allowed` },
+        {
+          error: API_ERRORS.INVALID_MODEL,
+          message: `Only model ${ALLOWED_TRANSLATION_MODEL} is allowed`,
+        },
         400
       );
     }
+
+    // Temperature clamping for security
+    const clampedTemperature = Math.min(
+      Math.max(temperature ?? DEFAULT_TEMPERATURE, MIN_TEMPERATURE),
+      MAX_TEMPERATURE
+    );
 
     const openai = new OpenAI({
       apiKey: c.env.OPENAI_API_KEY,
@@ -100,8 +128,11 @@ router.post("/", async (c) => {
     const completion = await openai.chat.completions.create({
       messages,
       model,
-      temperature,
+      temperature: clampedTemperature,
     });
+
+    // Note: OpenAI rate-limit headers would need to be accessed differently
+    // via the raw fetch response, not available in this SDK abstraction
 
     /* -------------------------------------------------- */
     /* Track spend & deduct                               */
@@ -116,7 +147,7 @@ router.post("/", async (c) => {
 
       if (!ok) {
         return c.json(
-          { error: "insufficient-credits" },
+          { error: API_ERRORS.INSUFFICIENT_CREDITS },
           402 /* Payment Required */
         );
       }

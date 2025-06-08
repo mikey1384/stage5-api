@@ -3,7 +3,11 @@ import { z } from "zod";
 import OpenAI from "openai";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranscriptionCredits } from "../lib/db";
-import { ALLOWED_TRANSCRIPTION_MODEL } from "../lib/constants";
+import {
+  ALLOWED_TRANSCRIPTION_MODEL,
+  MAX_FILE_SIZE,
+  API_ERRORS,
+} from "../lib/constants";
 import { cors } from "hono/cors";
 
 type Bindings = {
@@ -30,21 +34,34 @@ router.use(
   })
 );
 
-// OPTIONS early-exit (before auth middleware)
-router.options("*", (c) => new Response("", { status: 204 }));
+// OPTIONS early-exit (before auth middleware) - explicit content-type for Safari
+router.options(
+  "*",
+  (c) =>
+    new Response("", {
+      status: 204,
+      headers: { "Content-Type": "text/plain" },
+    })
+);
 
 // Authentication middleware
 router.use("*", async (c: Context, next: Next) => {
   const authHeader = c.req.header("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json({ error: "Unauthorized", message: "Missing API key" }, 401);
+    return c.json(
+      { error: API_ERRORS.UNAUTHORIZED, message: "Missing API key" },
+      401
+    );
   }
 
   const apiKey = authHeader.substring(7);
   const user = await getUserByApiKey({ apiKey });
 
   if (!user) {
-    return c.json({ error: "Unauthorized", message: "Invalid API key" }, 401);
+    return c.json(
+      { error: API_ERRORS.UNAUTHORIZED, message: "Invalid API key" },
+      401
+    );
   }
 
   c.set("user", {
@@ -53,11 +70,6 @@ router.use("*", async (c: Context, next: Next) => {
   });
 
   await next();
-});
-
-const transcribeSchema = z.object({
-  model: z.string().default("whisper-1"),
-  language: z.string().optional(),
 });
 
 router.post("/", async (c) => {
@@ -70,18 +82,35 @@ router.post("/", async (c) => {
     const language = formData.get("language")?.toString();
     const prompt = formData.get("prompt")?.toString();
 
+    if (!(file instanceof File)) {
+      return c.json(
+        { error: API_ERRORS.INVALID_REQUEST, message: "File is required" },
+        400
+      );
+    }
+
+    // File size limit check
+    if (file.size > MAX_FILE_SIZE) {
+      return c.json(
+        {
+          error: API_ERRORS.FILE_TOO_LARGE,
+          message: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`,
+        },
+        413
+      );
+    }
+
     // Server-side model guard
     if (model !== ALLOWED_TRANSCRIPTION_MODEL) {
       return c.json(
-        { error: `Only ${ALLOWED_TRANSCRIPTION_MODEL} is allowed` },
+        {
+          error: API_ERRORS.INVALID_MODEL,
+          message: `Only ${ALLOWED_TRANSCRIPTION_MODEL} is allowed`,
+        },
         400
       );
     }
     const response_format = "verbose_json";
-
-    if (!(file instanceof File)) {
-      return c.json({ error: "File is required" }, 400);
-    }
 
     const openai = new OpenAI({
       apiKey: c.env.OPENAI_API_KEY,
@@ -110,7 +139,7 @@ router.post("/", async (c) => {
 
       if (!ok) {
         return c.json(
-          { error: "insufficient-credits" },
+          { error: API_ERRORS.INSUFFICIENT_CREDITS },
           402 /* Payment Required */
         );
       }
