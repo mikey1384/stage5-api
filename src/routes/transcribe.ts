@@ -78,25 +78,26 @@ router.post("/", async (c) => {
       timestamp_granularities: ["word", "segment"],
     });
 
+    /* -------------------------------------------------- */
+    /* Deduct by audio length                             */
+    /* -------------------------------------------------- */
     const duration = (transcription as any).duration;
-    if (typeof duration !== "number") {
+    if (typeof duration === "number") {
+      const seconds = Math.ceil(duration);
+      const ok = await deductTranscriptionCredits({
+        deviceId: user.deviceId,
+        seconds,
+      });
+
+      if (!ok) {
+        return c.json(
+          { error: "insufficient-credits" },
+          402 /* Payment Required */
+        );
+      }
+    } else {
       console.error("Could not get duration from transcription result");
-      return c.json(transcription); // Return result anyway, but don't charge
-    }
-
-    const success = await deductTranscriptionCredits({
-      deviceId: user.deviceId,
-      seconds: duration,
-    });
-
-    if (!success) {
-      // This case is important. If deduction fails, the user gets the
-      // transcription but we log it as a billing failure.
-      console.error(
-        `CRITICAL: Failed to deduct credits for user ${user.deviceId} after a successful transcription.`
-      );
-      // You might want to return a special status or the transcription
-      // but with a warning that their balance is too low for future jobs.
+      // Return result anyway if we can't determine duration
     }
 
     return c.json(transcription);

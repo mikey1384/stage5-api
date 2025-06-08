@@ -90,22 +90,23 @@ router.post("/", async (c) => {
       temperature,
     });
 
-    const usage = completion.usage;
-    if (!usage) {
-      console.error("Could not get usage from translation result");
-      return c.json(completion); // Return result anyway, but don't charge
-    }
+    /* -------------------------------------------------- */
+    /* Track spend & deduct                               */
+    /* -------------------------------------------------- */
+    const usage = completion.usage; // { prompt_tokens: 123, completion_tokens: 456 }
+    if (usage) {
+      const ok = await deductTranslationCredits({
+        deviceId: user.deviceId,
+        promptTokens: usage.prompt_tokens ?? 0,
+        completionTokens: usage.completion_tokens ?? 0,
+      });
 
-    const success = await deductTranslationCredits({
-      deviceId: user.deviceId,
-      promptTokens: usage.prompt_tokens,
-      completionTokens: usage.completion_tokens,
-    });
-
-    if (!success) {
-      console.error(
-        `CRITICAL: Failed to deduct credits for user ${user.deviceId} after a successful translation.`
-      );
+      if (!ok) {
+        return c.json(
+          { error: "insufficient-credits" },
+          402 /* Payment Required */
+        );
+      }
     }
 
     return c.json(completion);
