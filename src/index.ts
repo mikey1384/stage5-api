@@ -90,12 +90,3 @@ export default {
 
 // Export app for other environments (Node.js, etc.)
 export { app };
-
-// For Node.js environments (commented out until proper server is implemented)
-// if (typeof process !== "undefined" && process.env.NODE_ENV !== "test") {
-//   const port = parseInt(process.env.PORT || "8787");
-//   console.log(`🚀 Stage5 API starting on port ${port}`);
-//   console.log(`📊 Health check: http://localhost:${port}/health`);
-//
-//   // TODO: Add proper Node.js server with serve(app.fetch)
-// }
