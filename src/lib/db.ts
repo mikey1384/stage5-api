@@ -158,6 +158,49 @@ export const creditDevice = async ({
   }
 };
 
+// Reset credits to zero for a device (admin only)
+export const resetCreditsToZero = async ({
+  deviceId,
+}: {
+  deviceId: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  try {
+    // Get current balance first for ledger
+    const currentRecord = await getCredits({ deviceId });
+    const currentBalance = currentRecord?.credit_balance || 0;
+
+    // Set credits to 0
+    const stmt = db.prepare(`
+      INSERT INTO credits (device_id, credit_balance, updated_at)
+      VALUES (?, 0, CURRENT_TIMESTAMP)
+      ON CONFLICT(device_id) DO UPDATE SET
+        credit_balance = 0,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+
+    await stmt.bind(deviceId).run();
+
+    // Record ledger entry for admin reset to zero
+    if (currentBalance > 0) {
+      await recordLedger({
+        deviceId,
+        delta: -currentBalance,
+        reason: "ADMIN_RESET_TO_ZERO",
+        meta: { previousBalance: currentBalance },
+      });
+    }
+
+    console.log(
+      `Reset credits to 0 for device ${deviceId} (was ${currentBalance})`
+    );
+  } catch (error) {
+    console.error("Error resetting credits to zero:", error);
+    throw error;
+  }
+};
+
 // Get user by API key (which is the device_id)
 export const getUserByApiKey = async ({
   apiKey,

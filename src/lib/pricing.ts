@@ -1,5 +1,5 @@
-export const USD_PER_CREDIT = 10 / 300_000; // $10 pack → 300,000 credits. Starter ($5) = 150k, Pro ($50) = 2.4M
-export const MARGIN = 2; // 2× markup  (= 50 000 credits ≈ $2)
+export const USD_PER_CREDIT = 10 / 350_000;
+export const MARGIN = 2;
 
 export const MODEL_PRICES = {
   "gpt-4.1": {

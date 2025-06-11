@@ -11,7 +11,7 @@ export const packs = {
   },
   STANDARD: {
     priceId: "price_1RUh1SHrR3MuIlfbCgVgiZMS", // $10
-    credits: 300_000,
+    credits: 350_000,
     usd: 10,
   },
   PRO: {
