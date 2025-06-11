@@ -24,6 +24,17 @@ type Variables = {
   };
 };
 
+// Helper – create a pre-configured client once per request
+function makeOpenAI(c: Context) {
+  return new OpenAI({
+    apiKey: c.env.OPENAI_API_KEY,
+    // Keep well below CF Worker 30s sub-request limit
+    timeout: 25_000, // 25s
+    // Try a few more times than the default 2
+    maxRetries: 5, // 5 retries → ~150s worst-case back-off
+  });
+}
+
 const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // Add CORS middleware
@@ -121,9 +132,7 @@ router.post("/", async (c) => {
       MAX_TEMPERATURE
     );
 
-    const openai = new OpenAI({
-      apiKey: c.env.OPENAI_API_KEY,
-    });
+    const openai = makeOpenAI(c);
 
     const completion = await openai.chat.completions.create({
       messages,

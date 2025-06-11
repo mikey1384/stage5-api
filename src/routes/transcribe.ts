@@ -22,6 +22,15 @@ type Variables = {
   };
 };
 
+// Helper – create a pre-configured client once per request
+function makeOpenAI(c: Context) {
+  return new OpenAI({
+    apiKey: c.env.OPENAI_API_KEY,
+    timeout: 25_000,
+    maxRetries: 5,
+  });
+}
+
 const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // Add CORS middleware
@@ -112,9 +121,7 @@ router.post("/", async (c) => {
     }
     const response_format = "verbose_json";
 
-    const openai = new OpenAI({
-      apiKey: c.env.OPENAI_API_KEY,
-    });
+    const openai = makeOpenAI(c);
 
     const transcription = await openai.audio.transcriptions.create({
       file,
