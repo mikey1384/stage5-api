@@ -26,8 +26,8 @@ type Variables = {
 function makeOpenAI(c: Context) {
   return new OpenAI({
     apiKey: c.env.OPENAI_API_KEY,
-    timeout: 25_000,
-    maxRetries: 5,
+    timeout: 60_000,
+    maxRetries: 3,
   });
 }
 

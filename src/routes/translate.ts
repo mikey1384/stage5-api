@@ -28,10 +28,8 @@ type Variables = {
 function makeOpenAI(c: Context) {
   return new OpenAI({
     apiKey: c.env.OPENAI_API_KEY,
-    // Keep well below CF Worker 30s sub-request limit
-    timeout: 25_000, // 25s
-    // Try a few more times than the default 2
-    maxRetries: 5, // 5 retries → ~150s worst-case back-off
+    timeout: 60_000,
+    maxRetries: 3,
   });
 }
 
