@@ -1,5 +1,4 @@
 import { Hono, Next } from "hono";
-import { z } from "zod";
 import OpenAI from "openai";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranscriptionCredits } from "../lib/db";
