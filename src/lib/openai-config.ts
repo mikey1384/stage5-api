@@ -4,6 +4,7 @@ import { OPENAI_RELAY_URL, USE_RELAY } from "./constants";
 
 type Bindings = {
   OPENAI_API_KEY: string;
+  RELAY_SECRET: string;
   DB: D1Database;
 };
 
@@ -17,9 +18,13 @@ export function makeOpenAI(c: Context<any>) {
     maxRetries: 3,
   };
 
-  // Always use relay for global compatibility
+  // Use relay for global compatibility - pass credentials via headers
   if (USE_RELAY) {
     config.baseURL = OPENAI_RELAY_URL;
+    config.defaultHeaders = {
+      'X-Relay-Secret': c.env.RELAY_SECRET,
+      'X-OpenAI-Key': c.env.OPENAI_API_KEY,
+    };
     console.log(`Using OpenAI relay: ${OPENAI_RELAY_URL}`);
   }
 
