@@ -85,6 +85,14 @@ router.post("/", async (c) => {
   const user = c.get("user");
 
   try {
+    // Check if request was already aborted
+    if (c.req.raw.signal?.aborted) {
+      return c.json(
+        { error: "Request cancelled", message: "Request was cancelled" },
+        408 // Request Timeout - closest standard status for client cancellation
+      );
+    }
+
     const formData = await c.req.formData();
     const file = formData.get("file");
     const model = formData.get("model")?.toString() || "whisper-1";
@@ -119,18 +127,70 @@ router.post("/", async (c) => {
         400
       );
     }
-    const response_format = "verbose_json";
 
+    // Check again before expensive operation
+    if (c.req.raw.signal?.aborted) {
+      return c.json(
+        { error: "Request cancelled", message: "Request was cancelled" },
+        408
+      );
+    }
+
+    const response_format = "verbose_json";
     const openai = makeOpenAI(c);
 
-    const transcription = await openai.audio.transcriptions.create({
-      file,
-      model,
-      language,
-      prompt,
-      response_format,
-      timestamp_granularities: ["word", "segment"],
+    // Create a combined abort signal that responds to both client cancellation and server timeout
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => {
+      abortController.abort();
+    }, 300000); // 5 minute server-side timeout
+
+    // Listen for client cancellation
+    c.req.raw.signal?.addEventListener('abort', () => {
+      clearTimeout(timeoutId);
+      abortController.abort();
     });
+
+    let transcription;
+    try {
+      transcription = await openai.audio.transcriptions.create({
+        file,
+        model,
+        language,
+        prompt,
+        response_format,
+        timestamp_granularities: ["word", "segment"],
+      }, {
+        signal: abortController.signal,
+      });
+    } catch (error: any) {
+      clearTimeout(timeoutId);
+      
+      // Handle cancellation/timeout
+      if (error.name === 'AbortError' || abortController.signal.aborted) {
+        const wasCancelled = c.req.raw.signal?.aborted;
+        return c.json(
+          { 
+            error: wasCancelled ? "Request cancelled" : "Request timeout",
+            message: wasCancelled ? "Request was cancelled by client" : "Request exceeded timeout limit"
+          },
+          408 // Request Timeout for both cases
+        );
+      }
+      
+      // Re-throw other errors
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    // Final check before processing credits
+    if (c.req.raw.signal?.aborted) {
+      return c.json(
+        { error: "Request cancelled", message: "Request was cancelled" },
+        408
+      );
+    }
 
     /* -------------------------------------------------- */
     /* Deduct by audio length                             */
@@ -160,6 +220,15 @@ router.post("/", async (c) => {
     return c.json(transcription);
   } catch (error) {
     console.error("Error creating transcription:", error);
+    
+    // Handle cancellation in catch block as well
+    if (c.req.raw.signal?.aborted) {
+      return c.json(
+        { error: "Request cancelled", message: "Request was cancelled" },
+        408
+      );
+    }
+    
     return c.json(
       {
         error: "Failed to create transcription",
