@@ -9,6 +9,10 @@ export const DEFAULT_TEMPERATURE = 0.4;
 // File upload limits
 export const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
 
+// OpenAI Relay Configuration
+export const OPENAI_RELAY_URL = "https://translator-relay.fly.dev";
+export const USE_RELAY = true; // Relay is now deployed and ready
+
 // API Error types
 export const API_ERRORS = {
   INSUFFICIENT_CREDITS: "insufficient-credits",

@@ -1,6 +1,5 @@
 import { Hono, Next } from "hono";
 import { z } from "zod";
-import OpenAI from "openai";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
 import {
@@ -11,6 +10,7 @@ import {
   API_ERRORS,
 } from "../lib/constants";
 import { cors } from "hono/cors";
+import { makeOpenAI } from "../lib/openai-config";
 
 type Bindings = {
   OPENAI_API_KEY: string;
@@ -23,15 +23,6 @@ type Variables = {
     creditBalance: number;
   };
 };
-
-// Helper – create a pre-configured client once per request
-function makeOpenAI(c: Context) {
-  return new OpenAI({
-    apiKey: c.env.OPENAI_API_KEY,
-    timeout: 60_000,
-    maxRetries: 3,
-  });
-}
 
 const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
