@@ -10,7 +10,7 @@ import {
   API_ERRORS,
 } from "../lib/constants";
 import { cors } from "hono/cors";
-import { makeOpenAI } from "../lib/openai-config";
+import { makeOpenAI, isGeoBlockError, callTranslationRelay } from "../lib/openai-config";
 
 type Bindings = {
   OPENAI_API_KEY: string;
@@ -152,6 +152,7 @@ router.post("/", async (c) => {
     });
 
     let completion;
+    
     try {
       completion = await openai.chat.completions.create({
         messages,
@@ -175,8 +176,33 @@ router.post("/", async (c) => {
         );
       }
       
-      // Re-throw other errors
-      throw error;
+      // Check if this is a geo-blocking error
+              if (isGeoBlockError(error)) {
+          console.log('🌍 Detected geo-blocking, attempting relay fallback...');
+        
+        try {
+          // Extract the text to translate from messages
+          const textToTranslate = messages.find(msg => msg.role === 'user')?.content || '';
+          const systemMessage = messages.find(msg => msg.role === 'system')?.content || '';
+          
+          // Determine target language from system message
+          const targetLanguage = systemMessage.match(/translate.*to\s+(\w+)/i)?.[1] || 'english';
+          
+          completion = await callTranslationRelay({
+            c,
+            text: textToTranslate,
+            target_language: targetLanguage,
+            model: model,
+            temperature: clampedTemperature,
+          });
+        } catch (relayError: any) {
+          console.error('❌ Relay translation failed:', relayError.message);
+          throw error; // Fall back to original error
+        }
+      } else {
+        // Re-throw non-geo-blocking errors
+        throw error;
+      }
     } finally {
       clearTimeout(timeoutId);
     }

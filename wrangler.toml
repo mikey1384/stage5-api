@@ -14,6 +14,7 @@ ALLOWED_ORIGINS = "https://stage5.tools,http://localhost:3000"
 AUDIO_CREDIT_CALIBRATION = "0.3"
 TOKEN_CREDIT_CALIBRATION = "0.7"
 
+
 # D1 Database binding
 [[d1_databases]]
 binding = "DB"

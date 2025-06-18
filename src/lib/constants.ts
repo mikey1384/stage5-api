@@ -11,7 +11,7 @@ export const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
 
 // OpenAI Relay Configuration
 export const OPENAI_RELAY_URL = "https://translator-relay.fly.dev";
-export const USE_RELAY = true; // Relay is now deployed and ready
+export const USE_RELAY = false; // Use fallback strategy: try direct first, relay on geo-block
 
 // API Error types
 export const API_ERRORS = {
