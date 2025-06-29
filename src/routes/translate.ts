@@ -2,13 +2,7 @@ import { Hono, Next } from "hono";
 import { z } from "zod";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
-import {
-  ALLOWED_TRANSLATION_MODELS,
-  MIN_TEMPERATURE,
-  MAX_TEMPERATURE,
-  DEFAULT_TEMPERATURE,
-  API_ERRORS,
-} from "../lib/constants";
+import { ALLOWED_TRANSLATION_MODELS, API_ERRORS } from "../lib/constants";
 import { cors } from "hono/cors";
 import {
   makeOpenAI,
@@ -137,12 +131,6 @@ router.post("/", async (c) => {
       );
     }
 
-    // Temperature clamping for security
-    const clampedTemperature = Math.min(
-      Math.max(temperature ?? DEFAULT_TEMPERATURE, MIN_TEMPERATURE),
-      MAX_TEMPERATURE
-    );
-
     const openai = makeOpenAI(c);
 
     // Create a combined abort signal that responds to both client cancellation and server timeout
@@ -164,7 +152,6 @@ router.post("/", async (c) => {
         {
           messages,
           model,
-          temperature: clampedTemperature,
         },
         {
           signal: abortController.signal,
@@ -207,7 +194,6 @@ router.post("/", async (c) => {
             text: textToTranslate,
             target_language: targetLanguage,
             model: model,
-            temperature: clampedTemperature,
           });
         } catch (relayError: any) {
           console.error("❌ Relay translation failed:", relayError.message);
