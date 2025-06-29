@@ -3,14 +3,18 @@ import { z } from "zod";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
 import {
-  ALLOWED_TRANSLATION_MODEL,
+  ALLOWED_TRANSLATION_MODELS,
   MIN_TEMPERATURE,
   MAX_TEMPERATURE,
   DEFAULT_TEMPERATURE,
   API_ERRORS,
 } from "../lib/constants";
 import { cors } from "hono/cors";
-import { makeOpenAI, isGeoBlockError, callTranslationRelay } from "../lib/openai-config";
+import {
+  makeOpenAI,
+  isGeoBlockError,
+  callTranslationRelay,
+} from "../lib/openai-config";
 
 type Bindings = {
   OPENAI_API_KEY: string;
@@ -113,11 +117,13 @@ router.post("/", async (c) => {
     const { messages, model, temperature } = parsedBody.data;
 
     // Server-side model guard
-    if (model !== ALLOWED_TRANSLATION_MODEL) {
+    if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
       return c.json(
         {
           error: API_ERRORS.INVALID_MODEL,
-          message: `Only model ${ALLOWED_TRANSLATION_MODEL} is allowed`,
+          message: `Only models ${ALLOWED_TRANSLATION_MODELS.join(
+            ", "
+          )} are allowed`,
         },
         400
       );
@@ -146,48 +152,56 @@ router.post("/", async (c) => {
     }, 120000); // 2 minute server-side timeout
 
     // Listen for client cancellation
-    c.req.raw.signal?.addEventListener('abort', () => {
+    c.req.raw.signal?.addEventListener("abort", () => {
       clearTimeout(timeoutId);
       abortController.abort();
     });
 
     let completion;
-    
+
     try {
-      completion = await openai.chat.completions.create({
-        messages,
-        model,
-        temperature: clampedTemperature,
-      }, {
-        signal: abortController.signal,
-      });
+      completion = await openai.chat.completions.create(
+        {
+          messages,
+          model,
+          temperature: clampedTemperature,
+        },
+        {
+          signal: abortController.signal,
+        }
+      );
     } catch (error: any) {
       clearTimeout(timeoutId);
-      
+
       // Handle cancellation/timeout
-      if (error.name === 'AbortError' || abortController.signal.aborted) {
+      if (error.name === "AbortError" || abortController.signal.aborted) {
         const wasCancelled = c.req.raw.signal?.aborted;
         return c.json(
-          { 
+          {
             error: wasCancelled ? "Request cancelled" : "Request timeout",
-            message: wasCancelled ? "Request was cancelled by client" : "Request exceeded timeout limit"
+            message: wasCancelled
+              ? "Request was cancelled by client"
+              : "Request exceeded timeout limit",
           },
           408 // Request Timeout for both cases
         );
       }
-      
+
       // Check if this is a geo-blocking error
-              if (isGeoBlockError(error)) {
-          console.log('🌍 Detected geo-blocking, attempting relay fallback...');
-        
+      if (isGeoBlockError(error)) {
+        console.log("🌍 Detected geo-blocking, attempting relay fallback...");
+
         try {
           // Extract the text to translate from messages
-          const textToTranslate = messages.find(msg => msg.role === 'user')?.content || '';
-          const systemMessage = messages.find(msg => msg.role === 'system')?.content || '';
-          
+          const textToTranslate =
+            messages.find((msg) => msg.role === "user")?.content || "";
+          const systemMessage =
+            messages.find((msg) => msg.role === "system")?.content || "";
+
           // Determine target language from system message
-          const targetLanguage = systemMessage.match(/translate.*to\s+(\w+)/i)?.[1] || 'english';
-          
+          const targetLanguage =
+            systemMessage.match(/translate.*to\s+(\w+)/i)?.[1] || "english";
+
           completion = await callTranslationRelay({
             c,
             text: textToTranslate,
@@ -196,7 +210,7 @@ router.post("/", async (c) => {
             temperature: clampedTemperature,
           });
         } catch (relayError: any) {
-          console.error('❌ Relay translation failed:', relayError.message);
+          console.error("❌ Relay translation failed:", relayError.message);
           throw error; // Fall back to original error
         }
       } else {
@@ -243,7 +257,7 @@ router.post("/", async (c) => {
     return c.json(completion);
   } catch (error) {
     console.error("Error creating translation:", error);
-    
+
     // Handle cancellation in catch block as well
     if (c.req.raw.signal?.aborted) {
       return c.json(
@@ -251,7 +265,7 @@ router.post("/", async (c) => {
         408
       );
     }
-    
+
     return c.json(
       {
         error: "Failed to create translation",
