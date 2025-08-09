@@ -1,4 +1,9 @@
-export const ALLOWED_TRANSLATION_MODELS = ["gpt-5", "gpt-4.1", "o3"];
+export const ALLOWED_TRANSLATION_MODELS = [
+  "gpt-5",
+  "gpt-5-mini",
+  "gpt-4.1",
+  "o3",
+];
 export const ALLOWED_TRANSCRIPTION_MODEL = "whisper-1";
 
 // Temperature constraints
