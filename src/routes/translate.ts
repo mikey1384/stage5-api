@@ -137,7 +137,7 @@ router.post("/", async (c) => {
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => {
       abortController.abort();
-    }, 120000); // 2 minute server-side timeout
+    }, 300000);
 
     // Listen for client cancellation
     c.req.raw.signal?.addEventListener("abort", () => {
