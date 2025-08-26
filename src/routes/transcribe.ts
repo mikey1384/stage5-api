@@ -141,7 +141,10 @@ router.post("/", async (c) => {
     let client;
     if (model === "whisper-1") {
       client = makeOpenAI(c);
-    } else if (model === "whisper-large-v3") {
+    } else if (
+      model === "whisper-large-v3" ||
+      model === "whisper-large-v3-turbo"
+    ) {
       client = makeGroq(c);
     } else {
       throw new Error("Unsupported model");

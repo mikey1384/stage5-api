@@ -4,7 +4,11 @@ export const ALLOWED_TRANSLATION_MODELS = [
   "gpt-4.1",
   "o3",
 ];
-export const ALLOWED_TRANSCRIPTION_MODELS = ["whisper-1", "whisper-large-v3"];
+export const ALLOWED_TRANSCRIPTION_MODELS = [
+  "whisper-1",
+  "whisper-large-v3",
+  "whisper-large-v3-turbo",
+];
 
 // Temperature constraints
 export const MIN_TEMPERATURE = 0;

@@ -14,6 +14,10 @@ export const MODEL_PRICES = {
   "whisper-large-v3": {
     perSecond: 0.111 / 3600, // ~0.00003083
   },
+
+  "whisper-large-v3-turbo": {
+    perSecond: 0.04 / 3600, // ~0.00001111
+  },
 } as const;
 
 export const CREDITS_PER_AUDIO_HOUR = 100_000;
