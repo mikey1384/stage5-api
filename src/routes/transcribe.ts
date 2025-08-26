@@ -2,15 +2,21 @@ import { Hono, Next } from "hono";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranscriptionCredits } from "../lib/db";
 import {
-  ALLOWED_TRANSCRIPTION_MODEL,
+  ALLOWED_TRANSCRIPTION_MODELS,
   MAX_FILE_SIZE,
   API_ERRORS,
 } from "../lib/constants";
 import { cors } from "hono/cors";
-import { makeOpenAI, isGeoBlockError, callRelayServer } from "../lib/openai-config";
+import {
+  makeOpenAI,
+  makeGroq,
+  isGeoBlockError,
+  callRelayServer,
+} from "../lib/openai-config";
 
 type Bindings = {
   OPENAI_API_KEY: string;
+  GROQ_API_KEY: string;
   RELAY_SECRET: string;
   DB: D1Database;
 };
@@ -109,11 +115,13 @@ router.post("/", async (c) => {
     }
 
     // Server-side model guard
-    if (model !== ALLOWED_TRANSCRIPTION_MODEL) {
+    if (!ALLOWED_TRANSCRIPTION_MODELS.includes(model)) {
       return c.json(
         {
           error: API_ERRORS.INVALID_MODEL,
-          message: `Only ${ALLOWED_TRANSCRIPTION_MODEL} is allowed`,
+          message: `Only ${ALLOWED_TRANSCRIPTION_MODELS.join(
+            ", "
+          )} are allowed`,
         },
         400
       );
@@ -128,7 +136,16 @@ router.post("/", async (c) => {
     }
 
     const response_format = "verbose_json";
-    const openai = makeOpenAI(c);
+
+    // Select client based on model
+    let client;
+    if (model === "whisper-1") {
+      client = makeOpenAI(c);
+    } else if (model === "whisper-large-v3") {
+      client = makeGroq(c);
+    } else {
+      throw new Error("Unsupported model");
+    }
 
     // Create a combined abort signal that responds to both client cancellation and server timeout
     const abortController = new AbortController();
@@ -137,47 +154,52 @@ router.post("/", async (c) => {
     }, 300000); // 5 minute server-side timeout
 
     // Listen for client cancellation
-    c.req.raw.signal?.addEventListener('abort', () => {
+    c.req.raw.signal?.addEventListener("abort", () => {
       clearTimeout(timeoutId);
       abortController.abort();
     });
 
     let transcription;
     try {
-      transcription = await openai.audio.transcriptions.create({
-        file,
-        model,
-        language,
-        prompt,
-        response_format,
-        timestamp_granularities: ["word", "segment"],
-      }, {
-        signal: abortController.signal,
-      });
+      transcription = await client.audio.transcriptions.create(
+        {
+          file,
+          model,
+          language,
+          prompt,
+          response_format,
+          timestamp_granularities: ["word", "segment"],
+        },
+        {
+          signal: abortController.signal,
+        }
+      );
     } catch (error: any) {
       clearTimeout(timeoutId);
-      
+
       // Handle cancellation/timeout
-      if (error.name === 'AbortError' || abortController.signal.aborted) {
+      if (error.name === "AbortError" || abortController.signal.aborted) {
         const wasCancelled = c.req.raw.signal?.aborted;
         return c.json(
-          { 
+          {
             error: wasCancelled ? "Request cancelled" : "Request timeout",
-            message: wasCancelled ? "Request was cancelled by client" : "Request exceeded timeout limit"
+            message: wasCancelled
+              ? "Request was cancelled by client"
+              : "Request exceeded timeout limit",
           },
           408 // Request Timeout for both cases
         );
       }
-      
-      // Check if this is a geo-blocking error
-      if (isGeoBlockError(error)) {
-        console.log('🌍 Detected geo-blocking, attempting relay fallback...');
-        
+
+      // Check if this is a geo-blocking error and model is OpenAI's
+      if (model === "whisper-1" && isGeoBlockError(error)) {
+        console.log("🌍 Detected geo-blocking, attempting relay fallback...");
+
         // Reset timeout for relay attempt
         const relayTimeoutId = setTimeout(() => {
           abortController.abort();
-        }, 300000); // 5 minutes for relay (longer timeout)
-        
+        }, 300000); // 5 minutes for relay
+
         try {
           transcription = await callRelayServer({
             c,
@@ -189,27 +211,32 @@ router.post("/", async (c) => {
           });
         } catch (relayError: any) {
           clearTimeout(relayTimeoutId);
-          
+
           // Handle relay cancellation/timeout
-          if (relayError.name === 'AbortError' || abortController.signal.aborted) {
+          if (
+            relayError.name === "AbortError" ||
+            abortController.signal.aborted
+          ) {
             const wasCancelled = c.req.raw.signal?.aborted;
             return c.json(
-              { 
+              {
                 error: wasCancelled ? "Request cancelled" : "Request timeout",
-                message: wasCancelled ? "Request was cancelled by client" : "Request exceeded timeout limit"
+                message: wasCancelled
+                  ? "Request was cancelled by client"
+                  : "Request exceeded timeout limit",
               },
               408
             );
           }
-          
+
           // If relay also fails, throw the original error
-          console.error('❌ Relay fallback also failed:', relayError);
-          throw error; // Throw original geo-block error, not relay error
+          console.error("❌ Relay fallback also failed:", relayError);
+          throw error; // Throw original geo-block error
         } finally {
           clearTimeout(relayTimeoutId);
         }
       } else {
-        // Re-throw non-geo-blocking errors
+        // Re-throw non-geo-blocking errors or Groq errors
         throw error;
       }
     } finally {
@@ -234,6 +261,7 @@ router.post("/", async (c) => {
       const ok = await deductTranscriptionCredits({
         deviceId: user.deviceId,
         seconds,
+        model,
       });
 
       if (!ok) {
@@ -252,7 +280,7 @@ router.post("/", async (c) => {
     return c.json(transcription as any);
   } catch (error) {
     console.error("Error creating transcription:", error);
-    
+
     // Handle cancellation in catch block as well
     if (c.req.raw.signal?.aborted) {
       return c.json(
@@ -260,7 +288,7 @@ router.post("/", async (c) => {
         408
       );
     }
-    
+
     return c.json(
       {
         error: "Failed to create transcription",

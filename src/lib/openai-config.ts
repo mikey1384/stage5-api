@@ -14,6 +14,18 @@ export function makeOpenAI(c: Context<any>) {
 }
 
 /**
+ * Creates a Groq client using OpenAI SDK compatibility
+ */
+export function makeGroq(c: Context<any>) {
+  return new OpenAI({
+    apiKey: c.env.GROQ_API_KEY,
+    baseURL: "https://api.groq.com/openai/v1",
+    timeout: 60_000,
+    maxRetries: 3,
+  });
+}
+
+/**
  * Check if error indicates geographical blocking
  */
 export function isGeoBlockError(error: any): boolean {

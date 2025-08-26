@@ -280,14 +280,16 @@ export const deductTranslationCredits = async ({
 export const deductTranscriptionCredits = async ({
   deviceId,
   seconds,
+  model,
 }: {
   deviceId: string;
   seconds: number;
+  model: string;
 }): Promise<boolean> => {
-  const spend = secondsToCredits({ seconds });
+  const spend = secondsToCredits({ seconds, model });
   return updateBalance(deviceId, spend, {
     reason: "TRANSCRIBE",
-    meta: { seconds },
+    meta: { seconds, model },
   });
 };
 
