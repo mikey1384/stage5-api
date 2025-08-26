@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import Groq from "groq-sdk";
 import { Context } from "hono";
 import { OPENAI_RELAY_URL } from "./constants";
 
@@ -17,11 +18,8 @@ export function makeOpenAI(c: Context<any>) {
  * Creates a Groq client using OpenAI SDK compatibility
  */
 export function makeGroq(c: Context<any>) {
-  return new OpenAI({
+  return new Groq({
     apiKey: c.env.GROQ_API_KEY,
-    baseURL: "https://api.groq.com/openai/v1",
-    timeout: 60_000,
-    maxRetries: 3,
   });
 }
 
