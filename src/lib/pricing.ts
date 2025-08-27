@@ -20,8 +20,7 @@ export const MODEL_PRICES = {
   },
 } as const;
 
-export const CREDITS_PER_AUDIO_HOUR = 100_000;
-export const CREDITS_PER_AUDIO_SECOND = CREDITS_PER_AUDIO_HOUR / 3_600;
+export const CREDITS_PER_AUDIO_HOUR = 50_000;
 
 export const AUDIO_CREDIT_CALIBRATION =
   Number(process.env.AUDIO_CREDIT_CALIBRATION ?? 1) || 1;
