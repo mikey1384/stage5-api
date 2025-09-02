@@ -1,9 +1,14 @@
-export const PACK_IDS = ["STARTER", "STANDARD", "PRO"] as const;
+export const PACK_IDS = ["MICRO", "STARTER", "STANDARD", "PRO"] as const;
 export type PackId = (typeof PACK_IDS)[number];
 
 export type DeviceId = string & { __brand: "uuid" };
 
 export const packs = {
+  MICRO: {
+    priceId: "price_1S2qOsHrR3MuIlfbin7ihjMS", // $1 (prod_Syo08evQwrvTBl)
+    credits: 15_000,
+    usd: 1,
+  },
   STARTER: {
     priceId: "price_1RXb46HrR3MuIlfbkctbZdjj", // $5
     credits: 150_000,
