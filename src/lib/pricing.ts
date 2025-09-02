@@ -22,18 +22,30 @@ export const MODEL_PRICES = {
 
 export const CREDITS_PER_AUDIO_HOUR = 50_000;
 
+export const NEW_CREDITS_PER_AUDIO_HOUR = 2_800;
+
 export const AUDIO_CREDIT_CALIBRATION =
   Number(process.env.AUDIO_CREDIT_CALIBRATION ?? 1) || 1;
 
 export const TOKEN_CREDIT_CALIBRATION =
   Number(process.env.TOKEN_CREDIT_CALIBRATION ?? 1) || 1;
 
+export const NEW_TOKEN_CREDIT_CALIBRATION =
+  Number(process.env.NEW_TOKEN_CREDIT_CALIBRATION ?? 2.142857) || 2.142857;
+
+// New calibration flag for audio (transcription) pricing to enable backward
+// compatibility while rolling out new rates.
+export const NEW_AUDIO_CREDIT_CALIBRATION =
+  Number(process.env.NEW_AUDIO_CREDIT_CALIBRATION ?? 1) || 1;
+
 export function secondsToCredits({
   seconds,
   model,
+  isNewPricing = false,
 }: {
   seconds: number;
   model: string;
+  isNewPricing?: boolean;
 }): number {
   const price = MODEL_PRICES[model as keyof typeof MODEL_PRICES];
   if (!price || !("perSecond" in price)) {
@@ -41,20 +53,28 @@ export function secondsToCredits({
   }
   const usd = seconds * price.perSecond;
   const credits = (usd * MARGIN) / USD_PER_CREDIT;
-  return Math.ceil(credits * AUDIO_CREDIT_CALIBRATION);
+  const calibration = isNewPricing
+    ? NEW_AUDIO_CREDIT_CALIBRATION
+    : AUDIO_CREDIT_CALIBRATION;
+  return Math.ceil(credits * calibration);
 }
 
 export function tokensToCredits({
   prompt,
   completion,
+  isNewPricing = false,
 }: {
   prompt: number;
   completion: number;
+  isNewPricing?: boolean;
 }): number {
   const usd =
     prompt * MODEL_PRICES["gpt-4.1"].in +
     completion * MODEL_PRICES["gpt-4.1"].out;
 
   const credits = (usd * MARGIN) / USD_PER_CREDIT;
-  return Math.ceil(credits * TOKEN_CREDIT_CALIBRATION);
+  const calibration = isNewPricing
+    ? NEW_TOKEN_CREDIT_CALIBRATION
+    : TOKEN_CREDIT_CALIBRATION;
+  return Math.ceil(credits * calibration);
 }

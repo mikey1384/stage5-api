@@ -81,6 +81,7 @@ const translateSchema = z.object({
   ),
   model: z.string(),
   temperature: z.number().optional(),
+  isNewPricing: z.boolean().optional(),
 });
 
 router.post("/", async (c) => {
@@ -108,7 +109,7 @@ router.post("/", async (c) => {
       );
     }
 
-    const { messages, model, temperature } = parsedBody.data;
+    const { messages, model, isNewPricing } = parsedBody.data;
 
     // Server-side model guard
     if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
@@ -227,6 +228,7 @@ router.post("/", async (c) => {
         deviceId: user.deviceId,
         promptTokens: usage.prompt_tokens ?? 0,
         completionTokens: usage.completion_tokens ?? 0,
+        isNewPricing: !!isNewPricing,
       });
 
       if (!ok) {

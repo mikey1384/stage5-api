@@ -95,6 +95,8 @@ router.post("/", async (c) => {
     const model = formData.get("model")?.toString() || "whisper-1";
     const language = formData.get("language")?.toString();
     const prompt = formData.get("prompt")?.toString();
+    const isNewPricingStr = formData.get("isNewPricing")?.toString();
+    const isNewPricing = isNewPricingStr === 'true';
 
     if (!(file instanceof File)) {
       return c.json(
@@ -265,6 +267,7 @@ router.post("/", async (c) => {
         deviceId: user.deviceId,
         seconds,
         model,
+        isNewPricing,
       });
 
       if (!ok) {
