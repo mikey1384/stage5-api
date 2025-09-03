@@ -31,12 +31,10 @@ export const TOKEN_CREDIT_CALIBRATION =
   Number(process.env.TOKEN_CREDIT_CALIBRATION ?? 1) || 1;
 
 export const NEW_TOKEN_CREDIT_CALIBRATION =
-  Number(process.env.NEW_TOKEN_CREDIT_CALIBRATION ?? 2.142857) || 2.142857;
+  Number(process.env.NEW_TOKEN_CREDIT_CALIBRATION ?? 0.714285) || 0.714285;
 
-// New calibration flag for audio (transcription) pricing to enable backward
-// compatibility while rolling out new rates.
 export const NEW_AUDIO_CREDIT_CALIBRATION =
-  Number(process.env.NEW_AUDIO_CREDIT_CALIBRATION ?? 1) || 1;
+  Number(process.env.NEW_AUDIO_CREDIT_CALIBRATION ?? 0.714285) || 0.714285;
 
 export function secondsToCredits({
   seconds,
