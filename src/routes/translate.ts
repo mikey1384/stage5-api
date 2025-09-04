@@ -86,6 +86,7 @@ const translateSchema = z.object({
   ),
   model: z.string(),
   temperature: z.number().optional(),
+  reasoning: z.any().optional(),
 });
 
 router.post("/", async (c) => {
@@ -113,7 +114,7 @@ router.post("/", async (c) => {
       );
     }
 
-    const { messages, model } = parsedBody.data;
+    const { messages, model, temperature, reasoning } = parsedBody.data;
 
     // Server-side model guard
     if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
@@ -159,7 +160,8 @@ router.post("/", async (c) => {
         c,
         messages,
         model,
-        temperature: DEFAULT_TEMPERATURE,
+        temperature: typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE,
+        reasoning,
         signal: abortController.signal,
       });
       usedRelay = true;
@@ -182,15 +184,28 @@ router.post("/", async (c) => {
 
       // If relay-first fails (network/auth), fall back to direct OpenAI
       try {
-        completion = await openai.chat.completions.create(
-          {
-            messages,
-            model,
-          },
-          {
-            signal: abortController.signal,
+        try {
+          completion = await openai.chat.completions.create(
+            {
+              messages,
+              model,
+              ...(reasoning ? { reasoning } : {}),
+              temperature: typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE,
+            },
+            { signal: abortController.signal }
+          );
+        } catch (maybeReasoningError: any) {
+          const status = maybeReasoningError?.status || maybeReasoningError?.response?.status;
+          const msg = String(maybeReasoningError?.message || "").toLowerCase();
+          if (reasoning && (status === 400 || msg.includes("reasoning"))) {
+            completion = await openai.chat.completions.create(
+              { messages, model, temperature: typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE },
+              { signal: abortController.signal }
+            );
+          } else {
+            throw maybeReasoningError;
           }
-        );
+        }
       } catch (directError: any) {
         // As last resort, if direct failed due to geo issues, try simple text relay
         if (isGeoBlockError(directError)) {

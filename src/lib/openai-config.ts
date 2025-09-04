@@ -175,12 +175,14 @@ export async function callChatRelay({
   messages,
   model,
   temperature,
+  reasoning,
   signal,
 }: {
   c: Context<any>;
   messages: Array<{ role: string; content: string }>;
   model: string;
   temperature?: number;
+  reasoning?: any;
   signal?: AbortSignal;
 }) {
   const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
@@ -190,7 +192,7 @@ export async function callChatRelay({
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-OpenAI-Key": c.env.OPENAI_API_KEY,
     },
-    body: JSON.stringify({ messages, model, temperature }),
+    body: JSON.stringify({ messages, model, temperature, reasoning }),
     signal,
   });
 
