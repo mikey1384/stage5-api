@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { getCredits, getLedgerEntries } from "../lib/db";
-import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
 
 const router = new Hono();
 
@@ -32,19 +31,13 @@ router.get("/:deviceId", async (c) => {
         deviceId,
         creditBalance: 0,
         hoursBalance: 0,
-        creditsPerHour: CREDITS_PER_AUDIO_HOUR,
         updatedAt: null,
       });
     }
 
-    const perHour = CREDITS_PER_AUDIO_HOUR;
-    const hoursBalance = credits.credit_balance / perHour;
-
     return c.json({
       deviceId: credits.device_id,
       creditBalance: credits.credit_balance,
-      hoursBalance: hoursBalance,
-      creditsPerHour: perHour,
       updatedAt: credits.updated_at,
     });
   } catch (error) {

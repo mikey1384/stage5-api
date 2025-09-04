@@ -20,9 +20,6 @@ export const MODEL_PRICES = {
   },
 } as const;
 
-// New pricing is the default
-export const CREDITS_PER_AUDIO_HOUR = 2_800;
-
 // Unified calibration (prefer new env vars, fallback to old, default ~0.714285)
 export const AUDIO_CREDIT_CALIBRATION =
   Number(process.env.NEW_AUDIO_CREDIT_CALIBRATION ?? 0.714285) || 0.714285;
