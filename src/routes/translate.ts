@@ -115,6 +115,8 @@ router.post("/", async (c) => {
     }
 
     const { messages, model, temperature, reasoning } = parsedBody.data;
+    const isGpt5 = model?.startsWith("gpt-5");
+    const effectiveTemp = typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE;
 
     // Server-side model guard
     if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
@@ -160,7 +162,7 @@ router.post("/", async (c) => {
         c,
         messages,
         model,
-        temperature: typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE,
+        temperature: isGpt5 ? undefined : effectiveTemp,
         reasoning,
         signal: abortController.signal,
       });
@@ -185,23 +187,24 @@ router.post("/", async (c) => {
       // If relay-first fails (network/auth), fall back to direct OpenAI
       try {
         try {
-          completion = await openai.chat.completions.create(
-            {
-              messages,
-              model,
-              ...(reasoning ? { reasoning } : {}),
-              temperature: typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE,
-            },
-            { signal: abortController.signal }
-          );
+          const req: any = {
+            messages,
+            model,
+            ...(reasoning ? { reasoning } : {}),
+          };
+          if (!isGpt5) req.temperature = effectiveTemp;
+          completion = await openai.chat.completions.create(req, {
+            signal: abortController.signal,
+          });
         } catch (maybeReasoningError: any) {
           const status = maybeReasoningError?.status || maybeReasoningError?.response?.status;
           const msg = String(maybeReasoningError?.message || "").toLowerCase();
           if (reasoning && (status === 400 || msg.includes("reasoning"))) {
-            completion = await openai.chat.completions.create(
-              { messages, model, temperature: typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE },
-              { signal: abortController.signal }
-            );
+            const req2: any = { messages, model };
+            if (!isGpt5) req2.temperature = effectiveTemp;
+            completion = await openai.chat.completions.create(req2, {
+              signal: abortController.signal,
+            });
           } else {
             throw maybeReasoningError;
           }
