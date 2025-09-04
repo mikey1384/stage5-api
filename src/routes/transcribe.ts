@@ -166,19 +166,15 @@ router.post("/", async (c) => {
 
     let transcription;
     try {
-      transcription = await client.audio.transcriptions.create(
-        {
-          file,
-          model,
-          language,
-          prompt,
-          response_format,
-          timestamp_granularities: ["word", "segment"],
-        },
-        {
-          signal: abortController.signal,
-        }
-      );
+      // Relay-first strategy: try relay before direct provider calls
+      transcription = await callRelayServer({
+        c,
+        file,
+        model,
+        language: language ?? undefined,
+        prompt: prompt ?? undefined,
+        signal: abortController.signal,
+      });
     } catch (error: any) {
       clearTimeout(timeoutId);
 
@@ -195,53 +191,24 @@ router.post("/", async (c) => {
           408 // Request Timeout for both cases
         );
       }
-
-      // Check if this is a geo-blocking error and model is OpenAI's
-      if (model === "whisper-1" && isGeoBlockError(error)) {
-        console.log("🌍 Detected geo-blocking, attempting relay fallback...");
-
-        // Reset timeout for relay attempt
-        const relayTimeoutId = setTimeout(() => {
-          abortController.abort();
-        }, 300000); // 5 minutes for relay
-
-        try {
-          transcription = await callRelayServer({
-            c,
+      // If relay failed, fall back to direct provider call (OpenAI/Groq)
+      try {
+        transcription = await client.audio.transcriptions.create(
+          {
             file,
             model,
             language,
             prompt,
+            response_format,
+            timestamp_granularities: ["word", "segment"],
+          },
+          {
             signal: abortController.signal,
-          });
-        } catch (relayError: any) {
-          clearTimeout(relayTimeoutId);
-
-          // Handle relay cancellation/timeout
-          if (
-            relayError.name === "AbortError" ||
-            abortController.signal.aborted
-          ) {
-            const wasCancelled = c.req.raw.signal?.aborted;
-            return c.json(
-              {
-                error: wasCancelled ? "Request cancelled" : "Request timeout",
-                message: wasCancelled
-                  ? "Request was cancelled by client"
-                  : "Request exceeded timeout limit",
-              },
-              408
-            );
           }
-
-          // If relay also fails, throw the original error
-          console.error("❌ Relay fallback also failed:", relayError);
-          throw error; // Throw original geo-block error
-        } finally {
-          clearTimeout(relayTimeoutId);
-        }
-      } else {
-        // Re-throw non-geo-blocking errors or Groq errors
+        );
+      } catch (directError: any) {
+        // Re-throw original relay error details if direct also fails
+        console.error("❌ Direct provider call also failed after relay:", directError);
         throw error;
       }
     } finally {

@@ -2,12 +2,13 @@ import { Hono, Next } from "hono";
 import { z } from "zod";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
-import { ALLOWED_TRANSLATION_MODELS, API_ERRORS } from "../lib/constants";
+import { ALLOWED_TRANSLATION_MODELS, API_ERRORS, DEFAULT_TEMPERATURE } from "../lib/constants";
 import { cors } from "hono/cors";
 import {
   makeOpenAI,
   isGeoBlockError,
   callTranslationRelay,
+  callChatRelay,
 } from "../lib/openai-config";
 
 type Bindings = {
@@ -149,15 +150,14 @@ router.post("/", async (c) => {
     let completion;
 
     try {
-      completion = await openai.chat.completions.create(
-        {
-          messages,
-          model,
-        },
-        {
-          signal: abortController.signal,
-        }
-      );
+      // Relay-first: try chat-mode relay to preserve usage accounting
+      completion = await callChatRelay({
+        c,
+        messages,
+        model,
+        temperature: DEFAULT_TEMPERATURE,
+        signal: abortController.signal,
+      });
     } catch (error: any) {
       clearTimeout(timeoutId);
 
@@ -175,34 +175,44 @@ router.post("/", async (c) => {
         );
       }
 
-      // Check if this is a geo-blocking error
-      if (isGeoBlockError(error)) {
-        console.log("🌍 Detected geo-blocking, attempting relay fallback...");
-
-        try {
-          // Extract the text to translate from messages
-          const textToTranslate =
-            messages.find((msg) => msg.role === "user")?.content || "";
-          const systemMessage =
-            messages.find((msg) => msg.role === "system")?.content || "";
-
-          // Determine target language from system message
-          const targetLanguage =
-            systemMessage.match(/translate.*to\s+(\w+)/i)?.[1] || "english";
-
-          completion = await callTranslationRelay({
-            c,
-            text: textToTranslate,
-            target_language: targetLanguage,
-            model: model,
-          });
-        } catch (relayError: any) {
-          console.error("❌ Relay translation failed:", relayError.message);
-          throw error; // Fall back to original error
+      // If relay-first fails (network/auth), fall back to direct OpenAI
+      try {
+        completion = await openai.chat.completions.create(
+          {
+            messages,
+            model,
+          },
+          {
+            signal: abortController.signal,
+          }
+        );
+      } catch (directError: any) {
+        // As last resort, if direct failed due to geo issues, try simple text relay
+        if (isGeoBlockError(directError)) {
+          try {
+            const textToTranslate =
+              messages.find((msg) => msg.role === "user")?.content || "";
+            const systemMessage =
+              messages.find((msg) => msg.role === "system")?.content || "";
+            const targetLanguage =
+              systemMessage.match(/translate.*to\s+(\w+)/i)?.[1] ||
+              "english";
+            completion = await callTranslationRelay({
+              c,
+              text: textToTranslate,
+              target_language: targetLanguage,
+              model,
+            });
+          } catch (finalRelayError: any) {
+            console.error(
+              "❌ Relay (text mode) also failed after direct:",
+              finalRelayError
+            );
+            throw directError;
+          }
+        } else {
+          throw directError;
         }
-      } else {
-        // Re-throw non-geo-blocking errors
-        throw error;
       }
     } finally {
       clearTimeout(timeoutId);

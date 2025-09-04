@@ -85,6 +85,9 @@ export async function callRelayServer({
     headers: {
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+      ...(model === "whisper-large-v3" || model === "whisper-large-v3-turbo"
+        ? { "X-Groq-Key": c.env.GROQ_API_KEY }
+        : {}),
     },
     body: relayFormData,
     signal,
@@ -161,6 +164,41 @@ export async function callTranslationRelay({
       ),
     },
   };
+}
+
+/**
+ * Relay-first translation via chat-style payload (messages array)
+ * Returns OpenAI-compatible chat.completions response (with usage) directly from relay
+ */
+export async function callChatRelay({
+  c,
+  messages,
+  model,
+  temperature,
+  signal,
+}: {
+  c: Context<any>;
+  messages: Array<{ role: string; content: string }>;
+  model: string;
+  temperature?: number;
+  signal?: AbortSignal;
+}) {
+  const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+    },
+    body: JSON.stringify({ messages, model, temperature }),
+    signal,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Relay chat translate error: ${resp.status} ${text}`);
+  }
+  return resp.json();
 }
 
 /**
