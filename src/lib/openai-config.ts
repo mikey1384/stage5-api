@@ -9,7 +9,7 @@ import { OPENAI_RELAY_URL } from "./constants";
 export function makeOpenAI(c: Context<any>) {
   return new OpenAI({
     apiKey: c.env.OPENAI_API_KEY,
-    timeout: 60_000, // 1 minute for direct calls
+    timeout: 600_000, // 10 minutes for long-running requests (e.g., gpt-5)
     maxRetries: 3,
   });
 }

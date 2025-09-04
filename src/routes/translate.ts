@@ -143,9 +143,10 @@ router.post("/", async (c) => {
 
     // Create a combined abort signal that responds to both client cancellation and server timeout
     const abortController = new AbortController();
+    const timeoutMs = isGpt5 ? 600000 : 300000; // 10 min for gpt-5, 5 min otherwise
     const timeoutId = setTimeout(() => {
       abortController.abort();
-    }, 300000);
+    }, timeoutMs);
 
     // Listen for client cancellation
     c.req.raw.signal?.addEventListener("abort", () => {
