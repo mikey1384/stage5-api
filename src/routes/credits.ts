@@ -1,17 +1,13 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { getCredits, getLedgerEntries } from "../lib/db";
-import {
-  CREDITS_PER_AUDIO_HOUR,
-  NEW_CREDITS_PER_AUDIO_HOUR,
-} from "../lib/pricing";
+import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
 
 const router = new Hono();
 
 // Get credits for a device
 router.get("/:deviceId", async (c) => {
   const deviceId = c.req.param("deviceId");
-  const isNewPricing = c.req.query("isNewPricing") === "true";
 
   // Validate UUID format
   const uuidSchema = z.string().uuid();
@@ -36,16 +32,12 @@ router.get("/:deviceId", async (c) => {
         deviceId,
         creditBalance: 0,
         hoursBalance: 0,
-        creditsPerHour: isNewPricing
-          ? NEW_CREDITS_PER_AUDIO_HOUR
-          : CREDITS_PER_AUDIO_HOUR,
+        creditsPerHour: CREDITS_PER_AUDIO_HOUR,
         updatedAt: null,
       });
     }
 
-    const perHour = isNewPricing
-      ? NEW_CREDITS_PER_AUDIO_HOUR
-      : CREDITS_PER_AUDIO_HOUR;
+    const perHour = CREDITS_PER_AUDIO_HOUR;
     const hoursBalance = credits.credit_balance / perHour;
 
     return c.json({

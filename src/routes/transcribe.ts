@@ -7,12 +7,7 @@ import {
   API_ERRORS,
 } from "../lib/constants";
 import { cors } from "hono/cors";
-import {
-  makeOpenAI,
-  makeGroq,
-  isGeoBlockError,
-  callRelayServer,
-} from "../lib/openai-config";
+import { makeOpenAI, makeGroq, callRelayServer } from "../lib/openai-config";
 
 type Bindings = {
   OPENAI_API_KEY: string;
@@ -95,8 +90,7 @@ router.post("/", async (c) => {
     const model = formData.get("model")?.toString() || "whisper-1";
     const language = formData.get("language")?.toString();
     const prompt = formData.get("prompt")?.toString();
-    const isNewPricingStr = formData.get("isNewPricing")?.toString();
-    const isNewPricing = isNewPricingStr === 'true';
+    // New pricing is default; legacy flags are ignored
 
     if (!(file instanceof File)) {
       return c.json(
@@ -165,6 +159,7 @@ router.post("/", async (c) => {
     });
 
     let transcription;
+    let usedRelay = false;
     try {
       // Relay-first strategy: try relay before direct provider calls
       transcription = await callRelayServer({
@@ -175,6 +170,7 @@ router.post("/", async (c) => {
         prompt: prompt ?? undefined,
         signal: abortController.signal,
       });
+      usedRelay = true;
     } catch (error: any) {
       clearTimeout(timeoutId);
 
@@ -208,7 +204,10 @@ router.post("/", async (c) => {
         );
       } catch (directError: any) {
         // Re-throw original relay error details if direct also fails
-        console.error("❌ Direct provider call also failed after relay:", directError);
+        console.error(
+          "❌ Direct provider call also failed after relay:",
+          directError
+        );
         throw error;
       }
     } finally {
@@ -234,7 +233,6 @@ router.post("/", async (c) => {
         deviceId: user.deviceId,
         seconds,
         model,
-        isNewPricing,
       });
 
       if (!ok) {
@@ -243,6 +241,9 @@ router.post("/", async (c) => {
           402 /* Payment Required */
         );
       }
+      console.log(
+        `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${user.deviceId} (${model}) duration ${seconds}s`
+      );
     } else {
       console.error(
         "Could not get duration from transcription result (checked both duration and approx_duration)"

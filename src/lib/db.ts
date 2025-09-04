@@ -262,17 +262,14 @@ export const deductTranslationCredits = async ({
   deviceId,
   promptTokens,
   completionTokens,
-  isNewPricing = false,
 }: {
   deviceId: string;
   promptTokens: number;
   completionTokens: number;
-  isNewPricing?: boolean;
 }): Promise<boolean> => {
   const spend = tokensToCredits({
     prompt: promptTokens,
     completion: completionTokens,
-    isNewPricing,
   });
   return updateBalance(deviceId, spend, {
     reason: "TRANSLATE",
@@ -284,14 +281,12 @@ export const deductTranscriptionCredits = async ({
   deviceId,
   seconds,
   model,
-  isNewPricing = false,
 }: {
   deviceId: string;
   seconds: number;
   model: string;
-  isNewPricing?: boolean;
 }): Promise<boolean> => {
-  const spend = secondsToCredits({ seconds, model, isNewPricing });
+  const spend = secondsToCredits({ seconds, model });
   return updateBalance(deviceId, spend, {
     reason: "TRANSCRIBE",
     meta: { seconds, model },

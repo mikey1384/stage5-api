@@ -20,30 +20,22 @@ export const MODEL_PRICES = {
   },
 } as const;
 
-export const CREDITS_PER_AUDIO_HOUR = 50_000;
+// New pricing is the default
+export const CREDITS_PER_AUDIO_HOUR = 2_800;
 
-export const NEW_CREDITS_PER_AUDIO_HOUR = 2_800;
-
+// Unified calibration (prefer new env vars, fallback to old, default ~0.714285)
 export const AUDIO_CREDIT_CALIBRATION =
-  Number(process.env.AUDIO_CREDIT_CALIBRATION ?? 1) || 1;
+  Number(process.env.NEW_AUDIO_CREDIT_CALIBRATION ?? 0.714285) || 0.714285;
 
 export const TOKEN_CREDIT_CALIBRATION =
-  Number(process.env.TOKEN_CREDIT_CALIBRATION ?? 1) || 1;
-
-export const NEW_TOKEN_CREDIT_CALIBRATION =
   Number(process.env.NEW_TOKEN_CREDIT_CALIBRATION ?? 0.714285) || 0.714285;
-
-export const NEW_AUDIO_CREDIT_CALIBRATION =
-  Number(process.env.NEW_AUDIO_CREDIT_CALIBRATION ?? 0.714285) || 0.714285;
 
 export function secondsToCredits({
   seconds,
   model,
-  isNewPricing = false,
 }: {
   seconds: number;
   model: string;
-  isNewPricing?: boolean;
 }): number {
   const price = MODEL_PRICES[model as keyof typeof MODEL_PRICES];
   if (!price || !("perSecond" in price)) {
@@ -51,28 +43,20 @@ export function secondsToCredits({
   }
   const usd = seconds * price.perSecond;
   const credits = (usd * MARGIN) / USD_PER_CREDIT;
-  const calibration = isNewPricing
-    ? NEW_AUDIO_CREDIT_CALIBRATION
-    : AUDIO_CREDIT_CALIBRATION;
-  return Math.ceil(credits * calibration);
+  return Math.ceil(credits * AUDIO_CREDIT_CALIBRATION);
 }
 
 export function tokensToCredits({
   prompt,
   completion,
-  isNewPricing = false,
 }: {
   prompt: number;
   completion: number;
-  isNewPricing?: boolean;
 }): number {
   const usd =
     prompt * MODEL_PRICES["gpt-4.1"].in +
     completion * MODEL_PRICES["gpt-4.1"].out;
 
   const credits = (usd * MARGIN) / USD_PER_CREDIT;
-  const calibration = isNewPricing
-    ? NEW_TOKEN_CREDIT_CALIBRATION
-    : TOKEN_CREDIT_CALIBRATION;
-  return Math.ceil(credits * calibration);
+  return Math.ceil(credits * TOKEN_CREDIT_CALIBRATION);
 }

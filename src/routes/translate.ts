@@ -2,7 +2,11 @@ import { Hono, Next } from "hono";
 import { z } from "zod";
 import { Context } from "hono";
 import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
-import { ALLOWED_TRANSLATION_MODELS, API_ERRORS, DEFAULT_TEMPERATURE } from "../lib/constants";
+import {
+  ALLOWED_TRANSLATION_MODELS,
+  API_ERRORS,
+  DEFAULT_TEMPERATURE,
+} from "../lib/constants";
 import { cors } from "hono/cors";
 import {
   makeOpenAI,
@@ -82,7 +86,6 @@ const translateSchema = z.object({
   ),
   model: z.string(),
   temperature: z.number().optional(),
-  isNewPricing: z.boolean().optional(),
 });
 
 router.post("/", async (c) => {
@@ -110,7 +113,7 @@ router.post("/", async (c) => {
       );
     }
 
-    const { messages, model, isNewPricing } = parsedBody.data;
+    const { messages, model } = parsedBody.data;
 
     // Server-side model guard
     if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
@@ -147,7 +150,8 @@ router.post("/", async (c) => {
       abortController.abort();
     });
 
-    let completion;
+    let completion: any;
+    let usedRelay = false;
 
     try {
       // Relay-first: try chat-mode relay to preserve usage accounting
@@ -158,6 +162,7 @@ router.post("/", async (c) => {
         temperature: DEFAULT_TEMPERATURE,
         signal: abortController.signal,
       });
+      usedRelay = true;
     } catch (error: any) {
       clearTimeout(timeoutId);
 
@@ -195,14 +200,14 @@ router.post("/", async (c) => {
             const systemMessage =
               messages.find((msg) => msg.role === "system")?.content || "";
             const targetLanguage =
-              systemMessage.match(/translate.*to\s+(\w+)/i)?.[1] ||
-              "english";
+              systemMessage.match(/translate.*to\s+(\w+)/i)?.[1] || "english";
             completion = await callTranslationRelay({
               c,
               text: textToTranslate,
               target_language: targetLanguage,
               model,
             });
+            usedRelay = true;
           } catch (finalRelayError: any) {
             console.error(
               "❌ Relay (text mode) also failed after direct:",
@@ -238,7 +243,6 @@ router.post("/", async (c) => {
         deviceId: user.deviceId,
         promptTokens: usage.prompt_tokens ?? 0,
         completionTokens: usage.completion_tokens ?? 0,
-        isNewPricing: !!isNewPricing,
       });
 
       if (!ok) {
@@ -247,6 +251,10 @@ router.post("/", async (c) => {
           402 /* Payment Required */
         );
       }
+
+      console.log(
+        `[translate] ${usedRelay ? "relay" : "direct"} success for device ${user.deviceId} (${model}) tokens p=${usage.prompt_tokens ?? 0}, c=${usage.completion_tokens ?? 0}`
+      );
     } else {
       console.error("Could not get usage from translation result");
       // Return result anyway if we can't determine usage
