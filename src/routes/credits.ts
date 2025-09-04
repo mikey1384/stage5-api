@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { getCredits, getLedgerEntries } from "../lib/db";
+import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
 
 const router = new Hono();
 
@@ -26,18 +27,25 @@ router.get("/:deviceId", async (c) => {
   try {
     const credits = await getCredits({ deviceId });
 
+    // Backward-compatible shape for older clients: include hoursBalance and creditsPerHour
+    const perHour = CREDITS_PER_AUDIO_HOUR;
+
     if (!credits) {
       return c.json({
         deviceId,
         creditBalance: 0,
         hoursBalance: 0,
+        creditsPerHour: perHour,
         updatedAt: null,
       });
     }
 
+    const hoursBalance = credits.credit_balance / perHour;
     return c.json({
       deviceId: credits.device_id,
       creditBalance: credits.credit_balance,
+      hoursBalance,
+      creditsPerHour: perHour,
       updatedAt: credits.updated_at,
     });
   } catch (error) {

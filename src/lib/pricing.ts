@@ -1,5 +1,6 @@
 export const USD_PER_CREDIT = 10 / 350_000;
 export const MARGIN = 2;
+export const CREDITS_PER_AUDIO_HOUR = 2_800; // used for legacy clients
 
 export const MODEL_PRICES = {
   "gpt-4.1": {
