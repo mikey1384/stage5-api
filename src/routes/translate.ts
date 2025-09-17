@@ -1,18 +1,28 @@
 import { Hono, Next } from "hono";
-import { z } from "zod";
 import { Context } from "hono";
-import { getUserByApiKey, deductTranslationCredits } from "../lib/db";
+import crypto from "node:crypto";
+import { z } from "zod";
+import { cors } from "hono/cors";
 import {
   ALLOWED_TRANSLATION_MODELS,
   API_ERRORS,
   DEFAULT_TEMPERATURE,
 } from "../lib/constants";
-import { cors } from "hono/cors";
 import {
-  makeOpenAI,
-  isGeoBlockError,
-  callTranslationRelay,
-  callChatRelay,
+  getUserByApiKey,
+  createTranslationJob,
+  setTranslationJobProcessing,
+  resetTranslationJobRelay,
+  getTranslationJob,
+  storeTranslationJobResult,
+  storeTranslationJobError,
+  markTranslationJobCredited,
+  deductTranslationCredits,
+  TranslationJobRecord,
+} from "../lib/db";
+import {
+  submitTranslationRelayJob,
+  fetchRelayTranslationStatus,
 } from "../lib/openai-config";
 
 type Bindings = {
@@ -29,27 +39,24 @@ type Variables = {
 
 const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
-// Add CORS middleware
 router.use(
   "*",
   cors({
-    origin: "*", // Restrict in production
-    allowMethods: ["POST", "OPTIONS"],
+    origin: "*",
+    allowMethods: ["POST", "GET", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
   })
 );
 
-// OPTIONS early-exit (before auth middleware) - explicit content-type for Safari
 router.options(
   "*",
-  (c) =>
+  c =>
     new Response("", {
       status: 204,
       headers: { "Content-Type": "text/plain" },
     })
 );
 
-// Authentication middleware
 router.use("*", async (c: Context, next: Next) => {
   const authHeader = c.req.header("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -89,216 +96,391 @@ const translateSchema = z.object({
   reasoning: z.any().optional(),
 });
 
-router.post("/", async (c) => {
+router.post("/", async c => {
   const user = c.get("user");
 
-  try {
-    // Check if request was already aborted
-    if (c.req.raw.signal?.aborted) {
-      return c.json(
-        { error: "Request cancelled", message: "Request was cancelled" },
-        408 // Request Timeout - closest standard status for client cancellation
-      );
-    }
+  if (c.req.raw.signal?.aborted) {
+    return c.json(
+      { error: "Request cancelled", message: "Request was cancelled" },
+      408
+    );
+  }
 
-    const body = await c.req.json();
-    const parsedBody = translateSchema.safeParse(body);
+  const body = await c.req.json();
+  const parsedBody = translateSchema.safeParse(body);
 
-    if (!parsedBody.success) {
-      return c.json(
-        {
-          error: API_ERRORS.INVALID_REQUEST,
-          details: parsedBody.error.flatten(),
-        },
-        400
-      );
-    }
-
-    const { messages, model, temperature, reasoning } = parsedBody.data;
-    const isGpt5 = model?.startsWith("gpt-5");
-    const effectiveTemp = typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE;
-
-    // Server-side model guard
-    if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
-      return c.json(
-        {
-          error: API_ERRORS.INVALID_MODEL,
-          message: `Only models ${ALLOWED_TRANSLATION_MODELS.join(
-            ", "
-          )} are allowed`,
-        },
-        400
-      );
-    }
-
-    // Check again before expensive operation
-    if (c.req.raw.signal?.aborted) {
-      return c.json(
-        { error: "Request cancelled", message: "Request was cancelled" },
-        408
-      );
-    }
-
-    const openai = makeOpenAI(c);
-
-    // Create a combined abort signal that responds to both client cancellation and server timeout
-    const abortController = new AbortController();
-    const timeoutMs = isGpt5 ? 600000 : 300000; // 10 min for gpt-5, 5 min otherwise
-    const timeoutId = setTimeout(() => {
-      abortController.abort();
-    }, timeoutMs);
-
-    // Listen for client cancellation
-    c.req.raw.signal?.addEventListener("abort", () => {
-      clearTimeout(timeoutId);
-      abortController.abort();
-    });
-
-    let completion: any;
-    let usedRelay = false;
-
-    try {
-      // Relay-first: try chat-mode relay to preserve usage accounting
-      completion = await callChatRelay({
-        c,
-        messages,
-        model,
-        temperature: isGpt5 ? undefined : effectiveTemp,
-        reasoning,
-        signal: abortController.signal,
-      });
-      usedRelay = true;
-    } catch (error: any) {
-      clearTimeout(timeoutId);
-
-      // Handle cancellation/timeout
-      if (error.name === "AbortError" || abortController.signal.aborted) {
-        const wasCancelled = c.req.raw.signal?.aborted;
-        return c.json(
-          {
-            error: wasCancelled ? "Request cancelled" : "Request timeout",
-            message: wasCancelled
-              ? "Request was cancelled by client"
-              : "Request exceeded timeout limit",
-          },
-          408 // Request Timeout for both cases
-        );
-      }
-
-      // If relay-first fails (network/auth), fall back to direct OpenAI
-      try {
-        try {
-          const req: any = {
-            messages,
-            model,
-            ...(reasoning ? { reasoning } : {}),
-          };
-          if (!isGpt5) req.temperature = effectiveTemp;
-          completion = await openai.chat.completions.create(req, {
-            signal: abortController.signal,
-          });
-        } catch (maybeReasoningError: any) {
-          const status = maybeReasoningError?.status || maybeReasoningError?.response?.status;
-          const msg = String(maybeReasoningError?.message || "").toLowerCase();
-          if (reasoning && (status === 400 || msg.includes("reasoning"))) {
-            const req2: any = { messages, model };
-            if (!isGpt5) req2.temperature = effectiveTemp;
-            completion = await openai.chat.completions.create(req2, {
-              signal: abortController.signal,
-            });
-          } else {
-            throw maybeReasoningError;
-          }
-        }
-      } catch (directError: any) {
-        // As last resort, if direct failed due to geo issues, try simple text relay
-        if (isGeoBlockError(directError)) {
-          try {
-            const textToTranslate =
-              messages.find((msg) => msg.role === "user")?.content || "";
-            const systemMessage =
-              messages.find((msg) => msg.role === "system")?.content || "";
-            const targetLanguage =
-              systemMessage.match(/translate.*to\s+(\w+)/i)?.[1] || "english";
-            completion = await callTranslationRelay({
-              c,
-              text: textToTranslate,
-              target_language: targetLanguage,
-              model,
-            });
-            usedRelay = true;
-          } catch (finalRelayError: any) {
-            console.error(
-              "❌ Relay (text mode) also failed after direct:",
-              finalRelayError
-            );
-            throw directError;
-          }
-        } else {
-          throw directError;
-        }
-      }
-    } finally {
-      clearTimeout(timeoutId);
-    }
-
-    // Note: OpenAI rate-limit headers would need to be accessed differently
-    // via the raw fetch response, not available in this SDK abstraction
-
-    // Final check before processing credits
-    if (c.req.raw.signal?.aborted) {
-      return c.json(
-        { error: "Request cancelled", message: "Request was cancelled" },
-        408
-      );
-    }
-
-    /* -------------------------------------------------- */
-    /* Track spend & deduct                               */
-    /* -------------------------------------------------- */
-    const usage = completion.usage; // { prompt_tokens: 123, completion_tokens: 456 }
-    if (usage) {
-      const ok = await deductTranslationCredits({
-        deviceId: user.deviceId,
-        promptTokens: usage.prompt_tokens ?? 0,
-        completionTokens: usage.completion_tokens ?? 0,
-      });
-
-      if (!ok) {
-        return c.json(
-          { error: API_ERRORS.INSUFFICIENT_CREDITS },
-          402 /* Payment Required */
-        );
-      }
-
-      console.log(
-        `[translate] ${usedRelay ? "relay" : "direct"} success for device ${user.deviceId} (${model}) tokens p=${usage.prompt_tokens ?? 0}, c=${usage.completion_tokens ?? 0}`
-      );
-    } else {
-      console.error("Could not get usage from translation result");
-      // Return result anyway if we can't determine usage
-    }
-
-    return c.json(completion);
-  } catch (error) {
-    console.error("Error creating translation:", error);
-
-    // Handle cancellation in catch block as well
-    if (c.req.raw.signal?.aborted) {
-      return c.json(
-        { error: "Request cancelled", message: "Request was cancelled" },
-        408
-      );
-    }
-
+  if (!parsedBody.success) {
     return c.json(
       {
-        error: "Failed to create translation",
-        message: error instanceof Error ? error.message : "Unknown error",
+        error: API_ERRORS.INVALID_REQUEST,
+        details: parsedBody.error.flatten(),
       },
-      500
+      400
+    );
+  }
+
+  const { messages, model, temperature, reasoning } = parsedBody.data;
+
+  if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
+    return c.json(
+      {
+        error: API_ERRORS.INVALID_MODEL,
+        message: `Only models ${ALLOWED_TRANSLATION_MODELS.join(
+          ", "
+        )} are allowed`,
+      },
+      { status: 400 }
+    );
+  }
+
+  const isGpt5 = model.startsWith("gpt-5");
+  const effectiveTemp =
+    typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE;
+  const jobId = crypto.randomUUID();
+  const payload = {
+    mode: "chat" as const,
+    messages,
+    model,
+    reasoning,
+    temperature: !isGpt5 ? effectiveTemp : undefined,
+  };
+
+  await createTranslationJob({
+    jobId,
+    deviceId: user.deviceId,
+    model,
+    payload,
+  });
+
+  try {
+    const submission = await submitTranslationRelayJob({
+      c,
+      payload,
+      signal: c.req.raw.signal,
+    });
+
+    if (submission.type === "completed") {
+      const completion = submission.result;
+      const persistResult = await persistCompletion({
+        jobId,
+        jobOwner: user.deviceId,
+        model,
+        payload,
+        completion,
+      });
+
+      if (persistResult.status === "error") {
+        return c.json(
+          { error: persistResult.message },
+          { status: persistResult.code as any }
+        );
+      }
+
+      return c.json(completion);
+    }
+
+    await setTranslationJobProcessing({
+      jobId,
+      relayJobId: submission.relayJobId,
+    });
+
+    return c.json(
+      { jobId, status: submission.status ?? "queued" },
+      { status: 202 }
+    );
+  } catch (error: any) {
+    const message = error?.message || "Failed to submit translation job";
+    await storeTranslationJobError({ jobId, message });
+    return c.json(
+      {
+        error: "Failed to queue translation",
+        message,
+      },
+      { status: 500 }
     );
   }
 });
 
+router.get("/result/:jobId", async c => {
+  const user = c.get("user");
+  const jobId = c.req.param("jobId");
+
+  const job = await getTranslationJob({ jobId });
+  if (!job || job.device_id !== user.deviceId) {
+    return c.json({ error: "Job not found" }, { status: 404 });
+  }
+
+  if (job.status === "completed") {
+    return respondWithJobResult(c, job);
+  }
+
+  if (job.status === "failed") {
+    return respondWithJobFailure(c, job);
+  }
+
+  const payload = parseJobPayload(job);
+  if (!payload) {
+    await storeTranslationJobError({ jobId, message: "Invalid payload" });
+    return c.json({ error: "Translation job failed" }, { status: 500 });
+  }
+
+  const syncResult = await syncJobWithRelay({
+    c,
+    job,
+    payload,
+    signal: c.req.raw.signal,
+  });
+
+  if (syncResult?.status === "error") {
+    return c.json({ error: syncResult.message }, { status: syncResult.code as any });
+  }
+
+  const refreshed = await getTranslationJob({ jobId });
+  if (!refreshed) {
+    return c.json({ error: "Job not found" }, { status: 404 });
+  }
+
+  if (refreshed.status === "completed") {
+    return respondWithJobResult(c, refreshed);
+  }
+
+  if (refreshed.status === "failed") {
+    return respondWithJobFailure(c, refreshed);
+  }
+
+  return c.json({ status: refreshed.status }, { status: 202 });
+});
+
 export default router;
+
+function parseJobPayload(job: TranslationJobRecord): Record<string, unknown> | null {
+  try {
+    if (!job.payload) return null;
+    return JSON.parse(job.payload);
+  } catch {
+    return null;
+  }
+}
+
+function respondWithJobResult(c: Context<any>, job: TranslationJobRecord) {
+  try {
+    const parsed = job.result ? JSON.parse(job.result) : {};
+    return c.json(parsed);
+  } catch {
+    return c.json({ error: "Malformed translation result" }, { status: 500 });
+  }
+}
+
+function respondWithJobFailure(c: Context<any>, job: TranslationJobRecord) {
+  const message = job.error || "Translation job failed";
+  const status = job.error === "insufficient-credits" ? 402 : 500;
+  return c.json({ error: message }, { status: status as any });
+}
+
+async function syncJobWithRelay({
+  c,
+  job,
+  payload,
+  signal,
+}: {
+  c: Context<any>;
+  job: TranslationJobRecord;
+  payload: Record<string, unknown>;
+  signal?: AbortSignal;
+}): Promise<{ status: "ok" } | { status: "error"; code: number; message: string }> {
+  if (!job.relay_job_id) {
+    try {
+      const submission = await submitTranslationRelayJob({
+        c,
+        payload,
+        signal,
+      });
+
+      if (submission.type === "completed") {
+        const completion = submission.result;
+        const persistResult = await persistCompletion({
+          jobId: job.job_id,
+          jobOwner: job.device_id,
+          model: job.model ?? payload?.model?.toString?.() ?? "",
+          payload,
+          completion,
+        });
+
+        if (persistResult.status === "error") {
+          return persistResult;
+        }
+
+        return { status: "ok" };
+      }
+
+      await setTranslationJobProcessing({
+        jobId: job.job_id,
+        relayJobId: submission.relayJobId,
+      });
+      return { status: "ok" };
+    } catch (error: any) {
+      await storeTranslationJobError({
+        jobId: job.job_id,
+        message: error?.message || "Failed to submit translation job",
+      });
+      return {
+        status: "error",
+        code: 500,
+        message: error?.message || "Translation job failed",
+      };
+    }
+  }
+
+  try {
+    const status = await fetchRelayTranslationStatus({
+      c,
+      relayJobId: job.relay_job_id!,
+      signal,
+    });
+
+    if (status.type === "processing") {
+      await setTranslationJobProcessing({
+        jobId: job.job_id,
+        relayJobId: job.relay_job_id,
+      });
+      return { status: "ok" };
+    }
+
+    if (status.type === "completed") {
+      const completion = status.result;
+      const persistResult = await persistCompletion({
+        jobId: job.job_id,
+        jobOwner: job.device_id,
+        model: job.model ?? payload?.model?.toString?.() ?? "",
+        payload,
+        completion,
+      });
+
+      if (persistResult.status === "error") {
+        return persistResult;
+      }
+
+      return { status: "ok" };
+    }
+
+    if (status.type === "not_found") {
+      await resetTranslationJobRelay({ jobId: job.job_id });
+      const resubmission = await submitTranslationRelayJob({
+        c,
+        payload,
+        signal,
+      });
+
+      if (resubmission.type === "completed") {
+        const completion = resubmission.result;
+        const persistResult = await persistCompletion({
+          jobId: job.job_id,
+          jobOwner: job.device_id,
+          model: job.model ?? payload?.model?.toString?.() ?? "",
+          payload,
+          completion,
+        });
+
+        if (persistResult.status === "error") {
+          return persistResult;
+        }
+
+        return { status: "ok" };
+      }
+
+      await setTranslationJobProcessing({
+        jobId: job.job_id,
+        relayJobId: resubmission.relayJobId,
+      });
+      return { status: "ok" };
+    }
+
+    if (status.type === "error") {
+      await storeTranslationJobError({ jobId: job.job_id, message: status.message });
+      return { status: "error", code: 500, message: status.message };
+    }
+
+    return { status: "ok" };
+  } catch (error: any) {
+    await storeTranslationJobError({
+      jobId: job.job_id,
+      message: error?.message || "Relay status check failed",
+    });
+    return {
+      status: "error",
+      code: 500,
+      message: error?.message || "Relay status check failed",
+    };
+  }
+}
+
+async function persistCompletion({
+  jobId,
+  jobOwner,
+  model,
+  payload,
+  completion,
+}: {
+  jobId: string;
+  jobOwner: string;
+  model: string;
+  payload: Record<string, unknown>;
+  completion: any;
+}): Promise<{ status: "ok" } | { status: "error"; code: number; message: string }> {
+  const usage = completion?.usage ?? {};
+  const promptTokens =
+    typeof usage?.prompt_tokens === "number"
+      ? usage.prompt_tokens
+      : estimatePromptTokens(payload);
+  const completionTokens =
+    typeof usage?.completion_tokens === "number"
+      ? usage.completion_tokens
+      : estimateCompletionTokens(completion);
+
+  await storeTranslationJobResult({
+    jobId,
+    result: completion,
+    promptTokens,
+    completionTokens,
+  });
+
+  const job = await getTranslationJob({ jobId });
+  if (!job) {
+    return { status: "error", code: 500, message: "Job not found" };
+  }
+
+  if (!job.credited) {
+    const ok = await deductTranslationCredits({
+      deviceId: jobOwner,
+      promptTokens: promptTokens ?? 0,
+      completionTokens: completionTokens ?? 0,
+    });
+
+    if (!ok) {
+      await storeTranslationJobError({ jobId, message: "insufficient-credits" });
+      return { status: "error", code: 402, message: "insufficient-credits" };
+    }
+
+    await markTranslationJobCredited({ jobId });
+  }
+
+  return { status: "ok" };
+}
+
+function estimatePromptTokens(payload: Record<string, unknown>): number {
+  try {
+    const raw = JSON.stringify(payload?.messages ?? payload ?? {});
+    return Math.ceil(raw.length / 4);
+  } catch {
+    return 0;
+  }
+}
+
+function estimateCompletionTokens(completion: any): number {
+  try {
+    const content = completion?.choices?.[0]?.message?.content ?? "";
+    return Math.ceil(String(content).length / 4);
+  } catch {
+    return 0;
+  }
+}

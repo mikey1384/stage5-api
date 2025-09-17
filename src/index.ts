@@ -9,6 +9,7 @@ import creditsRouter from "./routes/credits";
 import transcribeRouter from "./routes/transcribe";
 import translateRouter from "./routes/translate";
 import adminRouter from "./routes/admin";
+import dubRouter from "./routes/dub";
 import { ensureDatabase } from "./lib/db";
 
 // Types for Cloudflare Workers environment
@@ -55,6 +56,7 @@ app.route("/payments", paymentsRouter);
 app.route("/credits", creditsRouter);
 app.route("/transcribe", transcribeRouter);
 app.route("/translate", translateRouter);
+app.route("/dub", dubRouter);
 app.route("/admin", adminRouter);
 
 // Pretty printing only AFTER routes so it never eats request bodies

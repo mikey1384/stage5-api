@@ -44,6 +44,10 @@ export const ensureDatabase = async (env: { DB: D1Database }) => {
       "CREATE TABLE IF NOT EXISTS credit_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, delta INTEGER NOT NULL, reason TEXT NOT NULL, meta TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
     );
 
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS translation_jobs(job_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, status TEXT NOT NULL, model TEXT, payload TEXT, relay_job_id TEXT, result TEXT, error TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, credited INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    );
+
     tablesCreated = true;
   }
 };
@@ -291,6 +295,195 @@ export const deductTranscriptionCredits = async ({
     reason: "TRANSCRIBE",
     meta: { seconds, model },
   });
+};
+
+export const deductSpeechCredits = async ({
+  deviceId,
+  promptTokens,
+  meta,
+}: {
+  deviceId: string;
+  promptTokens: number;
+  meta?: Record<string, unknown>;
+}): Promise<boolean> => {
+  const spend = tokensToCredits({ prompt: promptTokens, completion: 0 });
+  return updateBalance(deviceId, spend, {
+    reason: "DUB",
+    meta: { promptTokens, ...(meta ?? {}) },
+  });
+};
+
+export interface TranslationJobRecord {
+  job_id: string;
+  device_id: string;
+  status: string;
+  model: string | null;
+  payload: string | null;
+  relay_job_id: string | null;
+  result: string | null;
+  error: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  credited: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export const createTranslationJob = async ({
+  jobId,
+  deviceId,
+  model,
+  payload,
+  relayJobId,
+}: {
+  jobId: string;
+  deviceId: string;
+  model: string;
+  payload: Record<string, unknown>;
+  relayJobId?: string | null;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    INSERT INTO translation_jobs (job_id, device_id, status, model, payload, relay_job_id, created_at, updated_at)
+    VALUES (?, ?, 'queued', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT(job_id) DO UPDATE SET
+      device_id = excluded.device_id,
+      status = 'queued',
+      model = excluded.model,
+      payload = excluded.payload,
+      relay_job_id = excluded.relay_job_id,
+      error = NULL,
+      updated_at = CURRENT_TIMESTAMP
+  `);
+
+  await stmt
+    .bind(jobId, deviceId, model, JSON.stringify(payload ?? {}), relayJobId ?? null)
+    .run();
+};
+
+export const getTranslationJob = async ({
+  jobId,
+}: {
+  jobId: string;
+}): Promise<TranslationJobRecord | null> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(
+    "SELECT * FROM translation_jobs WHERE job_id = ?"
+  );
+  const result = await stmt.bind(jobId).first();
+  return (result as TranslationJobRecord) ?? null;
+};
+
+export const setTranslationJobProcessing = async ({
+  jobId,
+  relayJobId,
+}: {
+  jobId: string;
+  relayJobId: string | null;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    UPDATE translation_jobs
+       SET status = 'processing',
+           relay_job_id = ?,
+           error = NULL,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ?
+  `);
+
+  await stmt.bind(relayJobId ?? null, jobId).run();
+};
+
+export const resetTranslationJobRelay = async ({
+  jobId,
+}: {
+  jobId: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    UPDATE translation_jobs
+       SET status = 'queued',
+           relay_job_id = NULL,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ?
+  `);
+
+  await stmt.bind(jobId).run();
+};
+
+export const storeTranslationJobResult = async ({
+  jobId,
+  result,
+  promptTokens,
+  completionTokens,
+}: {
+  jobId: string;
+  result: any;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    UPDATE translation_jobs
+       SET status = 'completed',
+           result = ?,
+           error = NULL,
+           prompt_tokens = ?,
+           completion_tokens = ?,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ?
+  `);
+
+  await stmt
+    .bind(
+      JSON.stringify(result ?? {}),
+      promptTokens ?? null,
+      completionTokens ?? null,
+      jobId
+    )
+    .run();
+};
+
+export const storeTranslationJobError = async ({
+  jobId,
+  message,
+}: {
+  jobId: string;
+  message: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    UPDATE translation_jobs
+       SET status = 'failed',
+           error = ?,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ?
+  `);
+
+  await stmt.bind(message, jobId).run();
+};
+
+export const markTranslationJobCredited = async ({
+  jobId,
+}: {
+  jobId: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    UPDATE translation_jobs
+       SET credited = 1,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ?
+  `);
+
+  await stmt.bind(jobId).run();
 };
 
 const recordLedger = async ({

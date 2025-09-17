@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import Groq from "groq-sdk";
 import { Context } from "hono";
-import { OPENAI_RELAY_URL } from "./constants";
+import { OPENAI_RELAY_URL, SpeechFormat } from "./constants";
 
 /**
  * Creates an OpenAI client for direct API calls (primary path)
@@ -114,12 +114,27 @@ export async function callTranslationRelay({
   text,
   target_language,
   model,
+  temperature,
+  signal,
 }: {
   c: Context<any>;
   text: string;
   target_language: string;
   model: string;
+  temperature?: number;
+  signal?: AbortSignal;
 }) {
+  const payload: Record<string, unknown> = {
+    text,
+    target_language,
+    model,
+  };
+
+  const isGpt5 = String(model).startsWith("gpt-5");
+  if (!isGpt5 && typeof temperature === "number" && Number.isFinite(temperature)) {
+    payload.temperature = temperature;
+  }
+
   const relayResponse = await fetch(`${OPENAI_RELAY_URL}/translate`, {
     method: "POST",
     headers: {
@@ -127,43 +142,16 @@ export async function callTranslationRelay({
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-OpenAI-Key": c.env.OPENAI_API_KEY,
     },
-    body: JSON.stringify({
-      text,
-      target_language,
-      model,
-    }),
+    body: JSON.stringify(payload),
+    signal,
   });
 
-  if (!relayResponse.ok) {
-    const errorText = await relayResponse.text();
-    console.error(
-      `❌ Translation relay server error: ${relayResponse.status} ${errorText}`
-    );
-    throw new Error(
-      `Translation relay server error: ${relayResponse.status} ${errorText}`
-    );
-  }
-
-  const result = (await relayResponse.json()) as any;
-
-  // Convert relay response format to OpenAI format
-  return {
-    choices: [
-      {
-        message: {
-          content: result.translated_text,
-          role: "assistant",
-        },
-      },
-    ],
-    usage: {
-      prompt_tokens: Math.ceil(text.length / 4), // Rough estimate
-      completion_tokens: Math.ceil(result.translated_text.length / 4), // Rough estimate
-      total_tokens: Math.ceil(
-        (text.length + result.translated_text.length) / 4
-      ),
-    },
-  };
+  return resolveRelayTranslationResponse({
+    c,
+    resp: relayResponse,
+    signal,
+    errorPrefix: "Translation relay server error",
+  });
 }
 
 /**
@@ -185,6 +173,15 @@ export async function callChatRelay({
   reasoning?: any;
   signal?: AbortSignal;
 }) {
+  const payload: Record<string, unknown> = { messages, model };
+  const isGpt5 = String(model).startsWith("gpt-5");
+  if (reasoning !== undefined) {
+    payload.reasoning = reasoning;
+  }
+  if (!isGpt5 && typeof temperature === "number" && Number.isFinite(temperature)) {
+    payload.temperature = temperature;
+  }
+
   const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
     method: "POST",
     headers: {
@@ -192,15 +189,345 @@ export async function callChatRelay({
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-OpenAI-Key": c.env.OPENAI_API_KEY,
     },
-    body: JSON.stringify({ messages, model, temperature, reasoning }),
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  return resolveRelayTranslationResponse({
+    c,
+    resp,
+    signal,
+    errorPrefix: "Relay chat translate error",
+  });
+}
+
+export async function submitTranslationRelayJob({
+  c,
+  payload,
+  signal,
+}: {
+  c: Context<any>;
+  payload: Record<string, unknown>;
+  signal?: AbortSignal;
+}): Promise<
+  | { type: "accepted"; relayJobId: string; status?: string }
+  | { type: "completed"; result: any }
+> {
+  const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (resp.status === 202) {
+    const data = (await resp.json().catch(() => ({}))) as
+      | { jobId?: string; status?: string }
+      | undefined;
+    const relayJobId = data?.jobId;
+    if (!relayJobId) {
+      throw new Error(
+        `Translation relay server error: missing jobId (body=${JSON.stringify(data)})`
+      );
+    }
+    return { type: "accepted", relayJobId, status: data?.status };
+  }
+
+  if (resp.status === 200) {
+    const result = await resp.json();
+    return { type: "completed", result };
+  }
+
+  const text = await resp.text();
+  throw new Error(
+    `Translation relay server error: ${resp.status} ${text || resp.statusText}`
+  );
+}
+
+export async function fetchRelayTranslationStatus({
+  c,
+  relayJobId,
+  signal,
+}: {
+  c: Context<any>;
+  relayJobId: string;
+  signal?: AbortSignal;
+}): Promise<
+  | { type: "processing" }
+  | { type: "completed"; result: any }
+  | { type: "not_found" }
+  | { type: "error"; message: string }
+> {
+  const resp = await fetch(
+    `${OPENAI_RELAY_URL}/translate/result/${encodeURIComponent(relayJobId)}`,
+    {
+      method: "GET",
+      headers: {
+        "X-Relay-Secret": c.env.RELAY_SECRET,
+        "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+      },
+      signal,
+    }
+  );
+
+  if (resp.status === 202) {
+    return { type: "processing" };
+  }
+
+  if (resp.status === 200) {
+    const result = await resp.json();
+    return { type: "completed", result };
+  }
+
+  if (resp.status === 404) {
+    return { type: "not_found" };
+  }
+
+  const text = await resp.text();
+  return {
+    type: "error",
+    message: `${resp.status} ${text || resp.statusText}`,
+  };
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+async function resolveRelayTranslationResponse({
+  c,
+  resp,
+  signal,
+  errorPrefix,
+}: {
+  c: Context<any>;
+  resp: Response;
+  signal?: AbortSignal;
+  errorPrefix: string;
+}): Promise<any> {
+  if (resp.status === 202) {
+    let data: any = {};
+    try {
+      data = await resp.json();
+    } catch {
+      // ignore malformed body
+    }
+
+    const jobId = data?.jobId;
+    if (!jobId) {
+      throw new Error(`${errorPrefix}: missing jobId from relay response`);
+    }
+
+    const pollHeaders = {
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+    };
+
+    const pollIntervalMs = 2000;
+    const maxWaitMs = 600_000; // 10 minutes
+    const startTime = Date.now();
+
+    while (true) {
+      if (signal?.aborted) {
+        throw new DOMException("Operation cancelled", "AbortError");
+      }
+
+      if (Date.now() - startTime > maxWaitMs) {
+        throw new Error(`${errorPrefix}: job ${jobId} timed out`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+
+      const statusResp = await fetch(
+        `${OPENAI_RELAY_URL}/translate/result/${jobId}`,
+        {
+          method: "GET",
+          headers: pollHeaders,
+          signal,
+        }
+      );
+
+      if (statusResp.status === 202) {
+        continue;
+      }
+
+      if (statusResp.status === 200) {
+        return statusResp.json();
+      }
+
+      if (statusResp.status === 404) {
+        const text = await statusResp.text();
+        throw new Error(
+          `${errorPrefix}: job ${jobId} not found (${text || "404"})`
+        );
+      }
+
+      const text = await statusResp.text();
+      throw new Error(`${errorPrefix}: ${statusResp.status} ${text}`);
+    }
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`${errorPrefix}: ${resp.status} ${text}`);
+  }
+
+  return resp.json();
+}
+
+export async function callSpeechRelay({
+  c,
+  text,
+  voice,
+  model,
+  format,
+  signal,
+}: {
+  c: Context<any>;
+  text: string;
+  voice: string;
+  model: string;
+  format: SpeechFormat;
+  signal?: AbortSignal;
+}) {
+  const resp = await fetch(`${OPENAI_RELAY_URL}/speech`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+    },
+    body: JSON.stringify({ text, voice, model, format }),
+    signal,
+  });
+
+  if (!resp.ok) {
+    const textBody = await resp.text();
+    throw new Error(
+      `Speech relay server error: ${resp.status} ${textBody || resp.statusText}`
+    );
+  }
+
+  return (await resp.json()) as { audioBase64: string; voice: string; model: string; format: string };
+}
+
+export async function callSpeechDirect({
+  c,
+  text,
+  voice,
+  model,
+  format,
+  signal,
+}: {
+  c: Context<any>;
+  text: string;
+  voice: string;
+  model: string;
+  format: SpeechFormat;
+  signal?: AbortSignal;
+}) {
+  const openai = makeOpenAI(c);
+  const speech = await openai.audio.speech.create(
+    {
+      model,
+      voice,
+      input: text,
+      response_format: format,
+    },
+    { signal }
+  );
+  const arrayBuffer = await speech.arrayBuffer();
+  return {
+    audioBase64: arrayBufferToBase64(arrayBuffer),
+    voice,
+    model,
+    format,
+  };
+}
+
+export async function callDubRelay({
+  c,
+  lines,
+  segments,
+  voice,
+  model,
+  format,
+  signal,
+}: {
+  c: Context<any>;
+  lines?: string[];
+  segments?: Array<{
+    index: number;
+    text: string;
+    start?: number;
+    end?: number;
+    targetDuration?: number;
+  }>;
+  voice: string;
+  model: string;
+  format: SpeechFormat;
+  signal?: AbortSignal;
+}) {
+  const payload: Record<string, unknown> = {
+    voice,
+    model,
+    format,
+  };
+
+  if (segments?.length) {
+    payload.segments = segments.map((seg, idx) => ({
+      index: Number.isFinite(seg.index) ? seg.index : idx + 1,
+      text: seg.text,
+      start: seg.start,
+      end: seg.end,
+      targetDuration: seg.targetDuration,
+    }));
+  }
+
+  if (lines?.length) {
+    payload.lines = lines;
+  }
+
+  const resp = await fetch(`${OPENAI_RELAY_URL}/dub`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+    },
+    body: JSON.stringify(payload),
     signal,
   });
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Relay chat translate error: ${resp.status} ${text}`);
+    throw new Error(`Dub relay server error: ${resp.status} ${text || resp.statusText}`);
   }
-  return resp.json();
+
+  return (await resp.json()) as {
+    audioBase64?: string;
+    voice?: string;
+    model?: string;
+    format?: SpeechFormat;
+    chunkCount?: number;
+    segmentCount?: number;
+    totalCharacters?: number;
+    segments?: Array<{
+      index: number;
+      audioBase64: string;
+      targetDuration?: number;
+    }>;
+  };
 }
 
 /**
