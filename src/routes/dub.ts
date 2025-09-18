@@ -13,9 +13,12 @@ import {
   SpeechFormat,
 } from "../lib/constants";
 import { getUserByApiKey, deductSpeechCredits } from "../lib/db";
-import { callDubRelay } from "../lib/openai-config";
+import { callDubRelay, callSpeechDirect } from "../lib/openai-config";
 
 const MAX_SCRIPT_CHARACTERS = 200_000;
+const MAX_TOTAL_SEGMENT_CHARACTERS = 80_000;
+const MAX_SEGMENTS_PER_REQUEST = 240;
+const FALLBACK_SEGMENT_CONCURRENCY = 4;
 const HD_ONLY_VOICES = new Set<string>();
 
 function normalizeSegmentText(raw?: string | null): string {
@@ -199,7 +202,31 @@ router.post("/", async (c) => {
       });
     });
 
-    const textLines = sanitizedSegments.map((seg) => seg.text);
+    const totalCharacters = sanitizedSegments.reduce(
+      (sum, seg) => sum + seg.text.length,
+      0
+    );
+    if (totalCharacters > MAX_TOTAL_SEGMENT_CHARACTERS) {
+      return c.json(
+        {
+          error: API_ERRORS.INVALID_REQUEST,
+          message: `Dub request includes ${totalCharacters} characters (max ${MAX_TOTAL_SEGMENT_CHARACTERS}). Please split the job into smaller batches.`,
+        },
+        413
+      );
+    }
+
+    if (sanitizedSegments.length > MAX_SEGMENTS_PER_REQUEST) {
+      return c.json(
+        {
+          error: API_ERRORS.INVALID_REQUEST,
+          message: `Dub request contains ${sanitizedSegments.length} segments (max ${MAX_SEGMENTS_PER_REQUEST}). Reduce the number of segments and retry.`,
+        },
+        413
+      );
+    }
+
+    const textLines = sanitizedSegments.map(seg => seg.text);
 
     if (!textLines.length) {
       return c.json(
@@ -251,31 +278,20 @@ router.post("/", async (c) => {
       abortController.abort();
     });
 
-    let relayResult: {
-      audioBase64?: string;
-      voice?: string;
-      model?: string;
-      format?: string;
-      chunkCount?: number;
-      segmentCount?: number;
-      segments?: Array<{
-        index: number;
-        audioBase64: string;
-        targetDuration?: number;
-      }>;
-    } | null = null;
+    type SynthResult = Awaited<ReturnType<typeof synthesizeDubWithFallback>>;
+    let relayResult: SynthResult | null = null;
 
     try {
-      relayResult = await callDubRelay({
+      relayResult = await synthesizeDubWithFallback({
         c,
+        sanitizedSegments,
         lines: textLines,
-        segments: sanitizedSegments,
         voice: chosenVoice,
         model: chosenModel,
         format: chosenFormat,
         signal: abortController.signal,
       });
-    } catch (relayError: any) {
+    } catch (synthesisError: any) {
       clearTimeout(timeoutId);
 
       if (abortController.signal.aborted) {
@@ -291,13 +307,13 @@ router.post("/", async (c) => {
         );
       }
 
-      throw relayError;
+      throw synthesisError;
     } finally {
       clearTimeout(timeoutId);
     }
 
-    if (!relayResult?.audioBase64 && !relayResult?.segments?.length) {
-      throw new Error("Relay did not return synthesized audio segments");
+    if (!relayResult || (!relayResult.audioBase64 && !relayResult.segments?.length)) {
+      throw new Error("Dub synthesis returned no audio segments");
     }
 
     const cleanedScript = script.replace(/\s+/g, " ").trim();
@@ -309,7 +325,7 @@ router.post("/", async (c) => {
       return sum + (Number.isFinite(delta) && delta > 0 ? delta : 0);
     }, 0);
 
-    const usedRelay = true;
+    const usedRelay = relayResult.usedRelay;
 
     const ok = await deductSpeechCredits({
       deviceId: user.deviceId,
@@ -327,22 +343,22 @@ router.post("/", async (c) => {
     }
 
     const segmentCount =
-      relayResult?.segmentCount ?? relayResult?.segments?.length ?? 0;
-    const chunkCount = relayResult?.chunkCount ?? (segmentCount || undefined);
+      relayResult.segmentCount ?? relayResult.segments?.length ?? 0;
+    const chunkCount = relayResult.chunkCount ?? (segmentCount || undefined);
 
     console.log(
       `[dub] relay success for ${user.deviceId} tokens=${estimatedTokens} segments=${segmentCount}`
     );
 
     return c.json({
-      audioBase64: relayResult?.audioBase64,
-      segments: relayResult?.segments,
-      voice: relayResult?.voice ?? chosenVoice,
-      model: relayResult?.model ?? chosenModel,
-      format: relayResult?.format ?? chosenFormat,
+      audioBase64: relayResult.audioBase64,
+      segments: relayResult.segments,
+      voice: relayResult.voice ?? chosenVoice,
+      model: relayResult.model ?? chosenModel,
+      format: relayResult.format ?? chosenFormat,
       estimatedTokens,
       approxSeconds,
-      usedRelay: true,
+      usedRelay,
       chunkCount,
       segmentCount,
     });
@@ -367,3 +383,200 @@ router.post("/", async (c) => {
 });
 
 export default router;
+
+const RETRYABLE_RELAY_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 522, 524]);
+const RETRYABLE_MESSAGE_PATTERN = /(timeout|timed out|temporarily unavailable|connection reset|gateway|rate limit|fetch failed)/i;
+
+function extractRelayStatus(error: unknown): number | null {
+  const message = typeof error === "string" ? error : String((error as any)?.message ?? "");
+  const match = message.match(/Dub relay server error:\s*(\d{3})/i);
+  if (match) {
+    return Number(match[1]);
+  }
+  const status = (error as any)?.status ?? (error as any)?.response?.status;
+  return typeof status === "number" ? status : null;
+}
+
+function isRetryableRelayError(error: unknown): boolean {
+  const status = extractRelayStatus(error);
+  if (status != null && status >= 200 && status < 400) {
+    return false;
+  }
+  if (status != null && RETRYABLE_RELAY_STATUS.has(status)) {
+    return true;
+  }
+  const message = typeof error === "string" ? error : String((error as any)?.message ?? "");
+  if (RETRYABLE_MESSAGE_PATTERN.test(message)) {
+    return true;
+  }
+  const code = (error as any)?.code;
+  if (typeof code === "string") {
+    const normalized = code.toUpperCase();
+    if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(normalized)) {
+      return true;
+    }
+  }
+  return status == null; // network / unknown errors - treat as retryable
+}
+
+interface SynthRequest {
+  c: Context;
+  sanitizedSegments: Array<{
+    index: number;
+    text: string;
+    start?: number;
+    end?: number;
+    targetDuration?: number;
+  }>;
+  lines: string[];
+  voice: string;
+  model: string;
+  format: SpeechFormat;
+  signal: AbortSignal;
+}
+
+interface SynthResult {
+  audioBase64?: string;
+  voice?: string;
+  model?: string;
+  format?: SpeechFormat;
+  chunkCount?: number;
+  segmentCount?: number;
+  segments?: Array<{
+    index: number;
+    audioBase64: string;
+    targetDuration?: number;
+  }>;
+  usedRelay: boolean;
+}
+
+async function synthesizeDubWithFallback({
+  c,
+  sanitizedSegments,
+  lines,
+  voice,
+  model,
+  format,
+  signal,
+}: SynthRequest): Promise<SynthResult> {
+  try {
+    const relayResponse = await callDubRelay({
+      c,
+      lines,
+      segments: sanitizedSegments,
+      voice,
+      model,
+      format,
+      signal,
+    });
+    return { ...relayResponse, usedRelay: true };
+  } catch (error: any) {
+    if (signal.aborted) {
+      throw error;
+    }
+
+    if (!isRetryableRelayError(error)) {
+      throw error;
+    }
+
+    console.warn(
+      `[dub] Relay synthesis failed (${error?.message || error}); falling back to direct OpenAI speech. segments=${sanitizedSegments.length}`
+    );
+
+    const fallbackSegments = await synthesizeSegmentsDirect({
+      c,
+      segments: sanitizedSegments,
+      voice,
+      model,
+      format,
+      signal,
+    });
+
+    return {
+      voice,
+      model,
+      format,
+      segmentCount: fallbackSegments.length,
+      segments: fallbackSegments,
+      usedRelay: false,
+    };
+  }
+}
+
+async function synthesizeSegmentsDirect({
+  c,
+  segments,
+  voice,
+  model,
+  format,
+  signal,
+}: {
+  c: Context;
+  segments: Array<{
+    index: number;
+    text: string;
+    targetDuration?: number;
+  }>;
+  voice: string;
+  model: string;
+  format: SpeechFormat;
+  signal: AbortSignal;
+}): Promise<
+  Array<{ index: number; audioBase64: string; targetDuration?: number }>
+> {
+  if (signal.aborted) {
+    throw new DOMException("Operation cancelled", "AbortError");
+  }
+
+  const results: Array<{ index: number; audioBase64: string; targetDuration?: number }> = [];
+  const errors: unknown[] = [];
+  let cursor = 0;
+
+  const maxConcurrency = Math.max(
+    1,
+    Math.min(FALLBACK_SEGMENT_CONCURRENCY, segments.length)
+  );
+
+  const workers = Array.from({ length: maxConcurrency }, async () => {
+    while (true) {
+      if (signal.aborted) {
+        return;
+      }
+
+      const currentIndex = cursor++;
+      if (currentIndex >= segments.length) {
+        return;
+      }
+
+      const seg = segments[currentIndex];
+      try {
+        const direct = await callSpeechDirect({
+          c,
+          text: seg.text,
+          voice,
+          model,
+          format,
+          signal,
+        });
+
+        results.push({
+          index: seg.index,
+          audioBase64: direct.audioBase64,
+          targetDuration: seg.targetDuration,
+        });
+      } catch (err) {
+        errors.push(err);
+        return;
+      }
+    }
+  });
+
+  await Promise.all(workers);
+
+  if (errors.length) {
+    throw errors[0];
+  }
+
+  results.sort((a, b) => a.index - b.index);
+  return results;
+}
