@@ -10,6 +10,7 @@ import transcribeRouter from "./routes/transcribe";
 import translateRouter from "./routes/translate";
 import adminRouter from "./routes/admin";
 import dubRouter from "./routes/dub";
+import entitlementsRouter from "./routes/entitlements";
 import { ensureDatabase } from "./lib/db";
 
 // Types for Cloudflare Workers environment
@@ -54,6 +55,7 @@ app.route("/stripe/webhook", webhookRouter);
 // The rest of the API routes
 app.route("/payments", paymentsRouter);
 app.route("/credits", creditsRouter);
+app.route("/entitlements", entitlementsRouter);
 app.route("/transcribe", transcribeRouter);
 app.route("/translate", translateRouter);
 app.route("/dub", dubRouter);

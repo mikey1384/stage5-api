@@ -27,6 +27,11 @@ wrangler secret put SECRET_NAME
 - **Purpose:** Authentication with OpenAI API
 - **Used in:** Direct OpenAI calls and passed to relay server
 
+### STRIPE_BYO_UNLOCK_PRICE_ID
+- **Value:** Stripe price ID for the $10 "Bring Your Own OpenAI" unlock (e.g. `price_123456789`)
+- **Purpose:** Enables creation of one-time checkout sessions that unlock BYO OpenAI entitlements
+- **Used in:** `/payments/create-byo-unlock` endpoint when generating checkout sessions
+
 ## Notes
 - Keep this file updated when secrets change
 - Never commit actual secret values to git in code files

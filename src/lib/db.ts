@@ -8,6 +8,14 @@ export interface CreditRecord {
   updated_at: string;
 }
 
+export interface EntitlementRecord {
+  device_id: string;
+  byo_openai: number;
+  unlocked_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 // For Cloudflare Workers with D1
 declare global {
   interface CloudflareBindings {
@@ -42,6 +50,10 @@ export const ensureDatabase = async (env: { DB: D1Database }) => {
     // Add credit ledger table
     await db.exec(
       "CREATE TABLE IF NOT EXISTS credit_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, delta INTEGER NOT NULL, reason TEXT NOT NULL, meta TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    );
+
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS entitlements(device_id TEXT PRIMARY KEY, byo_openai INTEGER NOT NULL DEFAULT 0, unlocked_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
     );
 
     await db.exec(
@@ -530,6 +542,54 @@ export const getLedgerEntries = async ({
     return result.results || [];
   } catch (error) {
     console.error("Error getting ledger entries:", error);
+    throw error;
+  }
+};
+
+export const getEntitlementsRecord = async ({
+  deviceId,
+}: {
+  deviceId: string;
+}): Promise<EntitlementRecord | null> => {
+  if (!db) throw new Error("Database not initialized");
+
+  try {
+    const stmt = db.prepare(
+      `SELECT device_id, byo_openai, unlocked_at, created_at, updated_at 
+       FROM entitlements 
+       WHERE device_id = ?`
+    );
+    const row = await stmt.bind(deviceId).first();
+    return (row as EntitlementRecord) ?? null;
+  } catch (error) {
+    console.error("Error loading entitlements:", error);
+    throw error;
+  }
+};
+
+export const grantByoOpenAiEntitlement = async ({
+  deviceId,
+}: {
+  deviceId: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO entitlements (device_id, byo_openai, unlocked_at, created_at, updated_at)
+      VALUES (?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(device_id) DO UPDATE SET
+        byo_openai = 1,
+        unlocked_at = CASE
+          WHEN entitlements.unlocked_at IS NULL THEN CURRENT_TIMESTAMP
+          ELSE entitlements.unlocked_at
+        END,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+
+    await stmt.bind(deviceId).run();
+  } catch (error) {
+    console.error("Error granting BYO entitlement:", error);
     throw error;
   }
 };

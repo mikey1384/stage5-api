@@ -1,7 +1,12 @@
 import { Hono } from "hono";
 import type Stripe from "stripe";
 import { getStripe } from "../lib/stripe";
-import { creditDevice, isEventProcessed, markEventProcessed } from "../lib/db";
+import {
+  creditDevice,
+  grantByoOpenAiEntitlement,
+  isEventProcessed,
+  markEventProcessed,
+} from "../lib/db";
 import { isValidPackId, type PackId } from "../types/packs";
 
 type Bindings = {
@@ -97,10 +102,21 @@ const handleCheckoutCompleted = async ({
 }: {
   session: Stripe.Checkout.Session;
 }) => {
-  const { deviceId, packId } = session.metadata || {};
+  const { deviceId, packId, entitlement } = session.metadata || {};
 
   if (!deviceId || !packId) {
     console.error("Missing metadata in checkout session:", session.id);
+    return;
+  }
+
+  if (entitlement === "byo_openai") {
+    try {
+      await grantByoOpenAiEntitlement({ deviceId });
+      console.log(`Granted BYO OpenAI entitlement to device ${deviceId}`);
+    } catch (error) {
+      console.error("Error granting BYO entitlement:", error);
+      throw error;
+    }
     return;
   }
 
@@ -124,6 +140,18 @@ const handlePaymentSucceeded = async ({
   paymentIntent: Stripe.PaymentIntent;
 }) => {
   console.log(`Payment succeeded: ${paymentIntent.id}`);
+  const { entitlement, deviceId } = paymentIntent.metadata || {};
+  if (entitlement === "byo_openai" && deviceId) {
+    try {
+      await grantByoOpenAiEntitlement({ deviceId });
+      console.log(
+        `Granted BYO OpenAI entitlement (payment_intent) to device ${deviceId}`
+      );
+    } catch (error) {
+      console.error("Error granting BYO entitlement from payment intent:", error);
+      throw error;
+    }
+  }
   // Additional success handling if needed
 };
 
