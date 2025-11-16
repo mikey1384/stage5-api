@@ -3,11 +3,7 @@ import { Context } from "hono";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { cors } from "hono/cors";
-import {
-  ALLOWED_TRANSLATION_MODELS,
-  API_ERRORS,
-  DEFAULT_TEMPERATURE,
-} from "../lib/constants";
+import { ALLOWED_TRANSLATION_MODELS, API_ERRORS } from "../lib/constants";
 import {
   getUserByApiKey,
   createTranslationJob,
@@ -50,7 +46,7 @@ router.use(
 
 router.options(
   "*",
-  c =>
+  (c) =>
     new Response("", {
       status: 204,
       headers: { "Content-Type": "text/plain" },
@@ -92,11 +88,10 @@ const translateSchema = z.object({
     })
   ),
   model: z.string(),
-  temperature: z.number().optional(),
   reasoning: z.any().optional(),
 });
 
-router.post("/", async c => {
+router.post("/", async (c) => {
   const user = c.get("user");
 
   if (c.req.raw.signal?.aborted) {
@@ -119,7 +114,7 @@ router.post("/", async c => {
     );
   }
 
-  const { messages, model, temperature, reasoning } = parsedBody.data;
+  const { messages, model, reasoning } = parsedBody.data;
 
   if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
     return c.json(
@@ -133,16 +128,12 @@ router.post("/", async c => {
     );
   }
 
-  const isGpt5 = model.startsWith("gpt-5");
-  const effectiveTemp =
-    typeof temperature === "number" ? temperature : DEFAULT_TEMPERATURE;
   const jobId = crypto.randomUUID();
   const payload = {
     mode: "chat" as const,
     messages,
     model,
     reasoning,
-    temperature: !isGpt5 ? effectiveTemp : undefined,
   };
 
   await createTranslationJob({
@@ -201,7 +192,7 @@ router.post("/", async c => {
   }
 });
 
-router.get("/result/:jobId", async c => {
+router.get("/result/:jobId", async (c) => {
   const user = c.get("user");
   const jobId = c.req.param("jobId");
 
@@ -232,7 +223,10 @@ router.get("/result/:jobId", async c => {
   });
 
   if (syncResult?.status === "error") {
-    return c.json({ error: syncResult.message }, { status: syncResult.code as any });
+    return c.json(
+      { error: syncResult.message },
+      { status: syncResult.code as any }
+    );
   }
 
   const refreshed = await getTranslationJob({ jobId });
@@ -253,7 +247,9 @@ router.get("/result/:jobId", async c => {
 
 export default router;
 
-function parseJobPayload(job: TranslationJobRecord): Record<string, unknown> | null {
+function parseJobPayload(
+  job: TranslationJobRecord
+): Record<string, unknown> | null {
   try {
     if (!job.payload) return null;
     return JSON.parse(job.payload);
@@ -287,7 +283,9 @@ async function syncJobWithRelay({
   job: TranslationJobRecord;
   payload: Record<string, unknown>;
   signal?: AbortSignal;
-}): Promise<{ status: "ok" } | { status: "error"; code: number; message: string }> {
+}): Promise<
+  { status: "ok" } | { status: "error"; code: number; message: string }
+> {
   if (!job.relay_job_id) {
     try {
       const submission = await submitTranslationRelayJob({
@@ -396,7 +394,10 @@ async function syncJobWithRelay({
     }
 
     if (status.type === "error") {
-      await storeTranslationJobError({ jobId: job.job_id, message: status.message });
+      await storeTranslationJobError({
+        jobId: job.job_id,
+        message: status.message,
+      });
       return { status: "error", code: 500, message: status.message };
     }
 
@@ -426,7 +427,9 @@ async function persistCompletion({
   model: string;
   payload: Record<string, unknown>;
   completion: any;
-}): Promise<{ status: "ok" } | { status: "error"; code: number; message: string }> {
+}): Promise<
+  { status: "ok" } | { status: "error"; code: number; message: string }
+> {
   const usage = completion?.usage ?? {};
   const promptTokens =
     typeof usage?.prompt_tokens === "number"
@@ -457,7 +460,10 @@ async function persistCompletion({
     });
 
     if (!ok) {
-      await storeTranslationJobError({ jobId, message: "insufficient-credits" });
+      await storeTranslationJobError({
+        jobId,
+        message: "insufficient-credits",
+      });
       return { status: "error", code: 402, message: "insufficient-credits" };
     }
 

@@ -9,7 +9,7 @@ import { OPENAI_RELAY_URL, SpeechFormat } from "./constants";
 export function makeOpenAI(c: Context<any>) {
   return new OpenAI({
     apiKey: c.env.OPENAI_API_KEY,
-    timeout: 600_000, // 10 minutes for long-running requests (e.g., gpt-5)
+    timeout: 600_000,
     maxRetries: 3,
   });
 }
@@ -114,14 +114,12 @@ export async function callTranslationRelay({
   text,
   target_language,
   model,
-  temperature,
   signal,
 }: {
   c: Context<any>;
   text: string;
   target_language: string;
   model: string;
-  temperature?: number;
   signal?: AbortSignal;
 }) {
   const payload: Record<string, unknown> = {
@@ -129,11 +127,6 @@ export async function callTranslationRelay({
     target_language,
     model,
   };
-
-  const isGpt5 = String(model).startsWith("gpt-5");
-  if (!isGpt5 && typeof temperature === "number" && Number.isFinite(temperature)) {
-    payload.temperature = temperature;
-  }
 
   const relayResponse = await fetch(`${OPENAI_RELAY_URL}/translate`, {
     method: "POST",
@@ -162,24 +155,18 @@ export async function callChatRelay({
   c,
   messages,
   model,
-  temperature,
   reasoning,
   signal,
 }: {
   c: Context<any>;
   messages: Array<{ role: string; content: string }>;
   model: string;
-  temperature?: number;
   reasoning?: any;
   signal?: AbortSignal;
 }) {
   const payload: Record<string, unknown> = { messages, model };
-  const isGpt5 = String(model).startsWith("gpt-5");
   if (reasoning !== undefined) {
     payload.reasoning = reasoning;
-  }
-  if (!isGpt5 && typeof temperature === "number" && Number.isFinite(temperature)) {
-    payload.temperature = temperature;
   }
 
   const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
@@ -231,7 +218,9 @@ export async function submitTranslationRelayJob({
     const relayJobId = data?.jobId;
     if (!relayJobId) {
       throw new Error(
-        `Translation relay server error: missing jobId (body=${JSON.stringify(data)})`
+        `Translation relay server error: missing jobId (body=${JSON.stringify(
+          data
+        )})`
       );
     }
     return { type: "accepted", relayJobId, status: data?.status };
@@ -346,7 +335,7 @@ async function resolveRelayTranslationResponse({
         throw new Error(`${errorPrefix}: job ${jobId} timed out`);
       }
 
-      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
 
       const statusResp = await fetch(
         `${OPENAI_RELAY_URL}/translate/result/${jobId}`,
@@ -418,7 +407,12 @@ export async function callSpeechRelay({
     );
   }
 
-  return (await resp.json()) as { audioBase64: string; voice: string; model: string; format: string };
+  return (await resp.json()) as {
+    audioBase64: string;
+    voice: string;
+    model: string;
+    format: string;
+  };
 }
 
 export async function callSpeechDirect({
@@ -511,7 +505,9 @@ export async function callDubRelay({
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Dub relay server error: ${resp.status} ${text || resp.statusText}`);
+    throw new Error(
+      `Dub relay server error: ${resp.status} ${text || resp.statusText}`
+    );
   }
 
   return (await resp.json()) as {

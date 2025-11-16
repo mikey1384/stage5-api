@@ -3,7 +3,7 @@ export const MARGIN = 2;
 export const CREDITS_PER_AUDIO_HOUR = 2_800; // used for legacy clients
 
 export const MODEL_PRICES = {
-  "gpt-4.1": {
+  "gpt-5.1": {
     in: 2 / 1_000_000, // 0.000002
     out: 8 / 1_000_000, // 0.000008
   },
@@ -52,8 +52,8 @@ export function tokensToCredits({
   completion: number;
 }): number {
   const usd =
-    prompt * MODEL_PRICES["gpt-4.1"].in +
-    completion * MODEL_PRICES["gpt-4.1"].out;
+    prompt * MODEL_PRICES["gpt-5.1"].in +
+    completion * MODEL_PRICES["gpt-5.1"].out;
 
   const credits = (usd * MARGIN) / USD_PER_CREDIT;
   return Math.ceil(credits * TOKEN_CREDIT_CALIBRATION);
