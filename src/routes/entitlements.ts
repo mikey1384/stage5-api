@@ -50,10 +50,13 @@ router.get("/:deviceId", async c => {
   try {
     const record = await getEntitlementsRecord({ deviceId });
     const byoOpenAi = Boolean(record?.byo_openai);
+    // BYO unlock grants both OpenAI and Anthropic (single purchase)
+    // If user has OpenAI unlocked, they also get Anthropic (for existing users who paid before Anthropic support)
+    const byoAnthropic = Boolean(record?.byo_anthropic) || byoOpenAi;
 
     return c.json({
       deviceId,
-      entitlements: { byoOpenAi },
+      entitlements: { byoOpenAi, byoAnthropic },
       unlockedAt: record?.unlocked_at ?? null,
       updatedAt: record?.updated_at ?? null,
       fetchedAt: new Date().toISOString(),

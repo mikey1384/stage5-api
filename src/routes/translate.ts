@@ -3,7 +3,8 @@ import { Context } from "hono";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { cors } from "hono/cors";
-import { ALLOWED_TRANSLATION_MODELS, API_ERRORS } from "../lib/constants";
+import { API_ERRORS, getProviderFromModel } from "../lib/constants";
+import { getAllowedTranslationModels } from "../lib/pricing";
 import {
   getUserByApiKey,
   createTranslationJob,
@@ -116,13 +117,12 @@ router.post("/", async (c) => {
 
   const { messages, model, reasoning } = parsedBody.data;
 
-  if (!ALLOWED_TRANSLATION_MODELS.includes(model)) {
+  const allowedModels = getAllowedTranslationModels();
+  if (!allowedModels.includes(model)) {
     return c.json(
       {
         error: API_ERRORS.INVALID_MODEL,
-        message: `Only models ${ALLOWED_TRANSLATION_MODELS.join(
-          ", "
-        )} are allowed`,
+        message: `Only models ${allowedModels.join(", ")} are allowed`,
       },
       { status: 400 }
     );
@@ -457,6 +457,7 @@ async function persistCompletion({
       deviceId: jobOwner,
       promptTokens: promptTokens ?? 0,
       completionTokens: completionTokens ?? 0,
+      model,
     });
 
     if (!ok) {
@@ -468,6 +469,11 @@ async function persistCompletion({
     }
 
     await markTranslationJobCredited({ jobId });
+
+    const provider = getProviderFromModel(model);
+    console.log(
+      `[translate] success for device ${jobOwner} model=${model} provider=${provider} promptTokens=${promptTokens} completionTokens=${completionTokens}`
+    );
   }
 
   return { status: "ok" };

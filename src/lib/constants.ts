@@ -1,14 +1,4 @@
-export const ALLOWED_TRANSLATION_MODELS = [
-  "gpt-5",
-  "gpt-5-mini",
-  "gpt-5.1",
-  "gpt-4.1",
-];
-export const ALLOWED_TRANSCRIPTION_MODELS = [
-  "whisper-1",
-  "whisper-large-v3",
-  "whisper-large-v3-turbo",
-];
+export const ALLOWED_TRANSCRIPTION_MODELS = ["whisper-1"];
 
 export const ALLOWED_SPEECH_MODELS = ["tts-1", "tts-1-hd"];
 
@@ -50,3 +40,12 @@ export const API_ERRORS = {
 } as const;
 
 export type ApiError = (typeof API_ERRORS)[keyof typeof API_ERRORS];
+
+// Helper to determine provider from model
+export function isClaudeModel(model: string | undefined): boolean {
+  return Boolean(model && model.startsWith("claude-"));
+}
+
+export function getProviderFromModel(model: string): "Anthropic" | "OpenAI" {
+  return isClaudeModel(model) ? "Anthropic" : "OpenAI";
+}

@@ -7,11 +7,10 @@ import {
   API_ERRORS,
 } from "../lib/constants";
 import { cors } from "hono/cors";
-import { makeOpenAI, makeGroq, callRelayServer } from "../lib/openai-config";
+import { makeOpenAI, callRelayServer } from "../lib/openai-config";
 
 type Bindings = {
   OPENAI_API_KEY: string;
-  GROQ_API_KEY: string;
   RELAY_SECRET: string;
   DB: D1Database;
 };
@@ -133,18 +132,8 @@ router.post("/", async (c) => {
 
     const response_format = "verbose_json";
 
-    // Select client based on model
-    let client;
-    if (model === "whisper-1") {
-      client = makeOpenAI(c);
-    } else if (
-      model === "whisper-large-v3" ||
-      model === "whisper-large-v3-turbo"
-    ) {
-      client = makeGroq(c);
-    } else {
-      throw new Error("Unsupported model");
-    }
+    // Only whisper-1 (OpenAI) is supported
+    const client = makeOpenAI(c);
 
     // Create a combined abort signal that responds to both client cancellation and server timeout
     const abortController = new AbortController();
@@ -242,7 +231,7 @@ router.post("/", async (c) => {
         );
       }
       console.log(
-        `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${user.deviceId} (${model}) duration ${seconds}s`
+        `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${user.deviceId} model=${model} provider=OpenAI duration=${seconds}s`
       );
     } else {
       console.error(

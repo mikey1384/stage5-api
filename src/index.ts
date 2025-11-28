@@ -19,7 +19,7 @@ type Bindings = {
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   OPENAI_API_KEY: string;
-  GROQ_API_KEY: string;
+  ANTHROPIC_API_KEY: string;
   RELAY_SECRET: string;
   ALLOWED_ORIGINS?: string;
   ADMIN_DEVICE_ID?: string;

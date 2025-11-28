@@ -1,5 +1,4 @@
 import OpenAI from "openai";
-import Groq from "groq-sdk";
 import { Context } from "hono";
 import { OPENAI_RELAY_URL, SpeechFormat } from "./constants";
 
@@ -11,15 +10,6 @@ export function makeOpenAI(c: Context<any>) {
     apiKey: c.env.OPENAI_API_KEY,
     timeout: 600_000,
     maxRetries: 3,
-  });
-}
-
-/**
- * Creates a Groq client using OpenAI SDK compatibility
- */
-export function makeGroq(c: Context<any>) {
-  return new Groq({
-    apiKey: c.env.GROQ_API_KEY,
   });
 }
 
@@ -85,9 +75,6 @@ export async function callRelayServer({
     headers: {
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-OpenAI-Key": c.env.OPENAI_API_KEY,
-      ...(model === "whisper-large-v3" || model === "whisper-large-v3-turbo"
-        ? { "X-Groq-Key": c.env.GROQ_API_KEY }
-        : {}),
     },
     body: relayFormData,
     signal,
@@ -200,13 +187,20 @@ export async function submitTranslationRelayJob({
   | { type: "accepted"; relayJobId: string; status?: string }
   | { type: "completed"; result: any }
 > {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-Relay-Secret": c.env.RELAY_SECRET,
+    "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+  };
+
+  // Include Anthropic key for Claude models
+  if (c.env.ANTHROPIC_API_KEY) {
+    headers["X-Anthropic-Key"] = c.env.ANTHROPIC_API_KEY;
+  }
+
   const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Relay-Secret": c.env.RELAY_SECRET,
-      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
-    },
+    headers,
     body: JSON.stringify(payload),
     signal,
   });
@@ -251,14 +245,20 @@ export async function fetchRelayTranslationStatus({
   | { type: "not_found" }
   | { type: "error"; message: string }
 > {
+  const headers: Record<string, string> = {
+    "X-Relay-Secret": c.env.RELAY_SECRET,
+    "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+  };
+
+  if (c.env.ANTHROPIC_API_KEY) {
+    headers["X-Anthropic-Key"] = c.env.ANTHROPIC_API_KEY;
+  }
+
   const resp = await fetch(
     `${OPENAI_RELAY_URL}/translate/result/${encodeURIComponent(relayJobId)}`,
     {
       method: "GET",
-      headers: {
-        "X-Relay-Secret": c.env.RELAY_SECRET,
-        "X-OpenAI-Key": c.env.OPENAI_API_KEY,
-      },
+      headers,
       signal,
     }
   );

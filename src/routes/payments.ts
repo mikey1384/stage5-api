@@ -6,6 +6,7 @@ import { packs, PACK_IDS } from "../types/packs";
 type Bindings = {
   STRIPE_SECRET_KEY: string;
   STRIPE_BYO_UNLOCK_PRICE_ID?: string;
+  UI_ORIGIN?: string;
 };
 
 const router = new Hono<{ Bindings: Bindings }>();
@@ -25,7 +26,7 @@ router.post("/create-session", async (c) => {
     const { packId, deviceId } = createSessionSchema.parse(body);
 
     const pack = packs[packId];
-    const uiOrigin = "https://stage5.tools";
+    const uiOrigin = c.env.UI_ORIGIN || "https://stage5.tools";
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
 
     const session = await stripe.checkout.sessions.create({
@@ -103,7 +104,7 @@ router.post("/create-byo-unlock", async c => {
       );
     }
 
-    const uiOrigin = "https://stage5.tools";
+    const uiOrigin = c.env.UI_ORIGIN || "https://stage5.tools";
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
 
     const session = await stripe.checkout.sessions.create({

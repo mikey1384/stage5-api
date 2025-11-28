@@ -11,6 +11,7 @@ export interface CreditRecord {
 export interface EntitlementRecord {
   device_id: string;
   byo_openai: number;
+  byo_anthropic: number;
   unlocked_at: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -35,33 +36,10 @@ let tablesCreated = false;
 
 export const ensureDatabase = async (env: { DB: D1Database }) => {
   if (!db) {
-    db = env.DB; // ① bind the Worker's D1 instance
+    db = env.DB; // Bind the Worker's D1 instance
   }
-  if (!tablesCreated) {
-    // ② run migrations exactly once - single-line to avoid D1 newline issues
-    await db.exec(
-      "CREATE TABLE IF NOT EXISTS credits(device_id TEXT PRIMARY KEY, credit_balance INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-    );
-
-    await db.exec(
-      "CREATE TABLE IF NOT EXISTS processed_events(event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, processed_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-    );
-
-    // Add credit ledger table
-    await db.exec(
-      "CREATE TABLE IF NOT EXISTS credit_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, delta INTEGER NOT NULL, reason TEXT NOT NULL, meta TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-    );
-
-    await db.exec(
-      "CREATE TABLE IF NOT EXISTS entitlements(device_id TEXT PRIMARY KEY, byo_openai INTEGER NOT NULL DEFAULT 0, unlocked_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-    );
-
-    await db.exec(
-      "CREATE TABLE IF NOT EXISTS translation_jobs(job_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, status TEXT NOT NULL, model TEXT, payload TEXT, relay_job_id TEXT, result TEXT, error TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, credited INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-    );
-
-    tablesCreated = true;
-  }
+  // Tables already exist in production - use `wrangler d1 migrations` for schema changes
+  tablesCreated = true;
 };
 
 // Check if webhook event has been processed (idempotency)
@@ -278,18 +256,21 @@ export const deductTranslationCredits = async ({
   deviceId,
   promptTokens,
   completionTokens,
+  model = "gpt-5.1",
 }: {
   deviceId: string;
   promptTokens: number;
   completionTokens: number;
+  model?: string;
 }): Promise<boolean> => {
   const spend = tokensToCredits({
     prompt: promptTokens,
     completion: completionTokens,
+    model,
   });
   return updateBalance(deviceId, spend, {
     reason: "TRANSLATE",
-    meta: { promptTokens, completionTokens },
+    meta: { promptTokens, completionTokens, model },
   });
 };
 
@@ -555,8 +536,8 @@ export const getEntitlementsRecord = async ({
 
   try {
     const stmt = db.prepare(
-      `SELECT device_id, byo_openai, unlocked_at, created_at, updated_at 
-       FROM entitlements 
+      `SELECT device_id, byo_openai, byo_anthropic, unlocked_at, created_at, updated_at
+       FROM entitlements
        WHERE device_id = ?`
     );
     const row = await stmt.bind(deviceId).first();
@@ -575,11 +556,13 @@ export const grantByoOpenAiEntitlement = async ({
   if (!db) throw new Error("Database not initialized");
 
   try {
+    // BYO unlock grants access to BOTH OpenAI and Anthropic keys (single $10 purchase)
     const stmt = db.prepare(`
-      INSERT INTO entitlements (device_id, byo_openai, unlocked_at, created_at, updated_at)
-      VALUES (?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      INSERT INTO entitlements (device_id, byo_openai, byo_anthropic, unlocked_at, created_at, updated_at)
+      VALUES (?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT(device_id) DO UPDATE SET
         byo_openai = 1,
+        byo_anthropic = 1,
         unlocked_at = CASE
           WHEN entitlements.unlocked_at IS NULL THEN CURRENT_TIMESTAMP
           ELSE entitlements.unlocked_at
@@ -590,6 +573,33 @@ export const grantByoOpenAiEntitlement = async ({
     await stmt.bind(deviceId).run();
   } catch (error) {
     console.error("Error granting BYO entitlement:", error);
+    throw error;
+  }
+};
+
+export const grantByoAnthropicEntitlement = async ({
+  deviceId,
+}: {
+  deviceId: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO entitlements (device_id, byo_anthropic, unlocked_at, created_at, updated_at)
+      VALUES (?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(device_id) DO UPDATE SET
+        byo_anthropic = 1,
+        unlocked_at = CASE
+          WHEN entitlements.unlocked_at IS NULL THEN CURRENT_TIMESTAMP
+          ELSE entitlements.unlocked_at
+        END,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+
+    await stmt.bind(deviceId).run();
+  } catch (error) {
+    console.error("Error granting BYO Anthropic entitlement:", error);
     throw error;
   }
 };
