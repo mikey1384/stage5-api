@@ -20,3 +20,13 @@ TOKEN_CREDIT_CALIBRATION = "1.0"
 binding = "DB"
 database_name = "stage5_db"
 database_id = "84286ce2-3c1f-45ba-8183-a8540bd5b32b"
+
+# R2 Storage for large file uploads (transcription)
+[[r2_buckets]]
+binding = "TRANSCRIPTION_BUCKET"
+bucket_name = "stage5-transcription-uploads"
+
+# R2 API credentials for presigned URLs (set via wrangler secret)
+# R2_ACCESS_KEY_ID - R2 API token access key
+# R2_SECRET_ACCESS_KEY - R2 API token secret key
+# R2_ACCOUNT_ID - Cloudflare account ID

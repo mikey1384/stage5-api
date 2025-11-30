@@ -18,9 +18,28 @@ export const MODEL_PRICES = {
   },
 } as const;
 
+// TTS pricing (per character)
+export const TTS_PRICES = {
+  "tts-1": {
+    perChar: 15 / 1_000_000, // $15 per 1M characters
+  },
+  "tts-1-hd": {
+    perChar: 30 / 1_000_000, // $30 per 1M characters
+  },
+  "eleven_multilingual_v2": {
+    perChar: 200 / 1_000_000, // ~$200 per 1M characters (Pro tier estimate)
+  },
+  "eleven_turbo_v2_5": {
+    perChar: 100 / 1_000_000, // ~$100 per 1M characters (50% cheaper than v2)
+  },
+} as const;
+
+export type TTSModel = keyof typeof TTS_PRICES;
+
 // Calibration factors (1.0 = no adjustment)
 export const AUDIO_CREDIT_CALIBRATION = 1.0;
 export const TOKEN_CREDIT_CALIBRATION = 1.0;
+export const TTS_CREDIT_CALIBRATION = 1.0;
 
 export function secondsToCredits({
   seconds,
@@ -67,4 +86,50 @@ export function tokensToCredits({
   const usd = prompt * pricing.in + completion * pricing.out;
   const credits = (usd * MARGIN) / USD_PER_CREDIT;
   return Math.ceil(credits * TOKEN_CREDIT_CALIBRATION);
+}
+
+/**
+ * Convert character count to credits for TTS models
+ */
+export function charactersToCredits({
+  characters,
+  model,
+}: {
+  characters: number;
+  model: TTSModel;
+}): number {
+  const pricing = TTS_PRICES[model];
+  if (!pricing) {
+    // Fallback to tts-1 pricing for unknown models
+    const usd = characters * TTS_PRICES["tts-1"].perChar;
+    const credits = (usd * MARGIN) / USD_PER_CREDIT;
+    return Math.ceil(credits * TTS_CREDIT_CALIBRATION);
+  }
+
+  const usd = characters * pricing.perChar;
+  const credits = (usd * MARGIN) / USD_PER_CREDIT;
+  return Math.ceil(credits * TTS_CREDIT_CALIBRATION);
+}
+
+/**
+ * Estimate credits for a dubbing job (for UI cost preview)
+ */
+export function estimateDubbingCredits({
+  characters,
+  model,
+}: {
+  characters: number;
+  model: TTSModel;
+}): { credits: number; usdEstimate: number } {
+  const pricing = TTS_PRICES[model] ?? TTS_PRICES["tts-1"];
+  const usd = characters * pricing.perChar;
+  const credits = Math.ceil((usd * MARGIN) / USD_PER_CREDIT * TTS_CREDIT_CALIBRATION);
+  return { credits, usdEstimate: usd };
+}
+
+/**
+ * Get all available TTS models
+ */
+export function getAllowedTTSModels(): TTSModel[] {
+  return Object.keys(TTS_PRICES) as TTSModel[];
 }

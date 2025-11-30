@@ -1,5 +1,5 @@
 import { type PackId, packs } from "../types/packs";
-import { tokensToCredits, secondsToCredits } from "./pricing";
+import { tokensToCredits, secondsToCredits, charactersToCredits, type TTSModel } from "./pricing";
 
 // Types for database operations
 export interface CreditRecord {
@@ -290,6 +290,7 @@ export const deductTranscriptionCredits = async ({
   });
 };
 
+/** @deprecated Use deductTTSCredits instead for accurate TTS pricing */
 export const deductSpeechCredits = async ({
   deviceId,
   promptTokens,
@@ -303,6 +304,27 @@ export const deductSpeechCredits = async ({
   return updateBalance(deviceId, spend, {
     reason: "DUB",
     meta: { promptTokens, ...(meta ?? {}) },
+  });
+};
+
+/**
+ * Deduct credits for TTS (dubbing) based on character count and model
+ */
+export const deductTTSCredits = async ({
+  deviceId,
+  characters,
+  model,
+  meta,
+}: {
+  deviceId: string;
+  characters: number;
+  model: TTSModel;
+  meta?: Record<string, unknown>;
+}): Promise<boolean> => {
+  const spend = charactersToCredits({ characters, model });
+  return updateBalance(deviceId, spend, {
+    reason: "DUB",
+    meta: { characters, model, ...(meta ?? {}) },
   });
 };
 

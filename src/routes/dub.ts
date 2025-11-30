@@ -12,8 +12,9 @@ import {
   DEFAULT_SPEECH_FORMAT,
   SpeechFormat,
 } from "../lib/constants";
-import { getUserByApiKey, deductSpeechCredits } from "../lib/db";
-import { callDubRelay, callSpeechDirect } from "../lib/openai-config";
+import { getUserByApiKey, deductTTSCredits } from "../lib/db";
+import { callDubRelay, callSpeechDirect, callElevenLabsDubRelay } from "../lib/openai-config";
+import { type TTSModel, estimateDubbingCredits, TTS_PRICES } from "../lib/pricing";
 
 const MAX_SCRIPT_CHARACTERS = 200_000;
 const MAX_TOTAL_SEGMENT_CHARACTERS = 80_000;
@@ -62,6 +63,8 @@ const requestSchema = z.object({
   model: z.string().optional(),
   format: z.string().optional(),
   quality: z.enum(["standard", "high"]).optional(),
+  // TTS provider selection: "openai" (cheaper) or "elevenlabs" (higher quality, more expensive)
+  ttsProvider: z.enum(["openai", "elevenlabs"]).optional(),
 });
 
 type Bindings = {
@@ -124,6 +127,62 @@ router.use("*", async (c: Context, next: Next) => {
   await next();
 });
 
+/**
+ * POST /estimate
+ * Get estimated credit cost for a dubbing job before starting
+ * Helps users understand costs and choose provider
+ */
+router.post("/estimate", async (c) => {
+  try {
+    const body = await c.req.json();
+    const characters = body.characters as number;
+
+    if (typeof characters !== "number" || characters <= 0) {
+      return c.json({ error: "Invalid character count" }, 400);
+    }
+
+    // Calculate estimates for both providers
+    const openaiEstimate = estimateDubbingCredits({
+      characters,
+      model: "tts-1",
+    });
+    const openaiHdEstimate = estimateDubbingCredits({
+      characters,
+      model: "tts-1-hd",
+    });
+    const elevenLabsEstimate = estimateDubbingCredits({
+      characters,
+      model: "eleven_multilingual_v2",
+    });
+
+    return c.json({
+      characters,
+      estimates: {
+        openai: {
+          model: "tts-1",
+          credits: openaiEstimate.credits,
+          usdCost: openaiEstimate.usdEstimate,
+          description: "OpenAI TTS - Good quality, most affordable",
+        },
+        openaiHd: {
+          model: "tts-1-hd",
+          credits: openaiHdEstimate.credits,
+          usdCost: openaiHdEstimate.usdEstimate,
+          description: "OpenAI TTS HD - Higher quality audio",
+        },
+        elevenlabs: {
+          model: "eleven_multilingual_v2",
+          credits: elevenLabsEstimate.credits,
+          usdCost: elevenLabsEstimate.usdEstimate,
+          description: "ElevenLabs - Premium quality, most expressive",
+        },
+      },
+    });
+  } catch (error: any) {
+    return c.json({ error: error?.message || "Failed to estimate" }, 500);
+  }
+});
+
 router.post("/", async (c) => {
   const user = c.get("user");
 
@@ -148,7 +207,10 @@ router.post("/", async (c) => {
       );
     }
 
-    const { segments, voice, model, format, quality } = parsed.data;
+    const { segments, voice, model, format, quality, ttsProvider } = parsed.data;
+
+    // Default to OpenAI (cheaper) if not specified
+    const chosenTtsProvider = ttsProvider ?? "openai";
 
     type RelaySegment = {
       index: number;
@@ -290,6 +352,7 @@ router.post("/", async (c) => {
         model: chosenModel,
         format: chosenFormat,
         signal: abortController.signal,
+        ttsProvider: chosenTtsProvider,
       });
     } catch (synthesisError: any) {
       clearTimeout(timeoutId);
@@ -316,8 +379,6 @@ router.post("/", async (c) => {
       throw new Error("Dub synthesis returned no audio segments");
     }
 
-    const cleanedScript = script.replace(/\s+/g, " ").trim();
-    const estimatedTokens = Math.max(1, Math.ceil(cleanedScript.length / 4));
     const approxSeconds = segments.reduce((sum, seg) => {
       const start = typeof seg.start === "number" ? seg.start : 0;
       const end = typeof seg.end === "number" ? seg.end : start;
@@ -327,13 +388,25 @@ router.post("/", async (c) => {
 
     const usedRelay = relayResult.usedRelay;
 
-    const ok = await deductSpeechCredits({
+    // Determine TTS model for pricing based on provider and what was actually used
+    let ttsModelForPricing: TTSModel;
+    if (relayResult.usedElevenLabs) {
+      ttsModelForPricing = "eleven_multilingual_v2";
+    } else if (chosenModel === "tts-1-hd") {
+      ttsModelForPricing = "tts-1-hd";
+    } else {
+      ttsModelForPricing = "tts-1";
+    }
+
+    const ok = await deductTTSCredits({
       deviceId: user.deviceId,
-      promptTokens: estimatedTokens,
+      characters: totalCharacters,
+      model: ttsModelForPricing,
       meta: {
         approxSeconds,
         usedRelay,
-        model: chosenModel,
+        ttsProvider: chosenTtsProvider,
+        openaiModel: chosenModel,
         quality: quality ?? "standard",
       },
     });
@@ -347,18 +420,19 @@ router.post("/", async (c) => {
     const chunkCount = relayResult.chunkCount ?? (segmentCount || undefined);
 
     console.log(
-      `[dub] relay success for ${user.deviceId} tokens=${estimatedTokens} segments=${segmentCount}`
+      `[dub] success for ${user.deviceId} provider=${relayResult.usedElevenLabs ? "elevenlabs" : "openai"} chars=${totalCharacters} segments=${segmentCount}`
     );
 
     return c.json({
       audioBase64: relayResult.audioBase64,
       segments: relayResult.segments,
       voice: relayResult.voice ?? chosenVoice,
-      model: relayResult.model ?? chosenModel,
+      model: relayResult.usedElevenLabs ? "eleven_multilingual_v2" : (relayResult.model ?? chosenModel),
       format: relayResult.format ?? chosenFormat,
-      estimatedTokens,
+      totalCharacters,
       approxSeconds,
       usedRelay,
+      usedElevenLabs: relayResult.usedElevenLabs ?? false,
       chunkCount,
       segmentCount,
     });
@@ -433,6 +507,7 @@ interface SynthRequest {
   model: string;
   format: SpeechFormat;
   signal: AbortSignal;
+  ttsProvider: "openai" | "elevenlabs";
 }
 
 interface SynthResult {
@@ -448,6 +523,7 @@ interface SynthResult {
     targetDuration?: number;
   }>;
   usedRelay: boolean;
+  usedElevenLabs: boolean;
 }
 
 async function synthesizeDubWithFallback({
@@ -458,7 +534,52 @@ async function synthesizeDubWithFallback({
   model,
   format,
   signal,
+  ttsProvider,
 }: SynthRequest): Promise<SynthResult> {
+  // Route based on user's provider preference
+  if (ttsProvider === "elevenlabs") {
+    // Try ElevenLabs first, fall back to OpenAI
+    try {
+      const elevenLabsResponse = await callElevenLabsDubRelay({
+        c,
+        segments: sanitizedSegments,
+        voice,
+        signal,
+      });
+      console.log(`[dub] ElevenLabs TTS succeeded, segments=${sanitizedSegments.length}`);
+      return {
+        ...elevenLabsResponse,
+        format: elevenLabsResponse.format as SpeechFormat || "mp3",
+        usedRelay: true,
+        usedElevenLabs: true,
+      };
+    } catch (elevenLabsError: any) {
+      if (signal.aborted) {
+        throw elevenLabsError;
+      }
+
+      console.warn(
+        `[dub] ElevenLabs failed (${elevenLabsError?.message || elevenLabsError}); trying OpenAI relay...`
+      );
+
+      // Fall back to OpenAI relay
+      return synthesizeWithOpenAI({ c, sanitizedSegments, lines, voice, model, format, signal });
+    }
+  } else {
+    // OpenAI provider - use OpenAI directly, no ElevenLabs fallback
+    return synthesizeWithOpenAI({ c, sanitizedSegments, lines, voice, model, format, signal });
+  }
+}
+
+async function synthesizeWithOpenAI({
+  c,
+  sanitizedSegments,
+  lines,
+  voice,
+  model,
+  format,
+  signal,
+}: Omit<SynthRequest, "ttsProvider">): Promise<SynthResult> {
   try {
     const relayResponse = await callDubRelay({
       c,
@@ -469,20 +590,21 @@ async function synthesizeDubWithFallback({
       format,
       signal,
     });
-    return { ...relayResponse, usedRelay: true };
-  } catch (error: any) {
+    return { ...relayResponse, usedRelay: true, usedElevenLabs: false };
+  } catch (relayError: any) {
     if (signal.aborted) {
-      throw error;
+      throw relayError;
     }
 
-    if (!isRetryableRelayError(error)) {
-      throw error;
+    if (!isRetryableRelayError(relayError)) {
+      throw relayError;
     }
 
     console.warn(
-      `[dub] Relay synthesis failed (${error?.message || error}); falling back to direct OpenAI speech. segments=${sanitizedSegments.length}`
+      `[dub] OpenAI relay failed (${relayError?.message || relayError}); falling back to direct. segments=${sanitizedSegments.length}`
     );
 
+    // Fall back to direct OpenAI
     const fallbackSegments = await synthesizeSegmentsDirect({
       c,
       segments: sanitizedSegments,
@@ -499,6 +621,7 @@ async function synthesizeDubWithFallback({
       segmentCount: fallbackSegments.length,
       segments: fallbackSegments,
       usedRelay: false,
+      usedElevenLabs: false,
     };
   }
 }

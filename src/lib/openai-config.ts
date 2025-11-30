@@ -533,3 +533,144 @@ export const RELAY_ENDPOINT_MAPPING = {
   "audio.transcriptions.create": "/transcribe",
   "chat.completions.create": "/translate",
 } as const;
+
+/**
+ * Call relay server for ElevenLabs Scribe transcription
+ */
+export async function callElevenLabsTranscribeRelay({
+  c,
+  file,
+  language,
+  signal,
+}: {
+  c: Context<any>;
+  file: File;
+  language?: string;
+  signal: AbortSignal;
+}) {
+  const relayFormData = new FormData();
+  relayFormData.append("file", file);
+  if (language) {
+    relayFormData.append("language", language);
+  }
+
+  const relayResponse = await fetch(`${OPENAI_RELAY_URL}/transcribe-elevenlabs`, {
+    method: "POST",
+    headers: {
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
+    },
+    body: relayFormData,
+    signal,
+  });
+
+  if (!relayResponse.ok) {
+    const errorText = await relayResponse.text();
+    console.error(
+      `❌ ElevenLabs relay error: ${relayResponse.status} ${errorText}`
+    );
+    throw new Error(`ElevenLabs relay error: ${relayResponse.status} ${errorText}`);
+  }
+
+  return (await relayResponse.json()) as any;
+}
+
+/**
+ * Call relay server for ElevenLabs Scribe transcription from R2 URL
+ * Used for large files that were uploaded directly to R2
+ */
+export async function callElevenLabsTranscribeFromR2({
+  c,
+  r2Url,
+  language,
+}: {
+  c: Context<any>;
+  r2Url: string;
+  language?: string;
+}) {
+  const payload: any = { r2Url };
+  if (language) {
+    payload.language = language;
+  }
+
+  const relayResponse = await fetch(`${OPENAI_RELAY_URL}/transcribe-from-r2`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!relayResponse.ok) {
+    const errorText = await relayResponse.text();
+    console.error(
+      `❌ ElevenLabs R2 relay error: ${relayResponse.status} ${errorText}`
+    );
+    throw new Error(`ElevenLabs R2 relay error: ${relayResponse.status} ${errorText}`);
+  }
+
+  return (await relayResponse.json()) as any;
+}
+
+/**
+ * Call relay server for ElevenLabs TTS dubbing
+ */
+export async function callElevenLabsDubRelay({
+  c,
+  segments,
+  voice,
+  signal,
+}: {
+  c: Context<any>;
+  segments: Array<{
+    index: number;
+    text: string;
+    start?: number;
+    end?: number;
+    targetDuration?: number;
+  }>;
+  voice: string;
+  signal?: AbortSignal;
+}) {
+  const payload = {
+    segments: segments.map((seg, idx) => ({
+      index: Number.isFinite(seg.index) ? seg.index : idx + 1,
+      text: seg.text,
+      targetDuration: seg.targetDuration,
+    })),
+    voice,
+  };
+
+  const resp = await fetch(`${OPENAI_RELAY_URL}/dub-elevenlabs`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(
+      `ElevenLabs dub relay error: ${resp.status} ${text || resp.statusText}`
+    );
+  }
+
+  return (await resp.json()) as {
+    voice?: string;
+    model?: string;
+    format?: string;
+    segmentCount?: number;
+    totalCharacters?: number;
+    segments?: Array<{
+      index: number;
+      audioBase64: string;
+      targetDuration?: number;
+    }>;
+  };
+}
