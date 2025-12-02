@@ -1,5 +1,5 @@
 import { type PackId, packs } from "../types/packs";
-import { tokensToCredits, secondsToCredits, charactersToCredits, type TTSModel } from "./pricing";
+import { tokensToCredits, secondsToCredits, charactersToCredits, estimateVoiceCloningCredits, type TTSModel } from "./pricing";
 
 // Types for database operations
 export interface CreditRecord {
@@ -204,7 +204,14 @@ export const getUserByApiKey = async ({
   return getCredits({ deviceId: apiKey });
 };
 
-// Helper function for updating balance
+/**
+ * Atomically deduct credits from a device's balance.
+ *
+ * This uses SQL's atomic UPDATE with WHERE clause to prevent race conditions:
+ * - The balance check (credit_balance >= spend) and deduction happen in a single statement
+ * - If two concurrent requests try to spend credits, only one will succeed
+ * - We verify success by checking rows affected (res.meta.changes)
+ */
 const updateBalance = async (
   deviceId: string,
   spend: number,
@@ -212,12 +219,13 @@ const updateBalance = async (
 ): Promise<boolean> => {
   if (!db) throw new Error("Database not initialized");
 
-  if (spend <= 0) {
-    console.log(`No credits to deduct for device ${deviceId}. Usage was zero.`);
+  if (!Number.isFinite(spend) || spend <= 0) {
+    console.log(`No credits to deduct for device ${deviceId}. Usage was zero or invalid.`);
     return true;
   }
 
   try {
+    // Atomic check-and-deduct: WHERE clause ensures we only deduct if balance is sufficient
     const stmt = db.prepare(
       `UPDATE credits
          SET credit_balance = credit_balance - ?,
@@ -325,6 +333,25 @@ export const deductTTSCredits = async ({
   return updateBalance(deviceId, spend, {
     reason: "DUB",
     meta: { characters, model, ...(meta ?? {}) },
+  });
+};
+
+/**
+ * Deduct credits for voice cloning (ElevenLabs Dubbing API) based on duration
+ */
+export const deductVoiceCloningCredits = async ({
+  deviceId,
+  durationSeconds,
+  meta,
+}: {
+  deviceId: string;
+  durationSeconds: number;
+  meta?: Record<string, unknown>;
+}): Promise<boolean> => {
+  const { credits: spend } = estimateVoiceCloningCredits({ durationSeconds });
+  return updateBalance(deviceId, spend, {
+    reason: "VOICE_CLONE",
+    meta: { durationSeconds, ...(meta ?? {}) },
   });
 };
 

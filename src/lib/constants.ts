@@ -5,12 +5,28 @@ export const ALLOWED_SPEECH_MODELS = ["tts-1", "tts-1-hd"];
 export const DEFAULT_SPEECH_MODEL = "tts-1";
 export const DEFAULT_SPEECH_VOICE = "alloy";
 export const ALLOWED_SPEECH_VOICES = [
+  // OpenAI TTS voices
   "alloy",
   "echo",
   "fable",
   "onyx",
   "nova",
   "shimmer",
+  // ElevenLabs voices
+  "rachel",
+  "adam",
+  "josh",
+  "sarah",
+  "charlie",
+  "emily",
+  "matilda",
+  "brian",
+  "domi",
+  "bella",
+  "antoni",
+  "elli",
+  "arnold",
+  "sam",
 ];
 export const ALLOWED_SPEECH_FORMATS = [
   "mp3",

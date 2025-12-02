@@ -1,6 +1,5 @@
-import { Hono, Next } from "hono";
+import { Hono, Context } from "hono";
 import { cors } from "hono/cors";
-import { Context } from "hono";
 import { z } from "zod";
 import {
   ALLOWED_SPEECH_MODELS,
@@ -11,10 +10,27 @@ import {
   DEFAULT_SPEECH_VOICE,
   DEFAULT_SPEECH_FORMAT,
   SpeechFormat,
+  MAX_FILE_SIZE,
 } from "../lib/constants";
-import { getUserByApiKey, deductTTSCredits } from "../lib/db";
-import { callDubRelay, callSpeechDirect, callElevenLabsDubRelay } from "../lib/openai-config";
-import { type TTSModel, estimateDubbingCredits, TTS_PRICES } from "../lib/pricing";
+import { deductTTSCredits, deductVoiceCloningCredits } from "../lib/db";
+import {
+  callDubRelay,
+  callSpeechDirect,
+  callElevenLabsDubRelay,
+  callVoiceCloningRelay,
+} from "../lib/openai-config";
+import {
+  type TTSModel,
+  estimateDubbingCredits,
+  estimateVoiceCloningCredits,
+  getVoiceCloningCreditsPerMinute,
+  TTS_PRICES,
+} from "../lib/pricing";
+import {
+  bearerAuth,
+  getErrorMessage,
+  type AuthVariables,
+} from "../lib/middleware";
 
 const MAX_SCRIPT_CHARACTERS = 200_000;
 const MAX_TOTAL_SEGMENT_CHARACTERS = 80_000;
@@ -73,14 +89,7 @@ type Bindings = {
   DB: D1Database;
 };
 
-type Variables = {
-  user: {
-    deviceId: string;
-    creditBalance: number;
-  };
-};
-
-const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+const router = new Hono<{ Bindings: Bindings; Variables: AuthVariables }>();
 
 router.use(
   "*",
@@ -100,32 +109,8 @@ router.options(
     })
 );
 
-router.use("*", async (c: Context, next: Next) => {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json(
-      { error: API_ERRORS.UNAUTHORIZED, message: "Missing API key" },
-      401
-    );
-  }
-
-  const apiKey = authHeader.substring(7);
-  const user = await getUserByApiKey({ apiKey });
-
-  if (!user) {
-    return c.json(
-      { error: API_ERRORS.UNAUTHORIZED, message: "Invalid API key" },
-      401
-    );
-  }
-
-  c.set("user", {
-    deviceId: user.device_id,
-    creditBalance: user.credit_balance,
-  });
-
-  await next();
-});
+// Use shared auth middleware
+router.use("*", bearerAuth());
 
 /**
  * POST /estimate
@@ -183,6 +168,173 @@ router.post("/estimate", async (c) => {
   }
 });
 
+/**
+ * POST /voice-clone
+ * Voice cloning dubbing using ElevenLabs Dubbing API
+ * Expects multipart form data with audio/video file
+ */
+router.post("/voice-clone", async (c) => {
+  const user = c.get("user");
+
+  try {
+    const formData = await c.req.formData();
+    const file = formData.get("file") as File | null;
+    const targetLanguage = formData.get("target_language") as string | null;
+    const sourceLanguage = formData.get("source_language") as string | null;
+    const durationSecondsStr = formData.get("duration_seconds") as
+      | string
+      | null;
+    const numSpeakersStr = formData.get("num_speakers") as string | null;
+    const dropBackgroundAudioStr = formData.get("drop_background_audio") as
+      | string
+      | null;
+
+    if (!file) {
+      return c.json(
+        { error: API_ERRORS.INVALID_REQUEST, message: "No file provided" },
+        400
+      );
+    }
+
+    // File size limit check
+    if (file.size > MAX_FILE_SIZE) {
+      return c.json(
+        {
+          error: API_ERRORS.FILE_TOO_LARGE,
+          message: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`,
+        },
+        400
+      );
+    }
+
+    if (!targetLanguage) {
+      return c.json(
+        {
+          error: API_ERRORS.INVALID_REQUEST,
+          message: "target_language is required",
+        },
+        400
+      );
+    }
+
+    // Parse duration (required for credit pre-check)
+    const durationSeconds = durationSecondsStr
+      ? parseFloat(durationSecondsStr)
+      : 0;
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      return c.json(
+        {
+          error: API_ERRORS.INVALID_REQUEST,
+          message: "duration_seconds must be a positive number",
+        },
+        400
+      );
+    }
+
+    // Pre-check credits
+    const { credits: estimatedCredits } = estimateVoiceCloningCredits({
+      durationSeconds,
+    });
+    if (user.creditBalance < estimatedCredits) {
+      return c.json(
+        {
+          error: API_ERRORS.INSUFFICIENT_CREDITS,
+          message: `Insufficient credits. Required: ${estimatedCredits}, Available: ${user.creditBalance}`,
+          required: estimatedCredits,
+          available: user.creditBalance,
+        },
+        402
+      );
+    }
+
+    const numSpeakersRaw = numSpeakersStr
+      ? parseInt(numSpeakersStr, 10)
+      : undefined;
+    const numSpeakers =
+      numSpeakersRaw !== undefined &&
+      Number.isFinite(numSpeakersRaw) &&
+      numSpeakersRaw > 0
+        ? numSpeakersRaw
+        : undefined;
+    const dropBackgroundAudio = dropBackgroundAudioStr !== "false";
+
+    console.log(
+      `[voice-clone] Starting for ${user.deviceId}: ${file.name} (${(
+        file.size /
+        1024 /
+        1024
+      ).toFixed(1)}MB) → ${targetLanguage}, est credits: ${estimatedCredits}`
+    );
+
+    // Call the relay
+    const fileBuffer = await file.arrayBuffer();
+    const result = await callVoiceCloningRelay({
+      c,
+      fileBuffer,
+      fileName: file.name,
+      mimeType: file.type || "video/mp4",
+      targetLanguage,
+      sourceLanguage: sourceLanguage || undefined,
+      numSpeakers,
+      dropBackgroundAudio,
+    });
+
+    // Deduct credits on success
+    const ok = await deductVoiceCloningCredits({
+      deviceId: user.deviceId,
+      durationSeconds,
+      meta: {
+        targetLanguage,
+        sourceLanguage,
+        fileName: file.name,
+        fileSize: file.size,
+      },
+    });
+
+    if (!ok) {
+      // This shouldn't happen if pre-check passed, but handle gracefully
+      console.error(
+        `[voice-clone] Credit deduction failed for ${user.deviceId}`
+      );
+      return c.json({ error: API_ERRORS.INSUFFICIENT_CREDITS }, 402);
+    }
+
+    console.log(
+      `[voice-clone] Success for ${user.deviceId}, deducted ${estimatedCredits} credits`
+    );
+
+    return c.json({
+      audioBase64: result.audioBase64,
+      transcript: result.transcript,
+      format: result.format,
+      durationSeconds,
+      creditsUsed: estimatedCredits,
+    });
+  } catch (error: any) {
+    console.error("[voice-clone] Error:", error);
+    return c.json(
+      {
+        error: "Voice cloning failed",
+        message: error?.message || "Unknown error",
+      },
+      500
+    );
+  }
+});
+
+/**
+ * GET /voice-clone/pricing
+ * Get voice cloning pricing info for UI display
+ */
+router.get("/voice-clone/pricing", async (c) => {
+  const creditsPerMinute = getVoiceCloningCreditsPerMinute();
+  return c.json({
+    creditsPerMinute,
+    description:
+      "Voice cloning uses ElevenLabs Dubbing API to clone the original speaker's voice",
+  });
+});
+
 router.post("/", async (c) => {
   const user = c.get("user");
 
@@ -207,7 +359,8 @@ router.post("/", async (c) => {
       );
     }
 
-    const { segments, voice, model, format, quality, ttsProvider } = parsed.data;
+    const { segments, voice, model, format, quality, ttsProvider } =
+      parsed.data;
 
     // Default to OpenAI (cheaper) if not specified
     const chosenTtsProvider = ttsProvider ?? "openai";
@@ -288,7 +441,7 @@ router.post("/", async (c) => {
       );
     }
 
-    const textLines = sanitizedSegments.map(seg => seg.text);
+    const textLines = sanitizedSegments.map((seg) => seg.text);
 
     if (!textLines.length) {
       return c.json(
@@ -375,7 +528,10 @@ router.post("/", async (c) => {
       clearTimeout(timeoutId);
     }
 
-    if (!relayResult || (!relayResult.audioBase64 && !relayResult.segments?.length)) {
+    if (
+      !relayResult ||
+      (!relayResult.audioBase64 && !relayResult.segments?.length)
+    ) {
       throw new Error("Dub synthesis returned no audio segments");
     }
 
@@ -420,14 +576,18 @@ router.post("/", async (c) => {
     const chunkCount = relayResult.chunkCount ?? (segmentCount || undefined);
 
     console.log(
-      `[dub] success for ${user.deviceId} provider=${relayResult.usedElevenLabs ? "elevenlabs" : "openai"} chars=${totalCharacters} segments=${segmentCount}`
+      `[dub] success for ${user.deviceId} provider=${
+        relayResult.usedElevenLabs ? "elevenlabs" : "openai"
+      } chars=${totalCharacters} segments=${segmentCount}`
     );
 
     return c.json({
       audioBase64: relayResult.audioBase64,
       segments: relayResult.segments,
       voice: relayResult.voice ?? chosenVoice,
-      model: relayResult.usedElevenLabs ? "eleven_multilingual_v2" : (relayResult.model ?? chosenModel),
+      model: relayResult.usedElevenLabs
+        ? "eleven_multilingual_v2"
+        : relayResult.model ?? chosenModel,
       format: relayResult.format ?? chosenFormat,
       totalCharacters,
       approxSeconds,
@@ -458,11 +618,15 @@ router.post("/", async (c) => {
 
 export default router;
 
-const RETRYABLE_RELAY_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 522, 524]);
-const RETRYABLE_MESSAGE_PATTERN = /(timeout|timed out|temporarily unavailable|connection reset|gateway|rate limit|fetch failed)/i;
+const RETRYABLE_RELAY_STATUS = new Set([
+  408, 409, 425, 429, 500, 502, 503, 504, 522, 524,
+]);
+const RETRYABLE_MESSAGE_PATTERN =
+  /(timeout|timed out|temporarily unavailable|connection reset|gateway|rate limit|fetch failed)/i;
 
 function extractRelayStatus(error: unknown): number | null {
-  const message = typeof error === "string" ? error : String((error as any)?.message ?? "");
+  const message =
+    typeof error === "string" ? error : String((error as any)?.message ?? "");
   const match = message.match(/Dub relay server error:\s*(\d{3})/i);
   if (match) {
     return Number(match[1]);
@@ -479,14 +643,23 @@ function isRetryableRelayError(error: unknown): boolean {
   if (status != null && RETRYABLE_RELAY_STATUS.has(status)) {
     return true;
   }
-  const message = typeof error === "string" ? error : String((error as any)?.message ?? "");
+  const message =
+    typeof error === "string" ? error : String((error as any)?.message ?? "");
   if (RETRYABLE_MESSAGE_PATTERN.test(message)) {
     return true;
   }
   const code = (error as any)?.code;
   if (typeof code === "string") {
     const normalized = code.toUpperCase();
-    if (["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(normalized)) {
+    if (
+      [
+        "ETIMEDOUT",
+        "ECONNRESET",
+        "ECONNREFUSED",
+        "EHOSTUNREACH",
+        "ENETUNREACH",
+      ].includes(normalized)
+    ) {
       return true;
     }
   }
@@ -546,10 +719,12 @@ async function synthesizeDubWithFallback({
         voice,
         signal,
       });
-      console.log(`[dub] ElevenLabs TTS succeeded, segments=${sanitizedSegments.length}`);
+      console.log(
+        `[dub] ElevenLabs TTS succeeded, segments=${sanitizedSegments.length}`
+      );
       return {
         ...elevenLabsResponse,
-        format: elevenLabsResponse.format as SpeechFormat || "mp3",
+        format: (elevenLabsResponse.format as SpeechFormat) || "mp3",
         usedRelay: true,
         usedElevenLabs: true,
       };
@@ -559,15 +734,33 @@ async function synthesizeDubWithFallback({
       }
 
       console.warn(
-        `[dub] ElevenLabs failed (${elevenLabsError?.message || elevenLabsError}); trying OpenAI relay...`
+        `[dub] ElevenLabs failed (${
+          elevenLabsError?.message || elevenLabsError
+        }); trying OpenAI relay...`
       );
 
       // Fall back to OpenAI relay
-      return synthesizeWithOpenAI({ c, sanitizedSegments, lines, voice, model, format, signal });
+      return synthesizeWithOpenAI({
+        c,
+        sanitizedSegments,
+        lines,
+        voice,
+        model,
+        format,
+        signal,
+      });
     }
   } else {
     // OpenAI provider - use OpenAI directly, no ElevenLabs fallback
-    return synthesizeWithOpenAI({ c, sanitizedSegments, lines, voice, model, format, signal });
+    return synthesizeWithOpenAI({
+      c,
+      sanitizedSegments,
+      lines,
+      voice,
+      model,
+      format,
+      signal,
+    });
   }
 }
 
@@ -601,7 +794,9 @@ async function synthesizeWithOpenAI({
     }
 
     console.warn(
-      `[dub] OpenAI relay failed (${relayError?.message || relayError}); falling back to direct. segments=${sanitizedSegments.length}`
+      `[dub] OpenAI relay failed (${
+        relayError?.message || relayError
+      }); falling back to direct. segments=${sanitizedSegments.length}`
     );
 
     // Fall back to direct OpenAI
@@ -651,7 +846,11 @@ async function synthesizeSegmentsDirect({
     throw new DOMException("Operation cancelled", "AbortError");
   }
 
-  const results: Array<{ index: number; audioBase64: string; targetDuration?: number }> = [];
+  const results: Array<{
+    index: number;
+    audioBase64: string;
+    targetDuration?: number;
+  }> = [];
   const errors: unknown[] = [];
   let cursor = 0;
 

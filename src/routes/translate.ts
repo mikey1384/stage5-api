@@ -1,12 +1,11 @@
-import { Hono, Next } from "hono";
-import { Context } from "hono";
+import { Hono, Context } from "hono";
+import type { StatusCode } from "hono/utils/http-status";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { cors } from "hono/cors";
 import { API_ERRORS, getProviderFromModel } from "../lib/constants";
 import { getAllowedTranslationModels } from "../lib/pricing";
 import {
-  getUserByApiKey,
   createTranslationJob,
   setTranslationJobProcessing,
   resetTranslationJobRelay,
@@ -21,20 +20,17 @@ import {
   submitTranslationRelayJob,
   fetchRelayTranslationStatus,
 } from "../lib/openai-config";
+import { bearerAuth, getErrorMessage, type AuthVariables } from "../lib/middleware";
+
+/** Common HTTP error status codes used in this route */
+type ErrorStatusCode = 400 | 402 | 404 | 500 | 502 | 503;
 
 type Bindings = {
   OPENAI_API_KEY: string;
   DB: D1Database;
 };
 
-type Variables = {
-  user: {
-    deviceId: string;
-    creditBalance: number;
-  };
-};
-
-const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+const router = new Hono<{ Bindings: Bindings; Variables: AuthVariables }>();
 
 router.use(
   "*",
@@ -54,32 +50,8 @@ router.options(
     })
 );
 
-router.use("*", async (c: Context, next: Next) => {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json(
-      { error: API_ERRORS.UNAUTHORIZED, message: "Missing API key" },
-      401
-    );
-  }
-
-  const apiKey = authHeader.substring(7);
-  const user = await getUserByApiKey({ apiKey });
-
-  if (!user) {
-    return c.json(
-      { error: API_ERRORS.UNAUTHORIZED, message: "Invalid API key" },
-      401
-    );
-  }
-
-  c.set("user", {
-    deviceId: user.device_id,
-    creditBalance: user.credit_balance,
-  });
-
-  await next();
-});
+// Use shared auth middleware
+router.use("*", bearerAuth());
 
 const translateSchema = z.object({
   messages: z.array(
@@ -163,7 +135,7 @@ router.post("/", async (c) => {
       if (persistResult.status === "error") {
         return c.json(
           { error: persistResult.message },
-          { status: persistResult.code as any }
+          { status: persistResult.code }
         );
       }
 
@@ -225,7 +197,7 @@ router.get("/result/:jobId", async (c) => {
   if (syncResult?.status === "error") {
     return c.json(
       { error: syncResult.message },
-      { status: syncResult.code as any }
+      { status: syncResult.code }
     );
   }
 
@@ -269,8 +241,8 @@ function respondWithJobResult(c: Context<any>, job: TranslationJobRecord) {
 
 function respondWithJobFailure(c: Context<any>, job: TranslationJobRecord) {
   const message = job.error || "Translation job failed";
-  const status = job.error === "insufficient-credits" ? 402 : 500;
-  return c.json({ error: message }, { status: status as any });
+  const status: ErrorStatusCode = job.error === "insufficient-credits" ? 402 : 500;
+  return c.json({ error: message }, { status });
 }
 
 async function syncJobWithRelay({
@@ -284,7 +256,7 @@ async function syncJobWithRelay({
   payload: Record<string, unknown>;
   signal?: AbortSignal;
 }): Promise<
-  { status: "ok" } | { status: "error"; code: number; message: string }
+  { status: "ok" } | { status: "error"; code: ErrorStatusCode; message: string }
 > {
   if (!job.relay_job_id) {
     try {
@@ -428,7 +400,7 @@ async function persistCompletion({
   payload: Record<string, unknown>;
   completion: any;
 }): Promise<
-  { status: "ok" } | { status: "error"; code: number; message: string }
+  { status: "ok" } | { status: "error"; code: ErrorStatusCode; message: string }
 > {
   const usage = completion?.usage ?? {};
   const promptTokens =

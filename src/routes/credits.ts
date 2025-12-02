@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { z } from "zod";
 import { getCredits, getLedgerEntries } from "../lib/db";
 import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
+import { uuidSchema } from "../lib/schemas";
+import { getErrorMessage } from "../lib/middleware";
 
 const router = new Hono();
 
@@ -10,11 +11,8 @@ router.get("/:deviceId", async (c) => {
   const deviceId = c.req.param("deviceId");
 
   // Validate UUID format
-  const uuidSchema = z.string().uuid();
-
-  try {
-    uuidSchema.parse(deviceId);
-  } catch (error) {
+  const parsed = uuidSchema.safeParse(deviceId);
+  if (!parsed.success) {
     return c.json(
       {
         error: "Invalid device ID format",
@@ -53,7 +51,7 @@ router.get("/:deviceId", async (c) => {
     return c.json(
       {
         error: "Failed to fetch credits",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: getErrorMessage(error),
       },
       500
     );
@@ -65,11 +63,8 @@ router.get("/:deviceId/ledger", async (c) => {
   const deviceId = c.req.param("deviceId");
 
   // Validate UUID format
-  const uuidSchema = z.string().uuid();
-
-  try {
-    uuidSchema.parse(deviceId);
-  } catch (error) {
+  const parsed = uuidSchema.safeParse(deviceId);
+  if (!parsed.success) {
     return c.json(
       {
         error: "Invalid device ID format",
@@ -87,7 +82,7 @@ router.get("/:deviceId/ledger", async (c) => {
     return c.json(
       {
         error: "Failed to fetch ledger entries",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: getErrorMessage(error),
       },
       500
     );

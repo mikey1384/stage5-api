@@ -133,3 +133,29 @@ export function estimateDubbingCredits({
 export function getAllowedTTSModels(): TTSModel[] {
   return Object.keys(TTS_PRICES) as TTSModel[];
 }
+
+// Voice cloning pricing (ElevenLabs Dubbing API)
+// ElevenLabs charges ~$0.50/min, we add MARGIN for Stage5 credits
+const VOICE_CLONING_USD_PER_MINUTE = 0.50;
+
+/**
+ * Estimate credits for voice cloning dubbing (duration-based, not character-based)
+ */
+export function estimateVoiceCloningCredits({
+  durationSeconds,
+}: {
+  durationSeconds: number;
+}): { credits: number; usdEstimate: number } {
+  const minutes = durationSeconds / 60;
+  const usd = minutes * VOICE_CLONING_USD_PER_MINUTE;
+  const credits = Math.ceil((usd * MARGIN) / USD_PER_CREDIT);
+  return { credits, usdEstimate: usd };
+}
+
+/**
+ * Get credits per minute for voice cloning (for UI display)
+ */
+export function getVoiceCloningCreditsPerMinute(): number {
+  const usdPerMinute = VOICE_CLONING_USD_PER_MINUTE;
+  return Math.ceil((usdPerMinute * MARGIN) / USD_PER_CREDIT);
+}

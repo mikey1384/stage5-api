@@ -3,6 +3,21 @@ import { Context } from "hono";
 import { OPENAI_RELAY_URL, SpeechFormat } from "./constants";
 
 /**
+ * Combines multiple AbortSignals into one that aborts when any of them abort.
+ */
+function anySignal(signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      return controller.signal;
+    }
+    signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
+}
+
+/**
  * Creates an OpenAI client for direct API calls (primary path)
  */
 export function makeOpenAI(c: Context<any>) {
@@ -206,9 +221,10 @@ export async function submitTranslationRelayJob({
   });
 
   if (resp.status === 202) {
-    const data = (await resp.json().catch(() => ({}))) as
-      | { jobId?: string; status?: string }
-      | undefined;
+    const data = (await resp.json().catch((err) => {
+      console.warn("[submitTranslationRelayJob] Failed to parse 202 response JSON:", err);
+      return {};
+    })) as { jobId?: string; status?: string } | undefined;
     const relayJobId = data?.jobId;
     if (!relayJobId) {
       throw new Error(
@@ -308,8 +324,8 @@ async function resolveRelayTranslationResponse({
     let data: any = {};
     try {
       data = await resp.json();
-    } catch {
-      // ignore malformed body
+    } catch (err) {
+      console.warn("[resolveRelayTranslationResponse] Failed to parse 202 response JSON:", err);
     }
 
     const jobId = data?.jobId;
@@ -324,6 +340,7 @@ async function resolveRelayTranslationResponse({
 
     const pollIntervalMs = 2000;
     const maxWaitMs = 600_000; // 10 minutes
+    const perRequestTimeoutMs = 30_000; // 30 seconds per poll request
     const startTime = Date.now();
 
     while (true) {
@@ -337,14 +354,31 @@ async function resolveRelayTranslationResponse({
 
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
 
-      const statusResp = await fetch(
-        `${OPENAI_RELAY_URL}/translate/result/${jobId}`,
-        {
-          method: "GET",
-          headers: pollHeaders,
-          signal,
+      // Create per-request timeout to avoid hanging on unresponsive relay
+      const pollController = new AbortController();
+      const timeoutId = setTimeout(() => pollController.abort(), perRequestTimeoutMs);
+
+      let statusResp: Response;
+      try {
+        statusResp = await fetch(
+          `${OPENAI_RELAY_URL}/translate/result/${jobId}`,
+          {
+            method: "GET",
+            headers: pollHeaders,
+            signal: signal ? anySignal([signal, pollController.signal]) : pollController.signal,
+          }
+        );
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        // If it's our timeout, log and retry; if it's the parent signal, rethrow
+        if (pollController.signal.aborted && !signal?.aborted) {
+          console.warn(`[resolveRelayTranslationResponse] Poll request timed out after ${perRequestTimeoutMs}ms, retrying...`);
+          continue;
         }
-      );
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (statusResp.status === 202) {
         continue;
@@ -672,5 +706,65 @@ export async function callElevenLabsDubRelay({
       audioBase64: string;
       targetDuration?: number;
     }>;
+  };
+}
+
+/**
+ * Call relay server for ElevenLabs voice cloning dubbing (full Dubbing API)
+ */
+export async function callVoiceCloningRelay({
+  c,
+  fileBuffer,
+  fileName,
+  mimeType,
+  targetLanguage,
+  sourceLanguage,
+  numSpeakers,
+  dropBackgroundAudio = true,
+}: {
+  c: Context<any>;
+  fileBuffer: ArrayBuffer;
+  fileName: string;
+  mimeType: string;
+  targetLanguage: string;
+  sourceLanguage?: string;
+  numSpeakers?: number;
+  dropBackgroundAudio?: boolean;
+}): Promise<{
+  audioBase64: string;
+  transcript: string;
+  format: string;
+}> {
+  const formData = new FormData();
+  formData.append("file", new Blob([fileBuffer], { type: mimeType }), fileName);
+  formData.append("target_language", targetLanguage);
+  if (sourceLanguage) {
+    formData.append("source_language", sourceLanguage);
+  }
+  if (numSpeakers !== undefined) {
+    formData.append("num_speakers", String(numSpeakers));
+  }
+  formData.append("drop_background_audio", String(dropBackgroundAudio));
+
+  const resp = await fetch(`${OPENAI_RELAY_URL}/dub-video-elevenlabs`, {
+    method: "POST",
+    headers: {
+      "X-Relay-Secret": c.env.RELAY_SECRET,
+      "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
+    },
+    body: formData,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(
+      `Voice cloning relay error: ${resp.status} ${text || resp.statusText}`
+    );
+  }
+
+  return (await resp.json()) as {
+    audioBase64: string;
+    transcript: string;
+    format: string;
   };
 }

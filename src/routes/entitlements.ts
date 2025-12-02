@@ -1,8 +1,7 @@
 import { Hono } from "hono";
-import { z } from "zod";
 import { getEntitlementsRecord } from "../lib/db";
-
-const uuidSchema = z.string().uuid();
+import { uuidSchema } from "../lib/schemas";
+import { getErrorMessage } from "../lib/middleware";
 
 type Variables = {
   authDeviceId: string;
@@ -67,7 +66,7 @@ router.get("/:deviceId", async c => {
     return c.json(
       {
         error: "Failed to fetch entitlements",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: getErrorMessage(error),
       },
       500
     );

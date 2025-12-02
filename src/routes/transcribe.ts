@@ -1,13 +1,18 @@
-import { Hono, Next } from "hono";
-import { Context } from "hono";
-import { getUserByApiKey, deductTranscriptionCredits } from "../lib/db";
+import { Hono, Context } from "hono";
+import { deductTranscriptionCredits } from "../lib/db";
 import {
   ALLOWED_TRANSCRIPTION_MODELS,
   MAX_FILE_SIZE,
   API_ERRORS,
 } from "../lib/constants";
 import { cors } from "hono/cors";
-import { makeOpenAI, callRelayServer, callElevenLabsTranscribeRelay, callElevenLabsTranscribeFromR2 } from "../lib/openai-config";
+import {
+  makeOpenAI,
+  callRelayServer,
+  callElevenLabsTranscribeRelay,
+  callElevenLabsTranscribeFromR2,
+} from "../lib/openai-config";
+import { bearerAuth, type AuthVariables } from "../lib/middleware";
 
 type Bindings = {
   OPENAI_API_KEY: string;
@@ -19,14 +24,7 @@ type Bindings = {
   R2_SECRET_ACCESS_KEY: string;
 };
 
-type Variables = {
-  user: {
-    deviceId: string;
-    creditBalance: number;
-  };
-};
-
-const router = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+const router = new Hono<{ Bindings: Bindings; Variables: AuthVariables }>();
 
 // Add CORS middleware
 router.use(
@@ -48,33 +46,8 @@ router.options(
     })
 );
 
-// Authentication middleware
-router.use("*", async (c: Context, next: Next) => {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json(
-      { error: API_ERRORS.UNAUTHORIZED, message: "Missing API key" },
-      401
-    );
-  }
-
-  const apiKey = authHeader.substring(7);
-  const user = await getUserByApiKey({ apiKey });
-
-  if (!user) {
-    return c.json(
-      { error: API_ERRORS.UNAUTHORIZED, message: "Invalid API key" },
-      401
-    );
-  }
-
-  c.set("user", {
-    deviceId: user.device_id,
-    creditBalance: user.credit_balance,
-  });
-
-  await next();
-});
+// Use shared auth middleware
+router.use("*", bearerAuth());
 
 router.post("/", async (c) => {
   const user = c.get("user");
@@ -165,10 +138,15 @@ router.post("/", async (c) => {
       });
       usedRelay = true;
       usedElevenLabs = true;
-      console.log(`[transcribe] ElevenLabs Scribe succeeded for device ${user.deviceId}`);
+      console.log(
+        `[transcribe] ElevenLabs Scribe succeeded for device ${user.deviceId}`
+      );
     } catch (elevenLabsError: any) {
       // Handle cancellation/timeout
-      if (elevenLabsError.name === "AbortError" || abortController.signal.aborted) {
+      if (
+        elevenLabsError.name === "AbortError" ||
+        abortController.signal.aborted
+      ) {
         clearTimeout(timeoutId);
         const wasCancelled = c.req.raw.signal?.aborted;
         return c.json(
@@ -182,7 +160,9 @@ router.post("/", async (c) => {
         );
       }
 
-      console.warn(`[transcribe] ElevenLabs failed (${elevenLabsError?.message}), trying OpenAI relay...`);
+      console.warn(
+        `[transcribe] ElevenLabs failed (${elevenLabsError?.message}), trying OpenAI relay...`
+      );
 
       // Fall back to OpenAI relay
       try {
@@ -197,7 +177,10 @@ router.post("/", async (c) => {
         usedRelay = true;
       } catch (relayError: any) {
         // Handle cancellation/timeout
-        if (relayError.name === "AbortError" || abortController.signal.aborted) {
+        if (
+          relayError.name === "AbortError" ||
+          abortController.signal.aborted
+        ) {
           clearTimeout(timeoutId);
           const wasCancelled = c.req.raw.signal?.aborted;
           return c.json(
@@ -211,7 +194,9 @@ router.post("/", async (c) => {
           );
         }
 
-        console.warn(`[transcribe] OpenAI relay failed (${relayError?.message}), trying direct...`);
+        console.warn(
+          `[transcribe] OpenAI relay failed (${relayError?.message}), trying direct...`
+        );
 
         // If relay failed, fall back to direct provider call
         try {
@@ -229,10 +214,7 @@ router.post("/", async (c) => {
             }
           );
         } catch (directError: any) {
-          console.error(
-            "❌ All transcription attempts failed:",
-            directError
-          );
+          console.error("❌ All transcription attempts failed:", directError);
           throw relayError; // Re-throw relay error for better messaging
         }
       }
@@ -268,7 +250,9 @@ router.post("/", async (c) => {
       }
       const provider = usedElevenLabs ? "ElevenLabs" : "OpenAI";
       console.log(
-        `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${user.deviceId} model=${model} provider=${provider} duration=${seconds}s`
+        `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${
+          user.deviceId
+        } model=${model} provider=${provider} duration=${seconds}s`
       );
     } else {
       console.error(
@@ -303,7 +287,13 @@ router.post("/", async (c) => {
 // R2-based Large File Transcription Flow
 // ============================================================================
 
-import { createR2Client, generateUploadUrl, generateDownloadUrl, generateFileKey, deleteFile } from "../lib/r2-config";
+import {
+  createR2Client,
+  generateUploadUrl,
+  generateDownloadUrl,
+  generateFileKey,
+  deleteFile,
+} from "../lib/r2-config";
 import { v4 as uuidv4 } from "uuid";
 
 // In-memory job storage (in production, use D1 or KV for persistence)
@@ -347,7 +337,10 @@ router.post("/upload-url", async (c) => {
     // Validate file size if provided (max 500MB)
     if (fileSizeMB && fileSizeMB > 500) {
       return c.json(
-        { error: API_ERRORS.FILE_TOO_LARGE, message: "File size exceeds 500MB limit" },
+        {
+          error: API_ERRORS.FILE_TOO_LARGE,
+          message: "File size exceeds 500MB limit",
+        },
         413
       );
     }
@@ -355,7 +348,10 @@ router.post("/upload-url", async (c) => {
     // Check user has credits before allowing upload
     if (user.creditBalance <= 0) {
       return c.json(
-        { error: API_ERRORS.INSUFFICIENT_CREDITS, message: "Insufficient credits" },
+        {
+          error: API_ERRORS.INSUFFICIENT_CREDITS,
+          message: "Insufficient credits",
+        },
         402
       );
     }
@@ -384,7 +380,9 @@ router.post("/upload-url", async (c) => {
     };
     transcriptionJobs.set(jobId, job);
 
-    console.log(`[transcribe/upload-url] Created job ${jobId} for device ${user.deviceId}`);
+    console.log(
+      `[transcribe/upload-url] Created job ${jobId} for device ${user.deviceId}`
+    );
 
     return c.json({
       jobId,
@@ -432,7 +430,10 @@ router.post("/process/:jobId", async (c) => {
     // Verify file exists in R2
     const r2Object = await c.env.TRANSCRIPTION_BUCKET.head(job.fileKey);
     if (!r2Object) {
-      return c.json({ error: "File not found in storage. Please upload first." }, 400);
+      return c.json(
+        { error: "File not found in storage. Please upload first." },
+        400
+      );
     }
 
     // Update job status
@@ -446,12 +447,16 @@ router.post("/process/:jobId", async (c) => {
     });
     const downloadUrl = await generateDownloadUrl(r2Client, job.fileKey);
 
-    console.log(`[transcribe/process] Starting processing for job ${jobId} (${(r2Object.size / 1024 / 1024).toFixed(1)}MB)`);
+    console.log(
+      `[transcribe/process] Starting processing for job ${jobId} (${(
+        r2Object.size /
+        1024 /
+        1024
+      ).toFixed(1)}MB)`
+    );
 
     // Start async processing
-    c.executionCtx.waitUntil(
-      processTranscriptionJob(c, job, downloadUrl)
-    );
+    c.executionCtx.waitUntil(processTranscriptionJob(c, job, downloadUrl));
 
     return c.json({
       jobId: job.id,
@@ -516,7 +521,7 @@ router.get("/status/:jobId", async (c) => {
  * Process a transcription job asynchronously
  */
 async function processTranscriptionJob(
-  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  c: Context<{ Bindings: Bindings; Variables: AuthVariables }>,
   job: TranscriptionJob,
   downloadUrl: string
 ) {
@@ -544,7 +549,9 @@ async function processTranscriptionJob(
         return;
       }
 
-      console.log(`[transcribe/process] Job ${job.id} completed, ${seconds}s transcribed`);
+      console.log(
+        `[transcribe/process] Job ${job.id} completed, ${seconds}s transcribed`
+      );
     }
 
     job.status = "completed";
@@ -555,7 +562,10 @@ async function processTranscriptionJob(
       await deleteFile(c.env.TRANSCRIPTION_BUCKET, job.fileKey);
       console.log(`[transcribe/process] Cleaned up R2 file: ${job.fileKey}`);
     } catch (cleanupError) {
-      console.warn(`[transcribe/process] Failed to cleanup R2 file: ${job.fileKey}`, cleanupError);
+      console.warn(
+        `[transcribe/process] Failed to cleanup R2 file: ${job.fileKey}`,
+        cleanupError
+      );
     }
   } catch (error: any) {
     console.error(`[transcribe/process] Job ${job.id} failed:`, error);
@@ -565,7 +575,12 @@ async function processTranscriptionJob(
     // Still try to cleanup R2 file on failure
     try {
       await deleteFile(c.env.TRANSCRIPTION_BUCKET, job.fileKey);
-    } catch {}
+    } catch (cleanupErr) {
+      console.warn(
+        `[transcribe/process] Failed to cleanup R2 file ${job.fileKey}:`,
+        cleanupErr
+      );
+    }
   }
 }
 
