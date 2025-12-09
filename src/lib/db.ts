@@ -652,3 +652,132 @@ export const grantByoAnthropicEntitlement = async ({
     throw error;
   }
 };
+
+// ============================================================================
+// Transcription Jobs (R2 upload flow)
+// ============================================================================
+
+export interface TranscriptionJobRecord {
+  job_id: string;
+  device_id: string;
+  status: "pending_upload" | "processing" | "completed" | "failed";
+  file_key: string | null;
+  language: string | null;
+  result: string | null;
+  error: string | null;
+  duration_seconds: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const createTranscriptionJob = async ({
+  jobId,
+  deviceId,
+  fileKey,
+  language,
+}: {
+  jobId: string;
+  deviceId: string;
+  fileKey: string;
+  language?: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    INSERT INTO transcription_jobs (job_id, device_id, status, file_key, language, created_at, updated_at)
+    VALUES (?, ?, 'pending_upload', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `);
+
+  await stmt.bind(jobId, deviceId, fileKey, language ?? null).run();
+};
+
+export const getTranscriptionJob = async ({
+  jobId,
+}: {
+  jobId: string;
+}): Promise<TranscriptionJobRecord | null> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare("SELECT * FROM transcription_jobs WHERE job_id = ?");
+  const result = await stmt.bind(jobId).first();
+  return (result as TranscriptionJobRecord) ?? null;
+};
+
+export const setTranscriptionJobProcessing = async ({
+  jobId,
+}: {
+  jobId: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    UPDATE transcription_jobs
+       SET status = 'processing',
+           updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ?
+  `);
+
+  await stmt.bind(jobId).run();
+};
+
+export const storeTranscriptionJobResult = async ({
+  jobId,
+  result,
+  durationSeconds,
+}: {
+  jobId: string;
+  result: any;
+  durationSeconds?: number | null;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    UPDATE transcription_jobs
+       SET status = 'completed',
+           result = ?,
+           duration_seconds = ?,
+           error = NULL,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ?
+  `);
+
+  await stmt
+    .bind(JSON.stringify(result ?? {}), durationSeconds ?? null, jobId)
+    .run();
+};
+
+export const storeTranscriptionJobError = async ({
+  jobId,
+  message,
+}: {
+  jobId: string;
+  message: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    UPDATE transcription_jobs
+       SET status = 'failed',
+           error = ?,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE job_id = ?
+  `);
+
+  await stmt.bind(message, jobId).run();
+};
+
+export const cleanupOldTranscriptionJobs = async ({
+  maxAgeHours = 24,
+}: {
+  maxAgeHours?: number;
+} = {}): Promise<number> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare(`
+    DELETE FROM transcription_jobs
+     WHERE created_at < datetime('now', '-' || ? || ' hours')
+  `);
+
+  const res = await stmt.bind(maxAgeHours).run();
+  return res.meta?.changes ?? 0;
+};

@@ -16,6 +16,10 @@ export const MODEL_PRICES = {
   "whisper-1": {
     perSecond: 0.006 / 60, // $0.006 per minute = $0.36/hr
   },
+
+  "elevenlabs-scribe": {
+    perSecond: 0.27 / 3600, // ~1.35x margin on $0.40/hr to match translation rate
+  },
 } as const;
 
 // TTS pricing (per character)

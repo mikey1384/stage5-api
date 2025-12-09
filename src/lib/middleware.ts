@@ -15,12 +15,24 @@ export type AuthVariables = {
 /**
  * Bearer token authentication middleware.
  * Validates the Authorization header and sets user context.
+ * Skips paths that start with /webhook (relay callbacks use X-Relay-Secret instead).
  *
  * Usage:
  *   router.use("*", bearerAuth());
  */
 export function bearerAuth() {
   return async (c: Context, next: Next) => {
+    // Skip bearer auth for relay-authenticated routes (they use X-Relay-Secret)
+    const path = new URL(c.req.url).pathname;
+    if (
+      path.includes("/webhook/") ||
+      path.endsWith("/authorize") ||
+      path.endsWith("/deduct")
+    ) {
+      await next();
+      return;
+    }
+
     const authHeader = c.req.header("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return c.json(

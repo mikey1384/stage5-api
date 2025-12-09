@@ -11,6 +11,7 @@ import translateRouter from "./routes/translate";
 import adminRouter from "./routes/admin";
 import dubRouter from "./routes/dub";
 import entitlementsRouter from "./routes/entitlements";
+import authRouter from "./routes/auth";
 import { ensureDatabase } from "./lib/db";
 
 // Types for Cloudflare Workers environment
@@ -51,6 +52,9 @@ app.get("/health", (c) => c.json({ status: "ok", ts: Date.now() }));
 
 // Webhook first - needs raw body before any middleware consumes it
 app.route("/stripe/webhook", webhookRouter);
+
+// Auth router for relay (uses X-Relay-Secret, not bearer auth)
+app.route("/auth", authRouter);
 
 // The rest of the API routes
 app.route("/payments", paymentsRouter);

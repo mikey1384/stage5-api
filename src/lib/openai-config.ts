@@ -612,19 +612,27 @@ export async function callElevenLabsTranscribeRelay({
 /**
  * Call relay server for ElevenLabs Scribe transcription from R2 URL
  * Used for large files that were uploaded directly to R2
+ *
+ * When webhookUrl is provided, the relay returns immediately and calls back
+ * when done. This prevents Worker timeout issues.
  */
 export async function callElevenLabsTranscribeFromR2({
   c,
   r2Url,
   language,
+  webhookUrl,
 }: {
   c: Context<any>;
   r2Url: string;
   language?: string;
-}) {
+  webhookUrl?: string;
+}): Promise<{ status: "processing" } | any> {
   const payload: any = { r2Url };
   if (language) {
     payload.language = language;
+  }
+  if (webhookUrl) {
+    payload.webhookUrl = webhookUrl;
   }
 
   const relayResponse = await fetch(`${OPENAI_RELAY_URL}/transcribe-from-r2`, {
