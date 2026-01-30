@@ -576,11 +576,13 @@ export async function callElevenLabsTranscribeRelay({
   file,
   language,
   signal,
+  idempotencyKey,
 }: {
   c: Context<any>;
   file: File;
   language?: string;
   signal: AbortSignal;
+  idempotencyKey?: string;
 }) {
   const relayFormData = new FormData();
   relayFormData.append("file", file);
@@ -593,6 +595,7 @@ export async function callElevenLabsTranscribeRelay({
     headers: {
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
     },
     body: relayFormData,
     signal,

@@ -41,7 +41,14 @@ app.use(
         .map((s: string) => s.trim());
       return !origin || list.includes(origin) ? origin || "*" : null;
     },
-    allowHeaders: ["Content-Type", "Stripe-Signature"],
+    allowHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Stripe-Signature",
+      "X-Relay-Secret",
+      "Idempotency-Key",
+      "X-Idempotency-Key",
+    ],
     allowMethods: ["GET", "POST", "OPTIONS"],
     credentials: true,
   })

@@ -48,7 +48,13 @@ router.use(
   cors({
     origin: "*", // Restrict in production
     allowMethods: ["POST", "GET", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-Relay-Secret"],
+    allowHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Relay-Secret",
+      "Idempotency-Key",
+      "X-Idempotency-Key",
+    ],
   })
 );
 
@@ -124,7 +130,7 @@ router.post("/deduct", async (c) => {
   }
 
   try {
-    const { deviceId, durationSeconds } = await c.req.json();
+    const { deviceId, durationSeconds, idempotencyKey } = await c.req.json();
     if (!deviceId || typeof durationSeconds !== "number") {
       return c.json({ error: "deviceId and durationSeconds required" }, 400);
     }
@@ -133,6 +139,7 @@ router.post("/deduct", async (c) => {
       deviceId,
       seconds: Math.ceil(durationSeconds),
       model: "elevenlabs-scribe",
+      idempotencyKey: typeof idempotencyKey === "string" ? idempotencyKey : undefined,
     });
 
     if (!ok) {
@@ -218,6 +225,8 @@ router.post("/webhook/:jobId", async (c) => {
         deviceId: job.device_id,
         seconds,
         model: "elevenlabs-scribe",
+        // Use jobId as a stable idempotency key so duplicate webhook deliveries can't double-charge.
+        idempotencyKey: jobId,
       });
 
       if (!ok) {
@@ -331,6 +340,8 @@ router.post("/", async (c) => {
     }
 
     const response_format = "verbose_json";
+    const idempotencyKey =
+      c.req.header("Idempotency-Key") || c.req.header("X-Idempotency-Key");
 
     // Only whisper-1 (OpenAI) is supported
     const client = makeOpenAI(c);
@@ -358,6 +369,7 @@ router.post("/", async (c) => {
         file,
         language: language ?? undefined,
         signal: abortController.signal,
+        idempotencyKey: idempotencyKey ?? undefined,
       });
       usedRelay = true;
       usedElevenLabs = true;
@@ -463,6 +475,7 @@ router.post("/", async (c) => {
         deviceId: user.deviceId,
         seconds,
         model,
+        idempotencyKey: idempotencyKey ?? undefined,
       });
 
       if (!ok) {

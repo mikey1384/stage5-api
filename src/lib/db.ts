@@ -28,6 +28,8 @@ declare global {
 interface Database {
   prepare(query: string): any;
   exec(query: string): Promise<any>;
+  // D1 supports batch() which executes statements in a single transaction.
+  batch?: (statements: any[]) => Promise<any>;
 }
 
 // Initialize database (D1 in Workers, SQLite elsewhere)
@@ -259,6 +261,180 @@ const updateBalance = async (
   }
 };
 
+function isBillingIdempotencyUniqueConstraintError(error: any): boolean {
+  const msg = String(error?.message || error || "");
+  return (
+    msg.includes("UNIQUE constraint failed") && msg.includes("billing_idempotency")
+  );
+}
+
+function isBillingIdempotencyNotNullRollbackError(error: any): boolean {
+  const msg = String(error?.message || error || "");
+  return msg.includes("NOT NULL constraint failed: billing_idempotency.reason");
+}
+
+/**
+ * Idempotent variant of updateBalance.
+ *
+ * We record an idempotency key in `billing_idempotency` inside the same transaction
+ * as the credit balance update + ledger insertion. This makes retries safe under
+ * real network conditions (e.g. client disconnects after the server already charged).
+ */
+const updateBalanceIdempotent = async (
+  deviceId: string,
+  spend: number,
+  {
+    reason,
+    meta,
+    idempotencyKey,
+  }: { reason: string; meta?: unknown; idempotencyKey: string }
+): Promise<boolean> => {
+  if (!db) throw new Error("Database not initialized");
+
+  if (!Number.isFinite(spend) || spend <= 0) {
+    console.log(
+      `No credits to deduct for device ${deviceId}. Usage was zero or invalid.`
+    );
+    return true;
+  }
+
+  const metaWithIdempotency = { ...(meta as any), idempotencyKey };
+  const metaJson = JSON.stringify(metaWithIdempotency ?? null);
+
+  // Prefer D1 batch() for atomicity.
+  if (typeof db.batch === "function") {
+    try {
+      const statements = [
+        db
+          .prepare(
+            `INSERT INTO billing_idempotency (device_id, reason, idempotency_key, spend, meta, created_at)
+             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+          )
+          .bind(deviceId, reason, idempotencyKey, spend, metaJson),
+        db
+          .prepare(
+            `UPDATE credits
+               SET credit_balance = credit_balance - ?,
+                   updated_at      = CURRENT_TIMESTAMP
+             WHERE device_id = ? AND credit_balance >= ?`
+          )
+          .bind(spend, deviceId, spend),
+        // If the credit update didn't affect a row, force a rollback by violating NOT NULL.
+        // This keeps idempotency + ledger consistent with the balance update.
+        db
+          .prepare(
+            `INSERT INTO billing_idempotency (device_id, reason, idempotency_key, spend, meta, created_at)
+             SELECT ?, NULL, ?, ?, ?, CURRENT_TIMESTAMP
+              WHERE (SELECT changes()) = 0`
+          )
+          .bind(deviceId, idempotencyKey, spend, metaJson),
+        db
+          .prepare(
+            `INSERT INTO credit_ledger (device_id, delta, reason, meta)
+             VALUES (?, ?, ?, ?)`
+          )
+          .bind(deviceId, -spend, reason, metaJson),
+      ];
+
+      await db.batch(statements);
+      console.log(
+        `Deducted ${spend} credits from device ${deviceId} (idempotencyKey=${idempotencyKey}).`
+      );
+      return true;
+    } catch (error) {
+      // Already processed (duplicate retry) -> treat as success.
+      if (isBillingIdempotencyUniqueConstraintError(error)) {
+        console.log(
+          `Skipping duplicate charge for device ${deviceId} (idempotencyKey=${idempotencyKey}).`
+        );
+        return true;
+      }
+
+      // Insufficient balance (or missing device row) -> treat as failure.
+      if (isBillingIdempotencyNotNullRollbackError(error)) {
+        console.warn(
+          `Failed to deduct ${spend} credits for device ${deviceId}. Insufficient balance.`
+        );
+        return false;
+      }
+
+      console.error("Error deducting credits (idempotent):", error);
+      throw error;
+    }
+  }
+
+  // Fallback for non-D1 environments:
+  // Use an explicit SQL transaction so we never "lock out" retries by writing the
+  // idempotency marker without also committing the credit deduction + ledger.
+  try {
+    await db.exec("BEGIN");
+
+    await db
+      .prepare(
+        `INSERT INTO billing_idempotency (device_id, reason, idempotency_key, spend, meta, created_at)
+         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+      )
+      .bind(deviceId, reason, idempotencyKey, spend, metaJson)
+      .run();
+
+    const updateRes = await db
+      .prepare(
+        `UPDATE credits
+           SET credit_balance = credit_balance - ?,
+               updated_at      = CURRENT_TIMESTAMP
+         WHERE device_id = ? AND credit_balance >= ?`
+      )
+      .bind(spend, deviceId, spend)
+      .run();
+
+    const changes =
+      typeof (updateRes as any)?.meta?.changes === "number"
+        ? (updateRes as any).meta.changes
+        : typeof (updateRes as any)?.changes === "number"
+          ? (updateRes as any).changes
+          : 0;
+
+    if (changes <= 0) {
+      await db.exec("ROLLBACK");
+      console.warn(
+        `Failed to deduct ${spend} credits for device ${deviceId}. Insufficient balance.`
+      );
+      return false;
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO credit_ledger (device_id, delta, reason, meta)
+         VALUES (?, ?, ?, ?)`
+      )
+      .bind(deviceId, -spend, reason, metaJson)
+      .run();
+
+    await db.exec("COMMIT");
+    console.log(
+      `Deducted ${spend} credits from device ${deviceId} (idempotencyKey=${idempotencyKey}).`
+    );
+    return true;
+  } catch (error) {
+    try {
+      await db.exec("ROLLBACK");
+    } catch {
+      // ignore rollback errors (e.g., transaction never began)
+    }
+
+    // Already processed (duplicate retry) -> treat as success.
+    if (isBillingIdempotencyUniqueConstraintError(error)) {
+      console.log(
+        `Skipping duplicate charge for device ${deviceId} (idempotencyKey=${idempotencyKey}).`
+      );
+      return true;
+    }
+
+    console.error("Error deducting credits (idempotent):", error);
+    throw error;
+  }
+};
+
 // New deduction functions using the cost calculation helpers
 export const deductTranslationCredits = async ({
   deviceId,
@@ -286,16 +462,24 @@ export const deductTranscriptionCredits = async ({
   deviceId,
   seconds,
   model,
+  idempotencyKey,
 }: {
   deviceId: string;
   seconds: number;
   model: string;
+  idempotencyKey?: string;
 }): Promise<boolean> => {
   const spend = secondsToCredits({ seconds, model });
-  return updateBalance(deviceId, spend, {
-    reason: "TRANSCRIBE",
-    meta: { seconds, model },
-  });
+  const reason = "TRANSCRIBE";
+  const meta = { seconds, model };
+  if (idempotencyKey) {
+    return updateBalanceIdempotent(deviceId, spend, {
+      reason,
+      meta,
+      idempotencyKey,
+    });
+  }
+  return updateBalance(deviceId, spend, { reason, meta });
 };
 
 /** @deprecated Use deductTTSCredits instead for accurate TTS pricing */
