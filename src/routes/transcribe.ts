@@ -42,6 +42,65 @@ type Bindings = {
 
 const router = new Hono<{ Bindings: Bindings; Variables: AuthVariables }>();
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function deriveDurationSecondsFromTimings(payload: any): number | null {
+  let maxEnd = 0;
+
+  const segments = payload?.segments;
+  if (Array.isArray(segments)) {
+    for (const seg of segments) {
+      if (isFiniteNumber(seg?.end) && seg.end > maxEnd) maxEnd = seg.end;
+
+      // Some providers include word timings nested inside segments.
+      const segWords = seg?.words;
+      if (Array.isArray(segWords)) {
+        for (const w of segWords) {
+          if (isFiniteNumber(w?.end) && w.end > maxEnd) maxEnd = w.end;
+        }
+      }
+    }
+  }
+
+  const words = payload?.words;
+  if (Array.isArray(words)) {
+    for (const w of words) {
+      if (isFiniteNumber(w?.end) && w.end > maxEnd) maxEnd = w.end;
+    }
+  }
+
+  if (!Number.isFinite(maxEnd) || maxEnd <= 0) return null;
+  return maxEnd;
+}
+
+/**
+ * Returns a duration (seconds) suitable for billing:
+ * - Prefer explicit `duration` / `approx_duration`.
+ * - Otherwise derive from segment/word timing data.
+ * - If there's no content at all, return 0 (no billing).
+ * - If there is content but we can't determine duration, return null (fail closed).
+ */
+function getBillingDurationSeconds(payload: any): number | null {
+  const raw = payload?.duration ?? payload?.approx_duration;
+  if (isFiniteNumber(raw) && raw > 0) return raw;
+
+  const derived = deriveDurationSecondsFromTimings(payload);
+  if (derived !== null) return derived;
+
+  const hasText =
+    typeof payload?.text === "string" && payload.text.trim().length > 0;
+  const hasSegments = Array.isArray(payload?.segments) && payload.segments.length > 0;
+  const hasWords = Array.isArray(payload?.words) && payload.words.length > 0;
+
+  // Nothing transcribed -> allow through with zero duration (no charge).
+  if (!hasText && !hasSegments && !hasWords) return 0;
+
+  // Content exists but duration is missing/unknowable -> refuse to return results without charging.
+  return null;
+}
+
 // Add CORS middleware
 router.use(
   "*",
@@ -196,6 +255,20 @@ router.post("/webhook/:jobId", async (c) => {
       // Still process it to avoid losing data
     }
 
+    const cleanupR2File = async (context: string) => {
+      if (!job.file_key) return;
+      try {
+        await deleteFile(c.env.TRANSCRIPTION_BUCKET, job.file_key);
+        console.log(
+          `[transcribe/webhook] Cleaned up R2 file (${context}): ${job.file_key}`
+        );
+      } catch (cleanupErr) {
+        console.warn(
+          `[transcribe/webhook] Failed to cleanup R2 file (${context}) ${job.file_key}`
+        );
+      }
+    };
+
     if (!success) {
       console.error(`[transcribe/webhook] Job ${jobId} failed: ${error}`);
       await storeTranscriptionJobError({
@@ -203,70 +276,53 @@ router.post("/webhook/:jobId", async (c) => {
         message: error || "Transcription failed",
       });
 
-      // Cleanup R2 file on failure
-      if (job.file_key) {
-        try {
-          await deleteFile(c.env.TRANSCRIPTION_BUCKET, job.file_key);
-        } catch (cleanupErr) {
-          console.warn(
-            `[transcribe/webhook] Failed to cleanup R2 file ${job.file_key}`
-          );
-        }
-      }
+      await cleanupR2File("failure");
 
       return c.json({ status: "error_recorded" });
     }
 
-    // Deduct credits based on audio duration
-    const rawDur = result?.duration ?? result?.approx_duration;
-    if (typeof rawDur === "number") {
-      const seconds = Math.ceil(rawDur);
-      const ok = await deductTranscriptionCredits({
-        deviceId: job.device_id,
-        seconds,
-        model: "elevenlabs-scribe",
-        // Use jobId as a stable idempotency key so duplicate webhook deliveries can't double-charge.
-        idempotencyKey: jobId,
-      });
-
-      if (!ok) {
-        await storeTranscriptionJobError({
-          jobId,
-          message: "Insufficient credits",
-        });
-        return c.json({ status: "insufficient_credits" }, 402);
-      }
-
-      console.log(
-        `[transcribe/webhook] Job ${jobId} completed, ${seconds}s transcribed`
+    const billingDur = getBillingDurationSeconds(result);
+    if (billingDur === null) {
+      console.error(
+        `[transcribe/webhook] Refusing to finalize job ${jobId}: missing duration for billing`
       );
-
-      await storeTranscriptionJobResult({
+      await storeTranscriptionJobError({
         jobId,
-        result,
-        durationSeconds: seconds,
+        message: "billing-duration-unavailable",
       });
-    } else {
-      console.warn(
-        `[transcribe/webhook] Job ${jobId} completed without duration`
-      );
-      await storeTranscriptionJobResult({
-        jobId,
-        result,
-      });
+      await cleanupR2File("billing-duration-unavailable");
+      return c.json({ status: "billing_duration_unavailable" }, 500);
     }
 
-    // Cleanup R2 file
-    if (job.file_key) {
-      try {
-        await deleteFile(c.env.TRANSCRIPTION_BUCKET, job.file_key);
-        console.log(`[transcribe/webhook] Cleaned up R2 file: ${job.file_key}`);
-      } catch (cleanupError) {
-        console.warn(
-          `[transcribe/webhook] Failed to cleanup R2 file: ${job.file_key}`
-        );
-      }
+    const seconds = Math.ceil(billingDur);
+    const ok = await deductTranscriptionCredits({
+      deviceId: job.device_id,
+      seconds,
+      model: "elevenlabs-scribe",
+      // Use jobId as a stable idempotency key so duplicate webhook deliveries can't double-charge.
+      idempotencyKey: jobId,
+    });
+
+    if (!ok) {
+      await storeTranscriptionJobError({
+        jobId,
+        message: "Insufficient credits",
+      });
+      await cleanupR2File("insufficient-credits");
+      return c.json({ status: "insufficient_credits" }, 402);
     }
+
+    console.log(
+      `[transcribe/webhook] Job ${jobId} completed, ${seconds}s transcribed`
+    );
+
+    await storeTranscriptionJobResult({
+      jobId,
+      result,
+      durationSeconds: seconds,
+    });
+
+    await cleanupR2File("success");
 
     return c.json({ status: "success" });
   } catch (error: any) {
@@ -467,35 +523,42 @@ router.post("/", async (c) => {
     /* -------------------------------------------------- */
     /* Deduct by audio length                             */
     /* -------------------------------------------------- */
-    const rawDur =
-      (transcription as any).duration ?? (transcription as any).approx_duration;
-    if (typeof rawDur === "number") {
-      const seconds = Math.ceil(rawDur);
-      const ok = await deductTranscriptionCredits({
-        deviceId: user.deviceId,
-        seconds,
-        model,
-        idempotencyKey: idempotencyKey ?? undefined,
-      });
-
-      if (!ok) {
-        return c.json(
-          { error: API_ERRORS.INSUFFICIENT_CREDITS },
-          402 /* Payment Required */
-        );
-      }
-      const provider = usedElevenLabs ? "ElevenLabs" : "OpenAI";
-      console.log(
-        `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${
-          user.deviceId
-        } model=${model} provider=${provider} duration=${seconds}s`
-      );
-    } else {
+    const billingDur = getBillingDurationSeconds(transcription as any);
+    if (billingDur === null) {
       console.error(
-        "Could not get duration from transcription result (checked both duration and approx_duration)"
+        "[transcribe] Refusing to return transcription: missing duration for billing"
       );
-      // Return result anyway if we can't determine duration
+      return c.json(
+        {
+          error: "billing-duration-unavailable",
+          message:
+            "Unable to determine transcription duration for billing. Please retry.",
+        },
+        502
+      );
     }
+
+    const seconds = Math.ceil(billingDur);
+    const billedModel = usedElevenLabs ? "elevenlabs-scribe" : model;
+    const ok = await deductTranscriptionCredits({
+      deviceId: user.deviceId,
+      seconds,
+      model: billedModel,
+      idempotencyKey: idempotencyKey ?? undefined,
+    });
+
+    if (!ok) {
+      return c.json(
+        { error: API_ERRORS.INSUFFICIENT_CREDITS },
+        402 /* Payment Required */
+      );
+    }
+    const provider = usedElevenLabs ? "ElevenLabs" : "OpenAI";
+    console.log(
+      `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${
+        user.deviceId
+      } model=${billedModel} provider=${provider} duration=${seconds}s`
+    );
 
     return c.json(transcription as any);
   } catch (error) {
