@@ -8,7 +8,7 @@ export const MODEL_PRICES = {
     out: 10 / 1_000_000, // $10.00 per million tokens
   },
 
-  "claude-opus-4-5-20251101": {
+  "claude-opus-4-6": {
     in: 5 / 1_000_000, // $5.00 per million tokens
     out: 25 / 1_000_000, // $25.00 per million tokens
   },
