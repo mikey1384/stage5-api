@@ -9,7 +9,6 @@ import {
   cleanupOldTranscriptionJobs,
 } from "../lib/db";
 import {
-  ALLOWED_TRANSCRIPTION_MODELS,
   MAX_FILE_SIZE,
   API_ERRORS,
 } from "../lib/constants";
@@ -41,6 +40,24 @@ type Bindings = {
 };
 
 const router = new Hono<{ Bindings: Bindings; Variables: AuthVariables }>();
+
+const DEFAULT_TRANSCRIPTION_MODEL = "scribe_v2";
+const OPENAI_FALLBACK_TRANSCRIPTION_MODEL = "whisper-1";
+
+function resolveOpenAiFallbackModel(requestedModel: string): string {
+  const normalized = requestedModel.trim().toLowerCase();
+  if (!normalized) {
+    return OPENAI_FALLBACK_TRANSCRIPTION_MODEL;
+  }
+
+  // We allow any requested model through this endpoint, but the OpenAI
+  // fallback/billing path is standardized to whisper-1.
+  if (normalized !== OPENAI_FALLBACK_TRANSCRIPTION_MODEL) {
+    return OPENAI_FALLBACK_TRANSCRIPTION_MODEL;
+  }
+
+  return OPENAI_FALLBACK_TRANSCRIPTION_MODEL;
+}
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -351,7 +368,10 @@ router.post("/", async (c) => {
 
     const formData = await c.req.formData();
     const file = formData.get("file");
-    const model = formData.get("model")?.toString() || "whisper-1";
+    const requestedModel =
+      formData.get("model")?.toString()?.trim() ||
+      DEFAULT_TRANSCRIPTION_MODEL;
+    const openAiFallbackModel = resolveOpenAiFallbackModel(requestedModel);
     const language = formData.get("language")?.toString();
     const prompt = formData.get("prompt")?.toString();
     // New pricing is default; legacy flags are ignored
@@ -374,19 +394,6 @@ router.post("/", async (c) => {
       );
     }
 
-    // Server-side model guard
-    if (!ALLOWED_TRANSCRIPTION_MODELS.includes(model)) {
-      return c.json(
-        {
-          error: API_ERRORS.INVALID_MODEL,
-          message: `Only ${ALLOWED_TRANSCRIPTION_MODELS.join(
-            ", "
-          )} are allowed`,
-        },
-        400
-      );
-    }
-
     // Check again before expensive operation
     if (c.req.raw.signal?.aborted) {
       return c.json(
@@ -399,7 +406,7 @@ router.post("/", async (c) => {
     const idempotencyKey =
       c.req.header("Idempotency-Key") || c.req.header("X-Idempotency-Key");
 
-    // Only whisper-1 (OpenAI) is supported
+    // OpenAI client is used only as a fallback path.
     const client = makeOpenAI(c);
 
     // Create a combined abort signal that responds to both client cancellation and server timeout
@@ -460,7 +467,7 @@ router.post("/", async (c) => {
         transcription = await callRelayServer({
           c,
           file,
-          model,
+          model: openAiFallbackModel,
           language: language ?? undefined,
           prompt: prompt ?? undefined,
           signal: abortController.signal,
@@ -494,7 +501,7 @@ router.post("/", async (c) => {
           transcription = await client.audio.transcriptions.create(
             {
               file,
-              model,
+              model: openAiFallbackModel,
               language,
               prompt,
               response_format,
@@ -539,7 +546,9 @@ router.post("/", async (c) => {
     }
 
     const seconds = Math.ceil(billingDur);
-    const billedModel = usedElevenLabs ? "elevenlabs-scribe" : model;
+    const billedModel = usedElevenLabs
+      ? "elevenlabs-scribe"
+      : openAiFallbackModel;
     const ok = await deductTranscriptionCredits({
       deviceId: user.deviceId,
       seconds,
@@ -557,7 +566,7 @@ router.post("/", async (c) => {
     console.log(
       `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${
         user.deviceId
-      } model=${billedModel} provider=${provider} duration=${seconds}s`
+      } model=${billedModel} provider=${provider} duration=${seconds}s requestedModel=${requestedModel}`
     );
 
     return c.json(transcription as any);
