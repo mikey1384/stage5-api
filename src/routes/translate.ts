@@ -1,12 +1,12 @@
 import { Hono, Context } from "hono";
-import type { StatusCode } from "hono/utils/http-status";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { cors } from "hono/cors";
 import { API_ERRORS, getProviderFromModel } from "../lib/constants";
-import { getAllowedTranslationModels } from "../lib/pricing";
+import { isAllowedTranslationModel, normalizeTranslationModel } from "../lib/pricing";
 import {
   createTranslationJob,
+  deleteTranslationJob,
   setTranslationJobProcessing,
   resetTranslationJobRelay,
   getTranslationJob,
@@ -19,8 +19,9 @@ import {
 import {
   submitTranslationRelayJob,
   fetchRelayTranslationStatus,
+  RelayHttpError,
 } from "../lib/openai-config";
-import { bearerAuth, getErrorMessage, type AuthVariables } from "../lib/middleware";
+import { bearerAuth, type AuthVariables } from "../lib/middleware";
 
 /** Common HTTP error status codes used in this route */
 type ErrorStatusCode = 400 | 402 | 404 | 500 | 502 | 503;
@@ -60,8 +61,11 @@ const translateSchema = z.object({
       content: z.string(),
     })
   ),
-  model: z.string(),
+  model: z.string().optional(),
+  modelFamily: z.enum(["gpt", "claude", "auto"]).optional(),
   reasoning: z.any().optional(),
+  translationPhase: z.enum(["draft", "review"]).optional(),
+  qualityMode: z.boolean().optional(),
 });
 
 router.post("/", async (c) => {
@@ -87,33 +91,46 @@ router.post("/", async (c) => {
     );
   }
 
-  const { messages, model, reasoning } = parsedBody.data;
+  const {
+    messages,
+    model: requestedModel,
+    modelFamily,
+    reasoning,
+    translationPhase,
+    qualityMode,
+  } = parsedBody.data;
 
-  const allowedModels = getAllowedTranslationModels();
-  if (!allowedModels.includes(model)) {
-    return c.json(
-      {
-        error: API_ERRORS.INVALID_MODEL,
-        message: `Only models ${allowedModels.join(", ")} are allowed`,
-      },
-      { status: 400 }
-    );
-  }
+  // Forward caller model for non-subtitle compatibility. Relay remains authoritative
+  // for subtitle draft/review phases via translationPhase + modelFamily.
+  const normalizedRequestedModel = normalizeTranslationModel(requestedModel);
 
   const jobId = crypto.randomUUID();
   const payload = {
     mode: "chat" as const,
     messages,
-    model,
+    model: normalizedRequestedModel,
+    modelFamily,
     reasoning,
+    translationPhase,
+    qualityMode,
   };
 
-  await createTranslationJob({
-    jobId,
-    deviceId: user.deviceId,
-    model,
-    payload,
-  });
+  try {
+    await createTranslationJob({
+      jobId,
+      deviceId: user.deviceId,
+      model: normalizedRequestedModel,
+      payload,
+    });
+  } catch (error: any) {
+    return c.json(
+      {
+        error: "Failed to queue translation",
+        message: error?.message || "Failed to create translation job",
+      },
+      { status: 500 }
+    );
+  }
 
   try {
     const submission = await submitTranslationRelayJob({
@@ -127,7 +144,6 @@ router.post("/", async (c) => {
       const persistResult = await persistCompletion({
         jobId,
         jobOwner: user.deviceId,
-        model,
         payload,
         completion,
       });
@@ -152,6 +168,24 @@ router.post("/", async (c) => {
       { status: 202 }
     );
   } catch (error: any) {
+    if (error instanceof RelayHttpError && error.status === 400) {
+      try {
+        await deleteTranslationJob({ jobId });
+      } catch (cleanupError) {
+        console.warn(
+          `[translate] Failed to cleanup job ${jobId} after relay 400:`,
+          cleanupError
+        );
+      }
+      return c.json(
+        {
+          error: API_ERRORS.INVALID_REQUEST,
+          message: getRelayClientErrorMessage(error.body),
+        },
+        400
+      );
+    }
+
     const message = error?.message || "Failed to submit translation job";
     await storeTranslationJobError({ jobId, message });
     return c.json(
@@ -271,7 +305,6 @@ async function syncJobWithRelay({
         const persistResult = await persistCompletion({
           jobId: job.job_id,
           jobOwner: job.device_id,
-          model: job.model ?? payload?.model?.toString?.() ?? "",
           payload,
           completion,
         });
@@ -321,7 +354,6 @@ async function syncJobWithRelay({
       const persistResult = await persistCompletion({
         jobId: job.job_id,
         jobOwner: job.device_id,
-        model: job.model ?? payload?.model?.toString?.() ?? "",
         payload,
         completion,
       });
@@ -346,7 +378,6 @@ async function syncJobWithRelay({
         const persistResult = await persistCompletion({
           jobId: job.job_id,
           jobOwner: job.device_id,
-          model: job.model ?? payload?.model?.toString?.() ?? "",
           payload,
           completion,
         });
@@ -390,13 +421,11 @@ async function syncJobWithRelay({
 async function persistCompletion({
   jobId,
   jobOwner,
-  model,
   payload,
   completion,
 }: {
   jobId: string;
   jobOwner: string;
-  model: string;
   payload: Record<string, unknown>;
   completion: any;
 }): Promise<
@@ -425,11 +454,38 @@ async function persistCompletion({
   }
 
   if (!job.credited) {
+    const rawCompletionModel =
+      typeof completion?.model === "string" ? completion.model.trim() : "";
+    if (!rawCompletionModel) {
+      await storeTranslationJobError({
+        jobId,
+        message: "unsupported-billing-model:missing-completion-model",
+      });
+      return {
+        status: "error",
+        code: 500,
+        message: "unsupported-billing-model",
+      };
+    }
+
+    const billedModel = normalizeTranslationModel(rawCompletionModel);
+    if (!isAllowedTranslationModel(billedModel)) {
+      await storeTranslationJobError({
+        jobId,
+        message: `unsupported-billing-model:${billedModel}`,
+      });
+      return {
+        status: "error",
+        code: 500,
+        message: "unsupported-billing-model",
+      };
+    }
+
     const ok = await deductTranslationCredits({
       deviceId: jobOwner,
       promptTokens: promptTokens ?? 0,
       completionTokens: completionTokens ?? 0,
-      model,
+      model: billedModel,
     });
 
     if (!ok) {
@@ -442,9 +498,9 @@ async function persistCompletion({
 
     await markTranslationJobCredited({ jobId });
 
-    const provider = getProviderFromModel(model);
+    const provider = getProviderFromModel(billedModel);
     console.log(
-      `[translate] success for device ${jobOwner} model=${model} provider=${provider} promptTokens=${promptTokens} completionTokens=${completionTokens}`
+      `[translate] success for device ${jobOwner} model=${billedModel} provider=${provider} promptTokens=${promptTokens} completionTokens=${completionTokens}`
     );
   }
 
@@ -467,4 +523,19 @@ function estimateCompletionTokens(completion: any): number {
   } catch {
     return 0;
   }
+}
+
+function getRelayClientErrorMessage(rawBody: string): string {
+  try {
+    const parsed = JSON.parse(rawBody);
+    if (typeof parsed?.error === "string" && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+    if (typeof parsed?.message === "string" && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+  } catch {
+    // Ignore parse errors and return raw message fallback.
+  }
+  return rawBody?.trim?.() || "Invalid request";
 }

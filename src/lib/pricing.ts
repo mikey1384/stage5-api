@@ -22,6 +22,16 @@ export const MODEL_PRICES = {
   },
 } as const;
 
+const TRANSLATION_MODEL_ALIASES: Record<string, string> = {
+  "claude-opus-4.6": "claude-opus-4-6",
+};
+
+const DEFAULT_TRANSLATION_MODEL = "gpt-5.1";
+
+function canonicalizeModelId(model?: string): string {
+  return (model || "").trim().toLowerCase();
+}
+
 // TTS pricing (per character)
 export const TTS_PRICES = {
   "tts-1": {
@@ -45,6 +55,23 @@ export const AUDIO_CREDIT_CALIBRATION = 1.0;
 export const TOKEN_CREDIT_CALIBRATION = 1.0;
 export const TTS_CREDIT_CALIBRATION = 1.0;
 
+export function normalizeTranslationModel(model?: string): string {
+  const canonical = canonicalizeModelId(model);
+  if (!canonical) return DEFAULT_TRANSLATION_MODEL;
+  return TRANSLATION_MODEL_ALIASES[canonical] || canonical;
+}
+
+function getTokenModelPricing(
+  model: string
+): { in: number; out: number } | null {
+  const normalizedModel = normalizeTranslationModel(model);
+  const pricing = MODEL_PRICES[normalizedModel as keyof typeof MODEL_PRICES];
+  if (!pricing || !("in" in pricing) || !("out" in pricing)) {
+    return null;
+  }
+  return { in: pricing.in, out: pricing.out };
+}
+
 export function secondsToCredits({
   seconds,
   model,
@@ -52,9 +79,10 @@ export function secondsToCredits({
   seconds: number;
   model: string;
 }): number {
-  const price = MODEL_PRICES[model as keyof typeof MODEL_PRICES];
+  const normalizedModel = canonicalizeModelId(model);
+  const price = MODEL_PRICES[normalizedModel as keyof typeof MODEL_PRICES];
   if (!price || !("perSecond" in price)) {
-    throw new Error(`No pricing defined for model: ${model}`);
+    throw new Error(`No pricing defined for model: ${normalizedModel || model}`);
   }
   const usd = seconds * price.perSecond;
   const credits = (usd * MARGIN) / USD_PER_CREDIT;
@@ -68,23 +96,24 @@ export function getAllowedTranslationModels(): string[] {
   );
 }
 
+export function isAllowedTranslationModel(model?: string): boolean {
+  const normalizedModel = normalizeTranslationModel(model);
+  return getTokenModelPricing(normalizedModel) !== null;
+}
+
 export function tokensToCredits({
   prompt,
   completion,
-  model = "gpt-5.1",
+  model = DEFAULT_TRANSLATION_MODEL,
 }: {
   prompt: number;
   completion: number;
   model?: string;
 }): number {
-  const pricing = MODEL_PRICES[model as keyof typeof MODEL_PRICES];
-  if (!pricing || !("in" in pricing)) {
-    // Fallback to GPT-5.1 pricing for unknown models
-    const usd =
-      prompt * MODEL_PRICES["gpt-5.1"].in +
-      completion * MODEL_PRICES["gpt-5.1"].out;
-    const credits = (usd * MARGIN) / USD_PER_CREDIT;
-    return Math.ceil(credits * TOKEN_CREDIT_CALIBRATION);
+  const normalizedModel = normalizeTranslationModel(model);
+  const pricing = getTokenModelPricing(normalizedModel);
+  if (!pricing) {
+    throw new Error(`No translation pricing defined for model: ${normalizedModel}`);
   }
 
   const usd = prompt * pricing.in + completion * pricing.out;

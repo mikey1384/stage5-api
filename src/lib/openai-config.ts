@@ -2,19 +2,16 @@ import OpenAI from "openai";
 import { Context } from "hono";
 import { OPENAI_RELAY_URL, SpeechFormat } from "./constants";
 
-/**
- * Combines multiple AbortSignals into one that aborts when any of them abort.
- */
-function anySignal(signals: AbortSignal[]): AbortSignal {
-  const controller = new AbortController();
-  for (const signal of signals) {
-    if (signal.aborted) {
-      controller.abort(signal.reason);
-      return controller.signal;
-    }
-    signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+export class RelayHttpError extends Error {
+  status: number;
+  body: string;
+
+  constructor(status: number, body: string) {
+    super(body || `Relay HTTP error (${status})`);
+    this.name = "RelayHttpError";
+    this.status = status;
+    this.body = body;
   }
-  return controller.signal;
 }
 
 /**
@@ -29,36 +26,14 @@ export function makeOpenAI(c: Context<any>) {
 }
 
 /**
- * Check if error indicates geographical blocking
- */
-export function isGeoBlockError(error: any): boolean {
-  const errorMessage = error?.message?.toLowerCase() || "";
-  const errorCode = error?.code || "";
-  const statusCode = error?.status || error?.response?.status;
-
-  // Common patterns for geo-blocking errors
-  return (
-    statusCode === 451 || // Unavailable For Legal Reasons
-    errorMessage.includes("country") ||
-    errorMessage.includes("region") ||
-    errorMessage.includes("geographic") ||
-    errorMessage.includes("location") ||
-    errorMessage.includes("not available in your country") ||
-    errorMessage.includes("restricted") ||
-    errorMessage.includes("blocked") ||
-    errorCode === "country_not_supported" ||
-    errorCode === "region_not_supported" ||
-    errorCode === "unsupported_country"
-  );
-}
-
-/**
- * Fallback to relay server for geo-blocked requests
+ * Send transcription to relay (provider/model authority is server-side).
  */
 export async function callRelayServer({
   c,
   file,
   model,
+  qualityMode,
+  idempotencyKey,
   language,
   prompt,
   signal,
@@ -66,6 +41,8 @@ export async function callRelayServer({
   c: Context<any>;
   file: File;
   model: string;
+  qualityMode?: boolean;
+  idempotencyKey?: string;
   language?: string;
   prompt?: string;
   signal: AbortSignal;
@@ -77,6 +54,9 @@ export async function callRelayServer({
   relayFormData.append("response_format", "verbose_json");
   relayFormData.append("timestamp_granularities[]", "word");
   relayFormData.append("timestamp_granularities[]", "segment");
+  if (typeof qualityMode === "boolean") {
+    relayFormData.append("qualityMode", String(qualityMode));
+  }
 
   if (language) {
     relayFormData.append("language", language);
@@ -90,6 +70,10 @@ export async function callRelayServer({
     headers: {
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      ...(c.env.ELEVENLABS_API_KEY
+        ? { "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY }
+        : {}),
     },
     body: relayFormData,
     signal,
@@ -106,88 +90,6 @@ export async function callRelayServer({
   const result = (await relayResponse.json()) as any;
 
   return result;
-}
-
-/**
- * Fallback to relay server for translation requests
- */
-export async function callTranslationRelay({
-  c,
-  text,
-  target_language,
-  model,
-  signal,
-}: {
-  c: Context<any>;
-  text: string;
-  target_language: string;
-  model: string;
-  signal?: AbortSignal;
-}) {
-  const payload: Record<string, unknown> = {
-    text,
-    target_language,
-    model,
-  };
-
-  const relayResponse = await fetch(`${OPENAI_RELAY_URL}/translate`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Relay-Secret": c.env.RELAY_SECRET,
-      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
-    },
-    body: JSON.stringify(payload),
-    signal,
-  });
-
-  return resolveRelayTranslationResponse({
-    c,
-    resp: relayResponse,
-    signal,
-    errorPrefix: "Translation relay server error",
-  });
-}
-
-/**
- * Relay-first translation via chat-style payload (messages array)
- * Returns OpenAI-compatible chat.completions response (with usage) directly from relay
- */
-export async function callChatRelay({
-  c,
-  messages,
-  model,
-  reasoning,
-  signal,
-}: {
-  c: Context<any>;
-  messages: Array<{ role: string; content: string }>;
-  model: string;
-  reasoning?: any;
-  signal?: AbortSignal;
-}) {
-  const payload: Record<string, unknown> = { messages, model };
-  if (reasoning !== undefined) {
-    payload.reasoning = reasoning;
-  }
-
-  const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Relay-Secret": c.env.RELAY_SECRET,
-      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
-    },
-    body: JSON.stringify(payload),
-    signal,
-  });
-
-  return resolveRelayTranslationResponse({
-    c,
-    resp,
-    signal,
-    errorPrefix: "Relay chat translate error",
-  });
 }
 
 export async function submitTranslationRelayJob({
@@ -242,9 +144,7 @@ export async function submitTranslationRelayJob({
   }
 
   const text = await resp.text();
-  throw new Error(
-    `Translation relay server error: ${resp.status} ${text || resp.statusText}`
-  );
+  throw new RelayHttpError(resp.status, text || resp.statusText);
 }
 
 export async function fetchRelayTranslationStatus({
@@ -307,146 +207,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
-}
-
-async function resolveRelayTranslationResponse({
-  c,
-  resp,
-  signal,
-  errorPrefix,
-}: {
-  c: Context<any>;
-  resp: Response;
-  signal?: AbortSignal;
-  errorPrefix: string;
-}): Promise<any> {
-  if (resp.status === 202) {
-    let data: any = {};
-    try {
-      data = await resp.json();
-    } catch (err) {
-      console.warn("[resolveRelayTranslationResponse] Failed to parse 202 response JSON:", err);
-    }
-
-    const jobId = data?.jobId;
-    if (!jobId) {
-      throw new Error(`${errorPrefix}: missing jobId from relay response`);
-    }
-
-    const pollHeaders = {
-      "X-Relay-Secret": c.env.RELAY_SECRET,
-      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
-    };
-
-    const pollIntervalMs = 2000;
-    const maxWaitMs = 600_000; // 10 minutes
-    const perRequestTimeoutMs = 30_000; // 30 seconds per poll request
-    const startTime = Date.now();
-
-    while (true) {
-      if (signal?.aborted) {
-        throw new DOMException("Operation cancelled", "AbortError");
-      }
-
-      if (Date.now() - startTime > maxWaitMs) {
-        throw new Error(`${errorPrefix}: job ${jobId} timed out`);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-
-      // Create per-request timeout to avoid hanging on unresponsive relay
-      const pollController = new AbortController();
-      const timeoutId = setTimeout(() => pollController.abort(), perRequestTimeoutMs);
-
-      let statusResp: Response;
-      try {
-        statusResp = await fetch(
-          `${OPENAI_RELAY_URL}/translate/result/${jobId}`,
-          {
-            method: "GET",
-            headers: pollHeaders,
-            signal: signal ? anySignal([signal, pollController.signal]) : pollController.signal,
-          }
-        );
-      } catch (err: any) {
-        clearTimeout(timeoutId);
-        // If it's our timeout, log and retry; if it's the parent signal, rethrow
-        if (pollController.signal.aborted && !signal?.aborted) {
-          console.warn(`[resolveRelayTranslationResponse] Poll request timed out after ${perRequestTimeoutMs}ms, retrying...`);
-          continue;
-        }
-        throw err;
-      } finally {
-        clearTimeout(timeoutId);
-      }
-
-      if (statusResp.status === 202) {
-        continue;
-      }
-
-      if (statusResp.status === 200) {
-        return statusResp.json();
-      }
-
-      if (statusResp.status === 404) {
-        const text = await statusResp.text();
-        throw new Error(
-          `${errorPrefix}: job ${jobId} not found (${text || "404"})`
-        );
-      }
-
-      const text = await statusResp.text();
-      throw new Error(`${errorPrefix}: ${statusResp.status} ${text}`);
-    }
-  }
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`${errorPrefix}: ${resp.status} ${text}`);
-  }
-
-  return resp.json();
-}
-
-export async function callSpeechRelay({
-  c,
-  text,
-  voice,
-  model,
-  format,
-  signal,
-}: {
-  c: Context<any>;
-  text: string;
-  voice: string;
-  model: string;
-  format: SpeechFormat;
-  signal?: AbortSignal;
-}) {
-  const resp = await fetch(`${OPENAI_RELAY_URL}/speech`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Relay-Secret": c.env.RELAY_SECRET,
-      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
-    },
-    body: JSON.stringify({ text, voice, model, format }),
-    signal,
-  });
-
-  if (!resp.ok) {
-    const textBody = await resp.text();
-    throw new Error(
-      `Speech relay server error: ${resp.status} ${textBody || resp.statusText}`
-    );
-  }
-
-  return (await resp.json()) as {
-    audioBase64: string;
-    voice: string;
-    model: string;
-    format: string;
-  };
 }
 
 export async function callSpeechDirect({
@@ -561,58 +321,7 @@ export async function callDubRelay({
 }
 
 /**
- * Maps OpenAI SDK endpoints to relay endpoints
- */
-export const RELAY_ENDPOINT_MAPPING = {
-  "audio.transcriptions.create": "/transcribe",
-  "chat.completions.create": "/translate",
-} as const;
-
-/**
- * Call relay server for ElevenLabs Scribe transcription
- */
-export async function callElevenLabsTranscribeRelay({
-  c,
-  file,
-  language,
-  signal,
-  idempotencyKey,
-}: {
-  c: Context<any>;
-  file: File;
-  language?: string;
-  signal: AbortSignal;
-  idempotencyKey?: string;
-}) {
-  const relayFormData = new FormData();
-  relayFormData.append("file", file);
-  if (language) {
-    relayFormData.append("language", language);
-  }
-
-  const relayResponse = await fetch(`${OPENAI_RELAY_URL}/transcribe-elevenlabs`, {
-    method: "POST",
-    headers: {
-      "X-Relay-Secret": c.env.RELAY_SECRET,
-      "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
-      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
-    },
-    body: relayFormData,
-    signal,
-  });
-
-  if (!relayResponse.ok) {
-    const errorText = await relayResponse.text();
-    console.error(
-      `❌ ElevenLabs relay error: ${relayResponse.status} ${errorText}`
-    );
-    throw new Error(`ElevenLabs relay error: ${relayResponse.status} ${errorText}`);
-  }
-
-  return (await relayResponse.json()) as any;
-}
-
-/**
+ * TODO(stage5-cleanup): Remove when legacy R2 transcription endpoints are retired.
  * Call relay server for ElevenLabs Scribe transcription from R2 URL
  * Used for large files that were uploaded directly to R2
  *

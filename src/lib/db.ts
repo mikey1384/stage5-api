@@ -588,6 +588,17 @@ export const createTranslationJob = async ({
     .run();
 };
 
+export const deleteTranslationJob = async ({
+  jobId,
+}: {
+  jobId: string;
+}): Promise<void> => {
+  if (!db) throw new Error("Database not initialized");
+
+  const stmt = db.prepare("DELETE FROM translation_jobs WHERE job_id = ?");
+  await stmt.bind(jobId).run();
+};
+
 export const getTranslationJob = async ({
   jobId,
 }: {

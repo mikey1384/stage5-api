@@ -14,9 +14,7 @@ import {
 } from "../lib/constants";
 import { cors } from "hono/cors";
 import {
-  makeOpenAI,
   callRelayServer,
-  callElevenLabsTranscribeRelay,
   callElevenLabsTranscribeFromR2,
 } from "../lib/openai-config";
 import { bearerAuth, type AuthVariables } from "../lib/middleware";
@@ -31,6 +29,7 @@ import { v4 as uuidv4 } from "uuid";
 
 type Bindings = {
   OPENAI_API_KEY: string;
+  ELEVENLABS_API_KEY?: string;
   RELAY_SECRET: string;
   DB: D1Database;
   TRANSCRIPTION_BUCKET: R2Bucket;
@@ -43,20 +42,29 @@ const router = new Hono<{ Bindings: Bindings; Variables: AuthVariables }>();
 
 const DEFAULT_TRANSCRIPTION_MODEL = "scribe_v2";
 const OPENAI_FALLBACK_TRANSCRIPTION_MODEL = "whisper-1";
+const ELEVENLABS_TRANSCRIPTION_MODEL = "elevenlabs-scribe";
 
-function resolveOpenAiFallbackModel(requestedModel: string): string {
-  const normalized = requestedModel.trim().toLowerCase();
-  if (!normalized) {
+function parseBooleanLike(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (["1", "true", "yes", "on", "high", "quality"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off", "low", "standard"].includes(normalized)) {
+    return false;
+  }
+  return undefined;
+}
+
+
+function normalizeTranscriptionModelForBilling(model?: string): string {
+  const normalized = (model || "").trim().toLowerCase();
+  if (normalized.includes("whisper")) {
     return OPENAI_FALLBACK_TRANSCRIPTION_MODEL;
   }
-
-  // We allow any requested model through this endpoint, but the OpenAI
-  // fallback/billing path is standardized to whisper-1.
-  if (normalized !== OPENAI_FALLBACK_TRANSCRIPTION_MODEL) {
-    return OPENAI_FALLBACK_TRANSCRIPTION_MODEL;
-  }
-
-  return OPENAI_FALLBACK_TRANSCRIPTION_MODEL;
+  return ELEVENLABS_TRANSCRIPTION_MODEL;
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -206,15 +214,20 @@ router.post("/deduct", async (c) => {
   }
 
   try {
-    const { deviceId, durationSeconds, idempotencyKey } = await c.req.json();
+    const { deviceId, durationSeconds, idempotencyKey, model } =
+      await c.req.json();
     if (!deviceId || typeof durationSeconds !== "number") {
       return c.json({ error: "deviceId and durationSeconds required" }, 400);
     }
 
+    const billedModel = normalizeTranscriptionModelForBilling(
+      typeof model === "string" ? model : undefined
+    );
+
     const ok = await deductTranscriptionCredits({
       deviceId,
       seconds: Math.ceil(durationSeconds),
-      model: "elevenlabs-scribe",
+      model: billedModel,
       idempotencyKey: typeof idempotencyKey === "string" ? idempotencyKey : undefined,
     });
 
@@ -226,7 +239,9 @@ router.post("/deduct", async (c) => {
     }
 
     console.log(
-      `[transcribe/deduct] Deducted ${Math.ceil(durationSeconds)}s for device ${deviceId}`
+      `[transcribe/deduct] Deducted ${Math.ceil(
+        durationSeconds
+      )}s for device ${deviceId} model=${billedModel}`
     );
 
     return c.json({ success: true });
@@ -237,6 +252,7 @@ router.post("/deduct", async (c) => {
 });
 
 /**
+ * TODO(stage5-cleanup): Remove with legacy R2 transcription flow.
  * POST /webhook/:jobId
  * Called by the relay when transcription completes (legacy R2 flow)
  */
@@ -371,7 +387,10 @@ router.post("/", async (c) => {
     const requestedModel =
       formData.get("model")?.toString()?.trim() ||
       DEFAULT_TRANSCRIPTION_MODEL;
-    const openAiFallbackModel = resolveOpenAiFallbackModel(requestedModel);
+    const requestedQualityMode =
+      formData.get("qualityMode")?.toString() ??
+      formData.get("quality_mode")?.toString();
+    const qualityMode = parseBooleanLike(requestedQualityMode);
     const language = formData.get("language")?.toString();
     const prompt = formData.get("prompt")?.toString();
     // New pricing is default; legacy flags are ignored
@@ -402,12 +421,8 @@ router.post("/", async (c) => {
       );
     }
 
-    const response_format = "verbose_json";
     const idempotencyKey =
       c.req.header("Idempotency-Key") || c.req.header("X-Idempotency-Key");
-
-    // OpenAI client is used only as a fallback path.
-    const client = makeOpenAI(c);
 
     // Create a combined abort signal that responds to both client cancellation and server timeout
     const abortController = new AbortController();
@@ -422,30 +437,22 @@ router.post("/", async (c) => {
     });
 
     let transcription;
-    let usedRelay = false;
-    let usedElevenLabs = false;
-
-    // Try ElevenLabs Scribe first (highest quality), then OpenAI relay, then direct
     try {
-      transcription = await callElevenLabsTranscribeRelay({
+      transcription = await callRelayServer({
         c,
         file,
-        language: language ?? undefined,
-        signal: abortController.signal,
+        model: requestedModel,
+        qualityMode,
         idempotencyKey: idempotencyKey ?? undefined,
+        language: language ?? undefined,
+        prompt: prompt ?? undefined,
+        signal: abortController.signal,
       });
-      usedRelay = true;
-      usedElevenLabs = true;
-      console.log(
-        `[transcribe] ElevenLabs Scribe succeeded for device ${user.deviceId}`
-      );
-    } catch (elevenLabsError: any) {
-      // Handle cancellation/timeout
+    } catch (relayError: any) {
       if (
-        elevenLabsError.name === "AbortError" ||
+        relayError.name === "AbortError" ||
         abortController.signal.aborted
       ) {
-        clearTimeout(timeoutId);
         const wasCancelled = c.req.raw.signal?.aborted;
         return c.json(
           {
@@ -457,67 +464,10 @@ router.post("/", async (c) => {
           408
         );
       }
-
-      console.warn(
-        `[transcribe] ElevenLabs failed (${elevenLabsError?.message}), trying OpenAI relay...`
-      );
-
-      // Fall back to OpenAI relay
-      try {
-        transcription = await callRelayServer({
-          c,
-          file,
-          model: openAiFallbackModel,
-          language: language ?? undefined,
-          prompt: prompt ?? undefined,
-          signal: abortController.signal,
-        });
-        usedRelay = true;
-      } catch (relayError: any) {
-        // Handle cancellation/timeout
-        if (
-          relayError.name === "AbortError" ||
-          abortController.signal.aborted
-        ) {
-          clearTimeout(timeoutId);
-          const wasCancelled = c.req.raw.signal?.aborted;
-          return c.json(
-            {
-              error: wasCancelled ? "Request cancelled" : "Request timeout",
-              message: wasCancelled
-                ? "Request was cancelled by client"
-                : "Request exceeded timeout limit",
-            },
-            408
-          );
-        }
-
-        console.warn(
-          `[transcribe] OpenAI relay failed (${relayError?.message}), trying direct...`
-        );
-
-        // If relay failed, fall back to direct provider call
-        try {
-          transcription = await client.audio.transcriptions.create(
-            {
-              file,
-              model: openAiFallbackModel,
-              language,
-              prompt,
-              response_format,
-              timestamp_granularities: ["word", "segment"],
-            },
-            {
-              signal: abortController.signal,
-            }
-          );
-        } catch (directError: any) {
-          console.error("❌ All transcription attempts failed:", directError);
-          throw relayError; // Re-throw relay error for better messaging
-        }
-      }
+      throw relayError;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    clearTimeout(timeoutId);
 
     // Final check before processing credits
     if (c.req.raw.signal?.aborted) {
@@ -546,9 +496,11 @@ router.post("/", async (c) => {
     }
 
     const seconds = Math.ceil(billingDur);
-    const billedModel = usedElevenLabs
-      ? "elevenlabs-scribe"
-      : openAiFallbackModel;
+    const billedModel = normalizeTranscriptionModelForBilling(
+      typeof (transcription as any)?.model === "string"
+        ? (transcription as any).model
+        : requestedModel
+    );
     const ok = await deductTranscriptionCredits({
       deviceId: user.deviceId,
       seconds,
@@ -562,11 +514,14 @@ router.post("/", async (c) => {
         402 /* Payment Required */
       );
     }
-    const provider = usedElevenLabs ? "ElevenLabs" : "OpenAI";
+    const provider =
+      billedModel === OPENAI_FALLBACK_TRANSCRIPTION_MODEL
+        ? "OpenAI"
+        : "ElevenLabs";
     console.log(
-      `[transcribe] ${usedRelay ? "relay" : "direct"} success for device ${
-        user.deviceId
-      } model=${billedModel} provider=${provider} duration=${seconds}s requestedModel=${requestedModel}`
+      `[transcribe] relay success for device ${user.deviceId} model=${billedModel} provider=${provider} duration=${seconds}s requestedModel=${requestedModel} qualityMode=${
+        typeof qualityMode === "boolean" ? qualityMode : "auto"
+      }`
     );
 
     return c.json(transcription as any);
@@ -596,6 +551,8 @@ router.post("/", async (c) => {
 // ============================================================================
 
 /**
+ * TODO(stage5-cleanup): Remove with legacy R2 transcription flow once all
+ * clients use direct transcription (relay /transcribe-direct via API /transcribe).
  * POST /upload-url
  * Request a presigned URL for uploading a large audio file to R2
  */
@@ -677,6 +634,7 @@ router.post("/upload-url", async (c) => {
 });
 
 /**
+ * TODO(stage5-cleanup): Remove with legacy R2 transcription flow.
  * POST /process/:jobId
  * Start processing a file that was uploaded to R2
  * Uses webhook pattern to ensure results are never lost
@@ -761,6 +719,7 @@ router.post("/process/:jobId", async (c) => {
 });
 
 /**
+ * TODO(stage5-cleanup): Remove with legacy R2 transcription flow.
  * GET /status/:jobId
  * Check the status of a transcription job
  */

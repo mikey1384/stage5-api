@@ -6,7 +6,11 @@ import {
   deductTranslationCredits,
   deductTTSCredits,
 } from "../lib/db";
-import type { TTSModel } from "../lib/pricing";
+import {
+  isAllowedTranslationModel,
+  normalizeTranslationModel,
+  type TTSModel,
+} from "../lib/pricing";
 
 type Bindings = {
   RELAY_SECRET: string;
@@ -118,14 +122,21 @@ router.post("/deduct", async (c) => {
             400
           );
         }
+        const normalizedModel = normalizeTranslationModel(String(model));
+        if (!isAllowedTranslationModel(normalizedModel)) {
+          return c.json(
+            { error: `Unsupported translation model: ${normalizedModel}` },
+            400
+          );
+        }
         ok = await deductTranslationCredits({
           deviceId,
           promptTokens,
           completionTokens,
-          model,
+          model: normalizedModel,
         });
         console.log(
-          `[auth/deduct] Translation: ${promptTokens}+${completionTokens} tokens (${model}) for device ${deviceId}`
+          `[auth/deduct] Translation: ${promptTokens}+${completionTokens} tokens (${normalizedModel}) for device ${deviceId}`
         );
         break;
       }
