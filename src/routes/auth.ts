@@ -1,30 +1,26 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { getUserByApiKey } from "../lib/db";
 import {
-  deductTranscriptionCredits,
-  deductTranslationCredits,
-  deductTTSCredits,
+  upsertRelayTranslationJob,
+  getRelayTranslationJob,
+  cleanupOldRelayTranslationJobs,
 } from "../lib/db";
 import {
-  isAllowedTranslationModel,
-  normalizeTranslationModel,
-  type TTSModel,
-} from "../lib/pricing";
+  authorizeRelayApiKey,
+  deductRelayCredits,
+  hasValidRelaySecret,
+  RELAY_BILLING_ROUTE_SEGMENTS,
+} from "../lib/relay-billing";
+import type { Stage5ApiBindings } from "../types/env";
 
-type Bindings = {
-  RELAY_SECRET: string;
-  DB: D1Database;
-};
-
-const router = new Hono<{ Bindings: Bindings }>();
+const router = new Hono<{ Bindings: Stage5ApiBindings }>();
 
 // Add CORS middleware
 router.use(
   "*",
   cors({
     origin: "*",
-    allowMethods: ["POST", "OPTIONS"],
+    allowMethods: ["POST", "GET", "OPTIONS"],
     allowHeaders: ["Content-Type", "X-Relay-Secret"],
   })
 );
@@ -37,35 +33,27 @@ router.use(
  * Validates API key and returns device info
  * Called by relay before processing any AI request
  */
-router.post("/authorize", async (c) => {
+router.post(RELAY_BILLING_ROUTE_SEGMENTS.AUTHORIZE, async (c) => {
   const relaySecret = c.req.header("X-Relay-Secret");
-  if (!relaySecret || relaySecret !== c.env.RELAY_SECRET) {
+  if (!hasValidRelaySecret(relaySecret, c.env.RELAY_SECRET)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
   try {
-    const { apiKey } = await c.req.json();
-    if (!apiKey) {
-      return c.json({ error: "API key required" }, 400);
-    }
-
-    const user = await getUserByApiKey({ apiKey });
-    if (!user) {
-      return c.json({ error: "Invalid API key" }, 401);
-    }
-
-    if (user.credit_balance <= 0) {
-      return c.json({ error: "Insufficient credits" }, 402);
+    const body = await c.req.json();
+    const result = await authorizeRelayApiKey((body as any)?.apiKey);
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.status);
     }
 
     console.log(
-      `[auth/authorize] Authorized device ${user.device_id}, balance: ${user.credit_balance}`
+      `[auth/authorize] Authorized device ${result.deviceId}, balance: ${result.creditBalance}`
     );
 
     return c.json({
       authorized: true,
-      deviceId: user.device_id,
-      creditBalance: user.credit_balance,
+      deviceId: result.deviceId,
+      creditBalance: result.creditBalance,
     });
   } catch (error: any) {
     console.error("[auth/authorize] Error:", error);
@@ -78,7 +66,32 @@ router.post("/authorize", async (c) => {
  * Generic credit deduction endpoint for all services
  * Accepts service type and appropriate metrics
  */
-router.post("/deduct", async (c) => {
+router.post(RELAY_BILLING_ROUTE_SEGMENTS.DEDUCT, async (c) => {
+  const relaySecret = c.req.header("X-Relay-Secret");
+  if (!hasValidRelaySecret(relaySecret, c.env.RELAY_SECRET)) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  try {
+    const body = await c.req.json();
+    const result = await deductRelayCredits(body);
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.status);
+    }
+
+    console.log(`[auth/deduct] ${result.logMessage}`);
+    return c.json({ success: true });
+  } catch (error: any) {
+    console.error("[auth/deduct] Error:", error);
+    return c.json({ error: error.message || "Deduction failed" }, 500);
+  }
+});
+
+/**
+ * POST /relay/translation-jobs/upsert
+ * Durable relay translation job state writer (server-to-server only).
+ */
+router.post("/relay/translation-jobs/upsert", async (c) => {
   const relaySecret = c.req.header("X-Relay-Secret");
   if (!relaySecret || relaySecret !== c.env.RELAY_SECRET) {
     return c.json({ error: "Unauthorized" }, 401);
@@ -86,90 +99,82 @@ router.post("/deduct", async (c) => {
 
   try {
     const body = await c.req.json();
-    const { deviceId, service } = body;
+    const jobId = String(body?.jobId || "").trim();
+    const status = String(body?.status || "").trim() as
+      | "queued"
+      | "processing"
+      | "completed"
+      | "failed";
+    const allowed = new Set(["queued", "processing", "completed", "failed"]);
 
-    if (!deviceId || !service) {
-      return c.json({ error: "deviceId and service required" }, 400);
+    if (!jobId) {
+      return c.json({ error: "jobId required" }, 400);
+    }
+    if (!allowed.has(status)) {
+      return c.json({ error: `Invalid status: ${status}` }, 400);
     }
 
-    let ok = false;
+    await upsertRelayTranslationJob({
+      relayJobId: jobId,
+      status,
+      result: body?.result,
+      error:
+        typeof body?.error === "string" && body.error.trim()
+          ? body.error.trim()
+          : null,
+    });
 
-    switch (service) {
-      case "transcription": {
-        const { seconds, model = "elevenlabs-scribe" } = body;
-        if (typeof seconds !== "number") {
-          return c.json({ error: "seconds required for transcription" }, 400);
-        }
-        ok = await deductTranscriptionCredits({
-          deviceId,
-          seconds: Math.ceil(seconds),
-          model,
-        });
-        console.log(
-          `[auth/deduct] Transcription: ${Math.ceil(seconds)}s for device ${deviceId}`
-        );
-        break;
-      }
-
-      case "translation": {
-        const { promptTokens, completionTokens, model = "gpt-5.1" } = body;
-        if (
-          typeof promptTokens !== "number" ||
-          typeof completionTokens !== "number"
-        ) {
-          return c.json(
-            { error: "promptTokens and completionTokens required for translation" },
-            400
-          );
-        }
-        const normalizedModel = normalizeTranslationModel(String(model));
-        if (!isAllowedTranslationModel(normalizedModel)) {
-          return c.json(
-            { error: `Unsupported translation model: ${normalizedModel}` },
-            400
-          );
-        }
-        ok = await deductTranslationCredits({
-          deviceId,
-          promptTokens,
-          completionTokens,
-          model: normalizedModel,
-        });
-        console.log(
-          `[auth/deduct] Translation: ${promptTokens}+${completionTokens} tokens (${normalizedModel}) for device ${deviceId}`
-        );
-        break;
-      }
-
-      case "tts": {
-        const { characters, model = "eleven_multilingual_v2" } = body;
-        if (typeof characters !== "number") {
-          return c.json({ error: "characters required for tts" }, 400);
-        }
-        ok = await deductTTSCredits({
-          deviceId,
-          characters,
-          model: model as TTSModel,
-        });
-        console.log(
-          `[auth/deduct] TTS: ${characters} chars (${model}) for device ${deviceId}`
-        );
-        break;
-      }
-
-      default:
-        return c.json({ error: `Unknown service: ${service}` }, 400);
-    }
-
-    if (!ok) {
-      console.error(`[auth/deduct] Failed to deduct credits for device ${deviceId}`);
-      return c.json({ error: "Failed to deduct credits" }, 402);
-    }
+    // Periodic best-effort cleanup.
+    c.executionCtx.waitUntil(cleanupOldRelayTranslationJobs({ maxAgeHours: 24 }));
 
     return c.json({ success: true });
   } catch (error: any) {
-    console.error("[auth/deduct] Error:", error);
-    return c.json({ error: error.message || "Deduction failed" }, 500);
+    console.error("[auth/relay/translation-jobs/upsert] Error:", error);
+    return c.json({ error: error?.message || "Upsert failed" }, 500);
+  }
+});
+
+/**
+ * GET /relay/translation-jobs/:jobId
+ * Durable relay translation job state reader (server-to-server only).
+ */
+router.get("/relay/translation-jobs/:jobId", async (c) => {
+  const relaySecret = c.req.header("X-Relay-Secret");
+  if (!relaySecret || relaySecret !== c.env.RELAY_SECRET) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  try {
+    const jobId = String(c.req.param("jobId") || "").trim();
+    if (!jobId) {
+      return c.json({ error: "jobId required" }, 400);
+    }
+
+    const row = await getRelayTranslationJob({ relayJobId: jobId });
+    if (!row) {
+      return c.json({ error: "Job not found" }, 404);
+    }
+
+    let parsedResult: unknown = null;
+    if (row.result) {
+      try {
+        parsedResult = JSON.parse(row.result);
+      } catch {
+        parsedResult = null;
+      }
+    }
+
+    return c.json({
+      jobId: row.relay_job_id,
+      status: row.status,
+      result: parsedResult,
+      error: row.error ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    });
+  } catch (error: any) {
+    console.error("[auth/relay/translation-jobs/:jobId] Error:", error);
+    return c.json({ error: error?.message || "Read failed" }, 500);
   }
 });
 

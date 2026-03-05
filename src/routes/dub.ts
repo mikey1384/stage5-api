@@ -7,6 +7,7 @@ import {
   ALLOWED_SPEECH_FORMATS,
   API_ERRORS,
   DEFAULT_SPEECH_MODEL,
+  HIGH_QUALITY_SPEECH_MODEL,
   DEFAULT_SPEECH_VOICE,
   DEFAULT_SPEECH_FORMAT,
   SpeechFormat,
@@ -31,6 +32,11 @@ import {
   getErrorMessage,
   type AuthVariables,
 } from "../lib/middleware";
+import {
+  buildScopedIdempotencyKey,
+  getRequestIdempotencyKey,
+} from "../lib/request-utils";
+import type { Stage5ApiBindings } from "../types/env";
 
 const MAX_SCRIPT_CHARACTERS = 200_000;
 const MAX_TOTAL_SEGMENT_CHARACTERS = 80_000;
@@ -83,20 +89,22 @@ const requestSchema = z.object({
   ttsProvider: z.enum(["openai", "elevenlabs"]).optional(),
 });
 
-type Bindings = {
-  OPENAI_API_KEY: string;
-  RELAY_SECRET: string;
-  DB: D1Database;
-};
-
-const router = new Hono<{ Bindings: Bindings; Variables: AuthVariables }>();
+const router = new Hono<{
+  Bindings: Stage5ApiBindings;
+  Variables: AuthVariables;
+}>();
 
 router.use(
   "*",
   cors({
     origin: "*",
     allowMethods: ["POST", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Idempotency-Key",
+      "X-Idempotency-Key",
+    ],
   })
 );
 
@@ -129,11 +137,11 @@ router.post("/estimate", async (c) => {
     // Calculate estimates for both providers
     const openaiEstimate = estimateDubbingCredits({
       characters,
-      model: "tts-1",
+      model: DEFAULT_SPEECH_MODEL,
     });
     const openaiHdEstimate = estimateDubbingCredits({
       characters,
-      model: "tts-1-hd",
+      model: HIGH_QUALITY_SPEECH_MODEL,
     });
     const elevenLabsEstimate = estimateDubbingCredits({
       characters,
@@ -144,13 +152,13 @@ router.post("/estimate", async (c) => {
       characters,
       estimates: {
         openai: {
-          model: "tts-1",
+          model: DEFAULT_SPEECH_MODEL,
           credits: openaiEstimate.credits,
           usdCost: openaiEstimate.usdEstimate,
           description: "OpenAI TTS - Good quality, most affordable",
         },
         openaiHd: {
-          model: "tts-1-hd",
+          model: HIGH_QUALITY_SPEECH_MODEL,
           credits: openaiHdEstimate.credits,
           usdCost: openaiHdEstimate.usdEstimate,
           description: "OpenAI TTS HD - Higher quality audio",
@@ -175,6 +183,7 @@ router.post("/estimate", async (c) => {
  */
 router.post("/voice-clone", async (c) => {
   const user = c.get("user");
+  const requestIdempotencyKey = getRequestIdempotencyKey(c);
 
   try {
     const formData = await c.req.formData();
@@ -280,6 +289,18 @@ router.post("/voice-clone", async (c) => {
     });
 
     // Deduct credits on success
+    const billingIdempotencyKey = buildScopedIdempotencyKey({
+      scope: "voice-clone-billing-v1",
+      requestIdempotencyKey,
+      payload: {
+        deviceId: user.deviceId,
+        durationSeconds,
+        targetLanguage,
+        sourceLanguage: sourceLanguage || null,
+        numSpeakers: numSpeakers ?? null,
+        dropBackgroundAudio,
+      },
+    });
     const ok = await deductVoiceCloningCredits({
       deviceId: user.deviceId,
       durationSeconds,
@@ -289,6 +310,7 @@ router.post("/voice-clone", async (c) => {
         fileName: file.name,
         fileSize: file.size,
       },
+      idempotencyKey: billingIdempotencyKey,
     });
 
     if (!ok) {
@@ -337,6 +359,7 @@ router.get("/voice-clone/pricing", async (c) => {
 
 router.post("/", async (c) => {
   const user = c.get("user");
+  const requestIdempotencyKey = getRequestIdempotencyKey(c);
 
   try {
     if (c.req.raw.signal?.aborted) {
@@ -474,11 +497,11 @@ router.post("/", async (c) => {
       model && ALLOWED_SPEECH_MODELS.includes(model)
         ? model
         : quality === "high" || prefersHd
-        ? "tts-1-hd"
+        ? HIGH_QUALITY_SPEECH_MODEL
         : DEFAULT_SPEECH_MODEL;
 
-    if (prefersHd && chosenModel !== "tts-1-hd") {
-      chosenModel = "tts-1-hd";
+    if (prefersHd && chosenModel !== HIGH_QUALITY_SPEECH_MODEL) {
+      chosenModel = HIGH_QUALITY_SPEECH_MODEL;
     }
     const normalizedFormat = format?.toLowerCase() as SpeechFormat | undefined;
     const chosenFormat: SpeechFormat =
@@ -548,10 +571,10 @@ router.post("/", async (c) => {
     let ttsModelForPricing: TTSModel;
     if (relayResult.usedElevenLabs) {
       ttsModelForPricing = "eleven_multilingual_v2";
-    } else if (chosenModel === "tts-1-hd") {
-      ttsModelForPricing = "tts-1-hd";
+    } else if (chosenModel === HIGH_QUALITY_SPEECH_MODEL) {
+      ttsModelForPricing = HIGH_QUALITY_SPEECH_MODEL;
     } else {
-      ttsModelForPricing = "tts-1";
+      ttsModelForPricing = DEFAULT_SPEECH_MODEL;
     }
 
     const ok = await deductTTSCredits({
@@ -565,6 +588,26 @@ router.post("/", async (c) => {
         openaiModel: chosenModel,
         quality: quality ?? "standard",
       },
+      idempotencyKey: buildScopedIdempotencyKey({
+        scope: "dub-billing-v1",
+        requestIdempotencyKey,
+        payload: {
+          deviceId: user.deviceId,
+          voice: chosenVoice,
+          model: chosenModel,
+          ttsModelForPricing,
+          format: chosenFormat,
+          quality: quality ?? "standard",
+          ttsProvider: chosenTtsProvider,
+          segments: sanitizedSegments.map((segment) => ({
+            index: segment.index,
+            text: segment.text,
+            start: segment.start ?? null,
+            end: segment.end ?? null,
+            targetDuration: segment.targetDuration ?? null,
+          })),
+        },
+      }),
     });
 
     if (!ok) {

@@ -8,13 +8,15 @@ import {
   markEventProcessed,
 } from "../lib/db";
 import { isValidPackId, type PackId } from "../types/packs";
+import type { Stage5ApiBindings } from "../types/env";
 
-type Bindings = {
-  STRIPE_SECRET_KEY: string;
-  STRIPE_WEBHOOK_SECRET: string;
+const router = new Hono<{ Bindings: Stage5ApiBindings }>();
+
+const isCheckoutSessionFulfilled = (
+  paymentStatus: Stripe.Checkout.Session.PaymentStatus | null
+): boolean => {
+  return paymentStatus === "paid" || paymentStatus === "no_payment_required";
 };
-
-const router = new Hono<{ Bindings: Bindings }>();
 
 router.post("/", async (c) => {
   const signature = c.req.header("stripe-signature");
@@ -51,7 +53,19 @@ router.post("/", async (c) => {
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object as Stripe.Checkout.Session;
-          await handleCheckoutCompleted({ session });
+          await handleCheckoutPaid({ session, eventType: event.type });
+          break;
+        }
+
+        case "checkout.session.async_payment_succeeded": {
+          const session = event.data.object as Stripe.Checkout.Session;
+          await handleCheckoutPaid({ session, eventType: event.type });
+          break;
+        }
+
+        case "checkout.session.async_payment_failed": {
+          const session = event.data.object as Stripe.Checkout.Session;
+          await handleCheckoutAsyncPaymentFailed({ session });
           break;
         }
 
@@ -91,26 +105,50 @@ router.post("/", async (c) => {
   }
 });
 
-const handleCheckoutCompleted = async ({
+const handleCheckoutPaid = async ({
   session,
+  eventType,
 }: {
   session: Stripe.Checkout.Session;
+  eventType:
+    | "checkout.session.completed"
+    | "checkout.session.async_payment_succeeded";
 }) => {
   const { deviceId, packId, entitlement } = session.metadata || {};
 
-  if (!deviceId || !packId) {
-    console.error("Missing metadata in checkout session:", session.id);
+  if (!deviceId) {
+    console.error("Missing deviceId in checkout session metadata:", session.id);
+    return;
+  }
+
+  // Delayed methods (for example some local wallets) may complete Checkout with payment_status=unpaid.
+  // Fulfillment must wait for checkout.session.async_payment_succeeded in that case.
+  // Fully discounted sessions can report payment_status=no_payment_required and should be fulfilled immediately.
+  if (
+    eventType === "checkout.session.completed" &&
+    !isCheckoutSessionFulfilled(session.payment_status)
+  ) {
+    console.log(
+      `Deferring fulfillment for ${session.id}: payment_status=${session.payment_status}`
+    );
     return;
   }
 
   if (entitlement === "byo_openai") {
     try {
       await grantByoOpenAiEntitlement({ deviceId });
-      console.log(`Granted BYO OpenAI entitlement to device ${deviceId}`);
+      console.log(
+        `Granted BYO OpenAI entitlement to device ${deviceId} via ${eventType}`
+      );
     } catch (error) {
       console.error("Error granting BYO entitlement:", error);
       throw error;
     }
+    return;
+  }
+
+  if (!packId) {
+    console.error("Missing packId in checkout session metadata:", session.id);
     return;
   }
 
@@ -120,12 +158,31 @@ const handleCheckoutCompleted = async ({
   }
 
   try {
-    await creditDevice({ deviceId, packId: packId as PackId });
-    console.log(`Successfully credited ${packId} to device ${deviceId}`);
+    await creditDevice({
+      deviceId,
+      packId: packId as PackId,
+      meta: {
+        checkoutSessionId: session.id,
+        checkoutEventType: eventType,
+        stripePaymentStatus: session.payment_status ?? null,
+      },
+    });
+    console.log(`Successfully credited ${packId} to device ${deviceId} via ${eventType}`);
   } catch (error) {
     console.error("Error crediting device:", error);
     throw error;
   }
+};
+
+const handleCheckoutAsyncPaymentFailed = async ({
+  session,
+}: {
+  session: Stripe.Checkout.Session;
+}) => {
+  const { deviceId, packId, entitlement } = session.metadata || {};
+  console.warn(
+    `Async checkout payment failed for session ${session.id} (deviceId=${deviceId ?? "unknown"}, packId=${packId ?? "none"}, entitlement=${entitlement ?? "none"})`
+  );
 };
 
 const handlePaymentSucceeded = async ({

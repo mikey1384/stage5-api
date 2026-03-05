@@ -13,20 +13,10 @@ import dubRouter from "./routes/dub";
 import entitlementsRouter from "./routes/entitlements";
 import authRouter from "./routes/auth";
 import { ensureDatabase } from "./lib/db";
+import { runReconciliation } from "./lib/reconciliation";
+import type { Stage5ApiBindings } from "./types/env";
 
-// Types for Cloudflare Workers environment
-type Bindings = {
-  DB: D1Database;
-  STRIPE_SECRET_KEY: string;
-  STRIPE_WEBHOOK_SECRET: string;
-  OPENAI_API_KEY: string;
-  ANTHROPIC_API_KEY: string;
-  RELAY_SECRET: string;
-  ALLOWED_ORIGINS?: string;
-  ADMIN_DEVICE_ID?: string;
-};
-
-const app = new Hono<{ Bindings: Bindings }>();
+const app = new Hono<{ Bindings: Stage5ApiBindings }>();
 
 // Middleware that does NOT consume the body
 app.use("*", logger());
@@ -48,8 +38,10 @@ app.use(
       "X-Relay-Secret",
       "Idempotency-Key",
       "X-Idempotency-Key",
+      "X-Request-Id",
     ],
     allowMethods: ["GET", "POST", "OPTIONS"],
+    exposeHeaders: ["X-Request-Id"],
     credentials: true,
   })
 );
@@ -100,9 +92,34 @@ app.onError((err, c) => {
 
 // Export for Cloudflare Workers
 export default {
-  async fetch(req: Request, env: Bindings, ctx: ExecutionContext) {
+  async fetch(req: Request, env: Stage5ApiBindings, ctx: ExecutionContext) {
     await ensureDatabase(env); // initialise D1 once
     return app.fetch(req, env, ctx);
+  },
+  async scheduled(
+    _event: ScheduledController,
+    env: Stage5ApiBindings,
+    ctx: ExecutionContext
+  ) {
+    if (env.RECONCILE_CRON_ENABLED !== "1") {
+      return;
+    }
+
+    await ensureDatabase(env);
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const report = await runReconciliation({
+            dryRun: env.RECONCILE_CRON_DRY_RUN === "1",
+          });
+          console.log(
+            `[cron/reconcile] dryRun=${report.dryRun} durationMs=${report.durationMs} translation(scanned=${report.translation.scanned}, rebilled=${report.translation.rebilled}, reset=${report.translation.staleRelayReset}) transcription(scanned=${report.transcription.scanned}, failed=${report.transcription.markedFailed})`
+          );
+        } catch (error: any) {
+          console.error("[cron/reconcile] Failed:", error?.message || error);
+        }
+      })()
+    );
   },
 };
 

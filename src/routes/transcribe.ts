@@ -11,6 +11,7 @@ import {
 import {
   MAX_FILE_SIZE,
   API_ERRORS,
+  STAGE5_API_BASE_URL,
 } from "../lib/constants";
 import { cors } from "hono/cors";
 import {
@@ -19,6 +20,17 @@ import {
 } from "../lib/openai-config";
 import { bearerAuth, type AuthVariables } from "../lib/middleware";
 import {
+  getRequestIdempotencyKey,
+  parseBooleanLike,
+} from "../lib/request-utils";
+import {
+  authorizeRelayApiKey,
+  deductRelayCredits,
+  hasValidRelaySecret,
+  RELAY_BILLING_ROUTE_SEGMENTS,
+  RELAY_BILLING_SERVICES,
+} from "../lib/relay-billing";
+import {
   createR2Client,
   generateUploadUrl,
   generateDownloadUrl,
@@ -26,37 +38,20 @@ import {
   deleteFile,
 } from "../lib/r2-config";
 import { v4 as uuidv4 } from "uuid";
+import type { Stage5ApiBindings } from "../types/env";
+import {
+  STAGE5_ELEVENLABS_SCRIBE_MODEL,
+  STAGE5_WHISPER_MODEL,
+} from "../lib/model-catalog";
 
-type Bindings = {
-  OPENAI_API_KEY: string;
-  ELEVENLABS_API_KEY?: string;
-  RELAY_SECRET: string;
-  DB: D1Database;
-  TRANSCRIPTION_BUCKET: R2Bucket;
-  R2_ACCOUNT_ID: string;
-  R2_ACCESS_KEY_ID: string;
-  R2_SECRET_ACCESS_KEY: string;
-};
-
-const router = new Hono<{ Bindings: Bindings; Variables: AuthVariables }>();
+const router = new Hono<{
+  Bindings: Stage5ApiBindings;
+  Variables: AuthVariables;
+}>();
 
 const DEFAULT_TRANSCRIPTION_MODEL = "scribe_v2";
-const OPENAI_FALLBACK_TRANSCRIPTION_MODEL = "whisper-1";
-const ELEVENLABS_TRANSCRIPTION_MODEL = "elevenlabs-scribe";
-
-function parseBooleanLike(value: unknown): boolean | undefined {
-  if (typeof value === "boolean") return value;
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) return undefined;
-  if (["1", "true", "yes", "on", "high", "quality"].includes(normalized)) {
-    return true;
-  }
-  if (["0", "false", "no", "off", "low", "standard"].includes(normalized)) {
-    return false;
-  }
-  return undefined;
-}
+const OPENAI_FALLBACK_TRANSCRIPTION_MODEL = STAGE5_WHISPER_MODEL;
+const ELEVENLABS_TRANSCRIPTION_MODEL = STAGE5_ELEVENLABS_SCRIBE_MODEL;
 
 
 function normalizeTranscriptionModelForBilling(model?: string): string {
@@ -162,39 +157,28 @@ router.options(
  * Called by relay to validate API key and check credits before transcription
  * Returns deviceId if authorized
  */
-router.post("/authorize", async (c) => {
+router.post(RELAY_BILLING_ROUTE_SEGMENTS.AUTHORIZE, async (c) => {
   // Verify relay secret
   const relaySecret = c.req.header("X-Relay-Secret");
-  if (!relaySecret || relaySecret !== c.env.RELAY_SECRET) {
+  if (!hasValidRelaySecret(relaySecret, c.env.RELAY_SECRET)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
   try {
-    const { apiKey } = await c.req.json();
-    if (!apiKey) {
-      return c.json({ error: "API key required" }, 400);
-    }
-
-    // Import and use the same auth logic as bearerAuth
-    const { getUserByApiKey } = await import("../lib/db");
-    const user = await getUserByApiKey({ apiKey });
-
-    if (!user) {
-      return c.json({ error: "Invalid API key" }, 401);
-    }
-
-    if (user.credit_balance <= 0) {
-      return c.json({ error: "Insufficient credits" }, 402);
+    const body = await c.req.json();
+    const result = await authorizeRelayApiKey((body as any)?.apiKey);
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.status);
     }
 
     console.log(
-      `[transcribe/authorize] Authorized device ${user.device_id}, balance: ${user.credit_balance}`
+      `[transcribe/authorize] Authorized device ${result.deviceId}, balance: ${result.creditBalance}`
     );
 
     return c.json({
       authorized: true,
-      deviceId: user.device_id,
-      creditBalance: user.credit_balance,
+      deviceId: result.deviceId,
+      creditBalance: result.creditBalance,
     });
   } catch (error: any) {
     console.error("[transcribe/authorize] Error:", error);
@@ -206,16 +190,21 @@ router.post("/authorize", async (c) => {
  * POST /deduct
  * Called by relay after successful transcription to deduct credits
  */
-router.post("/deduct", async (c) => {
+router.post(RELAY_BILLING_ROUTE_SEGMENTS.DEDUCT, async (c) => {
   // Verify relay secret
   const relaySecret = c.req.header("X-Relay-Secret");
-  if (!relaySecret || relaySecret !== c.env.RELAY_SECRET) {
+  if (!hasValidRelaySecret(relaySecret, c.env.RELAY_SECRET)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
   try {
-    const { deviceId, durationSeconds, idempotencyKey, model } =
-      await c.req.json();
+    const body = await c.req.json();
+    const { deviceId, durationSeconds, idempotencyKey, model } = body as {
+      deviceId?: string;
+      durationSeconds?: number;
+      idempotencyKey?: string;
+      model?: string;
+    };
     if (!deviceId || typeof durationSeconds !== "number") {
       return c.json({ error: "deviceId and durationSeconds required" }, 400);
     }
@@ -224,25 +213,18 @@ router.post("/deduct", async (c) => {
       typeof model === "string" ? model : undefined
     );
 
-    const ok = await deductTranscriptionCredits({
+    const result = await deductRelayCredits({
       deviceId,
-      seconds: Math.ceil(durationSeconds),
+      service: RELAY_BILLING_SERVICES.TRANSCRIPTION,
+      seconds: durationSeconds,
       model: billedModel,
-      idempotencyKey: typeof idempotencyKey === "string" ? idempotencyKey : undefined,
+      idempotencyKey,
     });
-
-    if (!ok) {
-      console.error(
-        `[transcribe/deduct] Failed to deduct credits for device ${deviceId}`
-      );
-      return c.json({ error: "Failed to deduct credits" }, 402);
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.status);
     }
 
-    console.log(
-      `[transcribe/deduct] Deducted ${Math.ceil(
-        durationSeconds
-      )}s for device ${deviceId} model=${billedModel}`
-    );
+    console.log(`[transcribe/deduct] ${result.logMessage}`);
 
     return c.json({ success: true });
   } catch (error: any) {
@@ -331,7 +313,7 @@ router.post("/webhook/:jobId", async (c) => {
     const ok = await deductTranscriptionCredits({
       deviceId: job.device_id,
       seconds,
-      model: "elevenlabs-scribe",
+      model: STAGE5_ELEVENLABS_SCRIBE_MODEL,
       // Use jobId as a stable idempotency key so duplicate webhook deliveries can't double-charge.
       idempotencyKey: jobId,
     });
@@ -341,7 +323,7 @@ router.post("/webhook/:jobId", async (c) => {
         jobId,
         message: "Insufficient credits",
       });
-      await cleanupR2File("insufficient-credits");
+      await cleanupR2File(API_ERRORS.INSUFFICIENT_CREDITS);
       return c.json({ status: "insufficient_credits" }, 402);
     }
 
@@ -421,8 +403,7 @@ router.post("/", async (c) => {
       );
     }
 
-    const idempotencyKey =
-      c.req.header("Idempotency-Key") || c.req.header("X-Idempotency-Key");
+    const idempotencyKey = getRequestIdempotencyKey(c);
 
     // Create a combined abort signal that responds to both client cancellation and server timeout
     const abortController = new AbortController();
@@ -682,7 +663,7 @@ router.post("/process/:jobId", async (c) => {
 
     // Build the webhook URL for the relay to call when done
     // The relay will POST the result to this URL, avoiding Worker timeout issues
-    const webhookUrl = `https://api.stage5.tools/transcribe/webhook/${jobId}`;
+    const webhookUrl = `${STAGE5_API_BASE_URL}/transcribe/webhook/${jobId}`;
 
     console.log(
       `[transcribe/process] Starting processing for job ${jobId} (${(

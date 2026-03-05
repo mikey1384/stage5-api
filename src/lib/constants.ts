@@ -1,8 +1,18 @@
-export const ALLOWED_TRANSCRIPTION_MODELS = ["whisper-1"];
+import {
+  STAGE5_TTS_MODEL_HD,
+  STAGE5_TTS_MODEL_STANDARD,
+  STAGE5_WHISPER_MODEL,
+} from "./model-catalog";
 
-export const ALLOWED_SPEECH_MODELS = ["tts-1", "tts-1-hd"];
+export const ALLOWED_TRANSCRIPTION_MODELS = [STAGE5_WHISPER_MODEL];
 
-export const DEFAULT_SPEECH_MODEL = "tts-1";
+export const ALLOWED_SPEECH_MODELS = [
+  STAGE5_TTS_MODEL_STANDARD,
+  STAGE5_TTS_MODEL_HD,
+];
+
+export const DEFAULT_SPEECH_MODEL = STAGE5_TTS_MODEL_STANDARD;
+export const HIGH_QUALITY_SPEECH_MODEL = STAGE5_TTS_MODEL_HD;
 export const DEFAULT_SPEECH_VOICE = "alloy";
 export const ALLOWED_SPEECH_VOICES = [
   // OpenAI TTS voices
@@ -44,6 +54,7 @@ export const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
 
 // OpenAI Relay Configuration
 export const OPENAI_RELAY_URL = "https://translator-relay.fly.dev";
+export const STAGE5_API_BASE_URL = "https://api.stage5.tools";
 export const USE_RELAY = false; // Use fallback strategy: try direct first, relay on geo-block
 
 // API Error types

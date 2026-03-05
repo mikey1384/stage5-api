@@ -96,10 +96,12 @@ export async function submitTranslationRelayJob({
   c,
   payload,
   signal,
+  requestId,
 }: {
   c: Context<any>;
   payload: Record<string, unknown>;
   signal?: AbortSignal;
+  requestId?: string;
 }): Promise<
   | { type: "accepted"; relayJobId: string; status?: string }
   | { type: "completed"; result: any }
@@ -113,6 +115,9 @@ export async function submitTranslationRelayJob({
   // Include Anthropic key for Claude models
   if (c.env.ANTHROPIC_API_KEY) {
     headers["X-Anthropic-Key"] = c.env.ANTHROPIC_API_KEY;
+  }
+  if (requestId) {
+    headers["X-Request-Id"] = requestId;
   }
 
   const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
@@ -151,14 +156,17 @@ export async function fetchRelayTranslationStatus({
   c,
   relayJobId,
   signal,
+  requestId,
 }: {
   c: Context<any>;
   relayJobId: string;
   signal?: AbortSignal;
+  requestId?: string;
 }): Promise<
   | { type: "processing" }
   | { type: "completed"; result: any }
   | { type: "not_found" }
+  | { type: "retryable_error"; statusCode: number; message: string }
   | { type: "error"; message: string }
 > {
   const headers: Record<string, string> = {
@@ -168,6 +176,9 @@ export async function fetchRelayTranslationStatus({
 
   if (c.env.ANTHROPIC_API_KEY) {
     headers["X-Anthropic-Key"] = c.env.ANTHROPIC_API_KEY;
+  }
+  if (requestId) {
+    headers["X-Request-Id"] = requestId;
   }
 
   const resp = await fetch(
@@ -190,6 +201,21 @@ export async function fetchRelayTranslationStatus({
 
   if (resp.status === 404) {
     return { type: "not_found" };
+  }
+
+  if (
+    resp.status === 408 ||
+    resp.status === 429 ||
+    resp.status === 502 ||
+    resp.status === 503 ||
+    resp.status === 504
+  ) {
+    const text = await resp.text();
+    return {
+      type: "retryable_error",
+      statusCode: resp.status,
+      message: `${resp.status} ${text || resp.statusText}`,
+    };
   }
 
   const text = await resp.text();

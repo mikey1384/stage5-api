@@ -2,35 +2,132 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { getStripe } from "../lib/stripe";
 import { packs, PACK_IDS } from "../types/packs";
+import type { Stage5ApiBindings } from "../types/env";
 
-type Bindings = {
-  STRIPE_SECRET_KEY: string;
-  STRIPE_BYO_UNLOCK_PRICE_ID?: string;
-  UI_ORIGIN?: string;
-};
+const router = new Hono<{ Bindings: Stage5ApiBindings }>();
 
-const router = new Hono<{ Bindings: Bindings }>();
+const STRIPE_CHECKOUT_LOCALES = [
+  "auto",
+  "bg",
+  "cs",
+  "da",
+  "de",
+  "el",
+  "en",
+  "en-GB",
+  "es",
+  "es-419",
+  "et",
+  "fi",
+  "fil",
+  "fr",
+  "fr-CA",
+  "hr",
+  "hu",
+  "id",
+  "it",
+  "ja",
+  "ko",
+  "lt",
+  "lv",
+  "ms",
+  "mt",
+  "nb",
+  "nl",
+  "pl",
+  "pt",
+  "pt-BR",
+  "ro",
+  "ru",
+  "sk",
+  "sl",
+  "sv",
+  "th",
+  "tr",
+  "vi",
+  "zh",
+  "zh-HK",
+  "zh-TW",
+] as const;
+
+type StripeCheckoutLocale = (typeof STRIPE_CHECKOUT_LOCALES)[number];
+
+const STRIPE_CHECKOUT_LOCALE_MAP = new Map<string, StripeCheckoutLocale>(
+  STRIPE_CHECKOUT_LOCALES.map(locale => [locale.toLowerCase(), locale])
+);
+
+function resolveStripeCheckoutLocale(
+  rawLocale: string | undefined
+): StripeCheckoutLocale {
+  if (!rawLocale) return "en";
+
+  const normalized = rawLocale.trim().replace(/_/g, "-").toLowerCase();
+  if (!normalized) return "en";
+
+  const aliases: Record<string, StripeCheckoutLocale> = {
+    "en-us": "en",
+    "en-ca": "en",
+    "en-au": "en",
+    "es-mx": "es-419",
+    "pt-pt": "pt",
+    "zh-cn": "zh",
+    "zh-sg": "zh",
+    "zh-hans": "zh",
+    "zh-hant": "zh-TW",
+    "zh-mo": "zh-HK",
+    "fil-ph": "fil",
+  };
+
+  const alias = aliases[normalized];
+  if (alias) return alias;
+
+  const exact = STRIPE_CHECKOUT_LOCALE_MAP.get(normalized);
+  if (exact) return exact;
+
+  const base = normalized.split("-")[0];
+  const baseMatch = STRIPE_CHECKOUT_LOCALE_MAP.get(base);
+  return baseMatch ?? "en";
+}
 
 const createSessionSchema = z.object({
   packId: z.enum(PACK_IDS),
   deviceId: z.string().uuid("Device ID must be a valid UUID"),
+  locale: z.string().trim().min(1).max(24).optional(),
 });
 
 const createByoUnlockSchema = z.object({
   deviceId: z.string().uuid("Device ID must be a valid UUID"),
+  locale: z.string().trim().min(1).max(24).optional(),
 });
+
+const checkoutSessionIdSchema = z
+  .string()
+  .trim()
+  .regex(/^cs_[a-zA-Z0-9_]+$/, "Invalid checkout session ID");
+
+function getBearerDeviceId(c: any): string | null {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+  const token = authHeader.slice(7).trim();
+  if (!token) return null;
+  return token;
+}
 
 router.post("/create-session", async (c) => {
   try {
     const body = await c.req.json();
-    const { packId, deviceId } = createSessionSchema.parse(body);
+    const { packId, deviceId, locale } = createSessionSchema.parse(body);
 
     const pack = packs[packId];
     const uiOrigin = c.env.UI_ORIGIN || "https://stage5.tools";
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
+    const checkoutLocale = resolveStripeCheckoutLocale(locale);
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+      allow_promotion_codes: true,
+      locale: checkoutLocale,
+      payment_method_types: ["card"],
       line_items: [
         {
           price: pack.priceId,
@@ -88,7 +185,7 @@ router.post("/create-session", async (c) => {
 router.post("/create-byo-unlock", async c => {
   try {
     const body = await c.req.json();
-    const { deviceId } = createByoUnlockSchema.parse(body);
+    const { deviceId, locale } = createByoUnlockSchema.parse(body);
 
     const priceId = c.env.STRIPE_BYO_UNLOCK_PRICE_ID;
     if (!priceId) {
@@ -106,9 +203,13 @@ router.post("/create-byo-unlock", async c => {
 
     const uiOrigin = c.env.UI_ORIGIN || "https://stage5.tools";
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
+    const checkoutLocale = resolveStripeCheckoutLocale(locale);
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+      allow_promotion_codes: true,
+      locale: checkoutLocale,
+      payment_method_types: ["card"],
       line_items: [
         {
           price: priceId,
@@ -153,6 +254,101 @@ router.post("/create-byo-unlock", async c => {
     return c.json(
       {
         error: "Failed to create BYO unlock session",
+        message: error instanceof Error ? error.message : "Unknown error",
+      },
+      500
+    );
+  }
+});
+
+router.get("/session/:sessionId", async c => {
+  try {
+    const authDeviceId = getBearerDeviceId(c);
+    if (!authDeviceId) {
+      return c.json(
+        {
+          error: "Missing authorization",
+          message: "Authorization header with Bearer device ID is required",
+        },
+        401
+      );
+    }
+
+    const parsedAuth = z
+      .string()
+      .uuid("Authorization token must be a valid UUID")
+      .safeParse(authDeviceId);
+    if (!parsedAuth.success) {
+      return c.json(
+        {
+          error: "Invalid authorization",
+          details: parsedAuth.error.errors,
+        },
+        400
+      );
+    }
+
+    const parsedSessionId = checkoutSessionIdSchema.safeParse(
+      c.req.param("sessionId")
+    );
+    if (!parsedSessionId.success) {
+      return c.json(
+        {
+          error: "Invalid session ID",
+          details: parsedSessionId.error.errors,
+        },
+        400
+      );
+    }
+
+    const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
+    const session = await stripe.checkout.sessions.retrieve(parsedSessionId.data);
+
+    const sessionDeviceId = session.metadata?.deviceId;
+    if (!sessionDeviceId) {
+      return c.json(
+        {
+          error: "Session metadata missing device ID",
+          message: "Checkout session is not associated with a device",
+        },
+        404
+      );
+    }
+
+    if (sessionDeviceId !== authDeviceId) {
+      return c.json(
+        {
+          error: "Forbidden",
+          message: "Session does not belong to this device",
+        },
+        403
+      );
+    }
+
+    return c.json({
+      sessionId: session.id,
+      status: session.status,
+      paymentStatus: session.payment_status,
+      mode: session.mode,
+      packId: session.metadata?.packId ?? null,
+      entitlement: session.metadata?.entitlement ?? null,
+      created: session.created ?? null,
+    });
+  } catch (error: any) {
+    if (error?.type === "StripeInvalidRequestError") {
+      return c.json(
+        {
+          error: "Checkout session not found",
+          message: error?.message || "Invalid checkout session ID",
+        },
+        404
+      );
+    }
+
+    console.error("Error retrieving checkout session:", error);
+    return c.json(
+      {
+        error: "Failed to retrieve checkout session",
         message: error instanceof Error ? error.message : "Unknown error",
       },
       500
