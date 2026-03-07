@@ -1,3 +1,4 @@
+import { packs, type PackId } from "../../types/packs";
 import { getDatabase } from "./core";
 
 export const isEventProcessed = async ({
@@ -42,3 +43,347 @@ export const markEventProcessed = async ({
     throw error;
   }
 };
+
+type StripeFulfillmentKind = "credits" | "entitlement";
+
+type StripeFulfillmentBase = {
+  deviceId: string;
+  checkoutSessionId?: string | null;
+  paymentIntentId?: string | null;
+  stripeEventId?: string | null;
+  stripeEventType: string;
+};
+
+type CreditPackFulfillmentInput = StripeFulfillmentBase & {
+  packId: PackId;
+  stripePaymentStatus?: string | null;
+};
+
+type EntitlementFulfillmentInput = StripeFulfillmentBase & {
+  entitlement: "byo_openai";
+};
+
+function serializeMeta(meta: unknown): string {
+  return JSON.stringify(meta ?? null);
+}
+
+function buildStripeFulfillmentKey(
+  kind: StripeFulfillmentKind,
+  checkoutSessionId?: string | null,
+  paymentIntentId?: string | null,
+  scope?: string
+): string {
+  const entityId = paymentIntentId || checkoutSessionId;
+  if (!entityId) {
+    throw new Error(`Missing Stripe entity ID for ${kind} fulfillment`);
+  }
+  return scope ? `${kind}:${scope}:${entityId}` : `${kind}:${entityId}`;
+}
+
+function isStripeFulfillmentUniqueConstraintError(error: any): boolean {
+  const msg = String(error?.message || error || "");
+  return (
+    msg.includes("UNIQUE constraint failed") &&
+    msg.includes("stripe_fulfillments")
+  );
+}
+
+async function runInTransaction<T>(work: () => Promise<T>): Promise<T> {
+  const db = getDatabase();
+  await db.exec("BEGIN");
+  try {
+    const result = await work();
+    await db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await db.exec("ROLLBACK");
+    } catch {
+      // Ignore rollback failures.
+    }
+    throw error;
+  }
+}
+
+export async function fulfillCreditPackPurchase({
+  deviceId,
+  packId,
+  checkoutSessionId = null,
+  paymentIntentId = null,
+  stripeEventId = null,
+  stripeEventType,
+  stripePaymentStatus = null,
+}: CreditPackFulfillmentInput): Promise<"applied" | "duplicate"> {
+  const db = getDatabase();
+  const pack = packs[packId];
+  if (!pack) {
+    throw new Error(`Invalid pack ID for Stripe fulfillment: ${packId}`);
+  }
+
+  const creditsToAdd = pack.credits;
+  const reason = `PACK_${packId.toUpperCase()}`;
+  const fulfillmentKey = buildStripeFulfillmentKey(
+    "credits",
+    checkoutSessionId,
+    paymentIntentId
+  );
+  const metaJson = serializeMeta({
+    packId,
+    creditsAdded: creditsToAdd,
+    checkoutSessionId,
+    paymentIntentId,
+    stripeEventId,
+    stripeEventType,
+    stripePaymentStatus,
+    fulfillmentKey,
+  });
+
+  if (typeof db.batch === "function") {
+    try {
+      await db.batch([
+        db
+          .prepare(
+            `INSERT INTO stripe_fulfillments (
+               fulfillment_key,
+               device_id,
+               fulfillment_kind,
+               checkout_session_id,
+               payment_intent_id,
+               stripe_event_id,
+               stripe_event_type,
+               meta,
+               created_at
+             )
+             VALUES (?, ?, 'credits', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+          )
+          .bind(
+            fulfillmentKey,
+            deviceId,
+            checkoutSessionId,
+            paymentIntentId,
+            stripeEventId,
+            stripeEventType,
+            metaJson
+          ),
+        db
+          .prepare(
+            `INSERT INTO credits (device_id, credit_balance, updated_at)
+             VALUES (?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(device_id) DO UPDATE SET
+               credit_balance = credit_balance + ?,
+               updated_at = CURRENT_TIMESTAMP`
+          )
+          .bind(deviceId, creditsToAdd, creditsToAdd),
+        db
+          .prepare(
+            `INSERT INTO credit_ledger (device_id, delta, reason, meta)
+             VALUES (?, ?, ?, ?)`
+          )
+          .bind(deviceId, creditsToAdd, reason, metaJson),
+      ]);
+      return "applied";
+    } catch (error) {
+      if (isStripeFulfillmentUniqueConstraintError(error)) {
+        return "duplicate";
+      }
+      throw error;
+    }
+  }
+
+  try {
+    await runInTransaction(async () => {
+      await db
+        .prepare(
+          `INSERT INTO stripe_fulfillments (
+             fulfillment_key,
+             device_id,
+             fulfillment_kind,
+             checkout_session_id,
+             payment_intent_id,
+             stripe_event_id,
+             stripe_event_type,
+             meta,
+             created_at
+           )
+           VALUES (?, ?, 'credits', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+        )
+        .bind(
+          fulfillmentKey,
+          deviceId,
+          checkoutSessionId,
+          paymentIntentId,
+          stripeEventId,
+          stripeEventType,
+          metaJson
+        )
+        .run();
+
+      await db
+        .prepare(
+          `INSERT INTO credits (device_id, credit_balance, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(device_id) DO UPDATE SET
+             credit_balance = credit_balance + ?,
+             updated_at = CURRENT_TIMESTAMP`
+        )
+        .bind(deviceId, creditsToAdd, creditsToAdd)
+        .run();
+
+      await db
+        .prepare(
+          `INSERT INTO credit_ledger (device_id, delta, reason, meta)
+           VALUES (?, ?, ?, ?)`
+        )
+        .bind(deviceId, creditsToAdd, reason, metaJson)
+        .run();
+    });
+    return "applied";
+  } catch (error) {
+    if (isStripeFulfillmentUniqueConstraintError(error)) {
+      return "duplicate";
+    }
+    throw error;
+  }
+}
+
+export async function fulfillByoOpenAiUnlock({
+  deviceId,
+  entitlement,
+  checkoutSessionId = null,
+  paymentIntentId = null,
+  stripeEventId = null,
+  stripeEventType,
+}: EntitlementFulfillmentInput): Promise<"applied" | "duplicate"> {
+  const db = getDatabase();
+  const fulfillmentKey = buildStripeFulfillmentKey(
+    "entitlement",
+    checkoutSessionId,
+    paymentIntentId,
+    entitlement
+  );
+  const metaJson = serializeMeta({
+    entitlement,
+    checkoutSessionId,
+    paymentIntentId,
+    stripeEventId,
+    stripeEventType,
+    fulfillmentKey,
+  });
+
+  if (typeof db.batch === "function") {
+    try {
+      await db.batch([
+        db
+          .prepare(
+            `INSERT INTO stripe_fulfillments (
+               fulfillment_key,
+               device_id,
+               fulfillment_kind,
+               checkout_session_id,
+               payment_intent_id,
+               stripe_event_id,
+               stripe_event_type,
+               meta,
+               created_at
+             )
+             VALUES (?, ?, 'entitlement', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+          )
+          .bind(
+            fulfillmentKey,
+            deviceId,
+            checkoutSessionId,
+            paymentIntentId,
+            stripeEventId,
+            stripeEventType,
+            metaJson
+          ),
+        db
+          .prepare(
+            `INSERT INTO entitlements (
+               device_id,
+               byo_openai,
+               byo_anthropic,
+               unlocked_at,
+               created_at,
+               updated_at
+             )
+             VALUES (?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ON CONFLICT(device_id) DO UPDATE SET
+               byo_openai = 1,
+               byo_anthropic = 1,
+               unlocked_at = CASE
+                 WHEN entitlements.unlocked_at IS NULL THEN CURRENT_TIMESTAMP
+                 ELSE entitlements.unlocked_at
+               END,
+               updated_at = CURRENT_TIMESTAMP`
+          )
+          .bind(deviceId),
+      ]);
+      return "applied";
+    } catch (error) {
+      if (isStripeFulfillmentUniqueConstraintError(error)) {
+        return "duplicate";
+      }
+      throw error;
+    }
+  }
+
+  try {
+    await runInTransaction(async () => {
+      await db
+        .prepare(
+          `INSERT INTO stripe_fulfillments (
+             fulfillment_key,
+             device_id,
+             fulfillment_kind,
+             checkout_session_id,
+             payment_intent_id,
+             stripe_event_id,
+             stripe_event_type,
+             meta,
+             created_at
+           )
+           VALUES (?, ?, 'entitlement', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+        )
+        .bind(
+          fulfillmentKey,
+          deviceId,
+          checkoutSessionId,
+          paymentIntentId,
+          stripeEventId,
+          stripeEventType,
+          metaJson
+        )
+        .run();
+
+      await db
+        .prepare(
+          `INSERT INTO entitlements (
+             device_id,
+             byo_openai,
+             byo_anthropic,
+             unlocked_at,
+             created_at,
+             updated_at
+           )
+           VALUES (?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           ON CONFLICT(device_id) DO UPDATE SET
+             byo_openai = 1,
+             byo_anthropic = 1,
+             unlocked_at = CASE
+               WHEN entitlements.unlocked_at IS NULL THEN CURRENT_TIMESTAMP
+               ELSE entitlements.unlocked_at
+             END,
+             updated_at = CURRENT_TIMESTAMP`
+        )
+        .bind(deviceId)
+        .run();
+    });
+    return "applied";
+  } catch (error) {
+    if (isStripeFulfillmentUniqueConstraintError(error)) {
+      return "duplicate";
+    }
+    throw error;
+  }
+}

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { getStripe } from "../lib/stripe";
 import { packs, PACK_IDS } from "../types/packs";
+import { getUserByApiKey } from "../lib/db";
 import type { Stage5ApiBindings } from "../types/env";
 
 const router = new Hono<{ Bindings: Stage5ApiBindings }>();
@@ -55,6 +56,13 @@ type StripeCheckoutLocale = (typeof STRIPE_CHECKOUT_LOCALES)[number];
 const STRIPE_CHECKOUT_LOCALE_MAP = new Map<string, StripeCheckoutLocale>(
   STRIPE_CHECKOUT_LOCALES.map(locale => [locale.toLowerCase(), locale])
 );
+const DEFAULT_CHECKOUT_UI_ORIGIN = "https://translator.tools";
+
+function resolveCheckoutUiOrigin(rawOrigin: string | undefined): string {
+  const normalized = String(rawOrigin || "").trim();
+  const origin = normalized || DEFAULT_CHECKOUT_UI_ORIGIN;
+  return origin.replace(/\/+$/, "");
+}
 
 function resolveStripeCheckoutLocale(
   rawLocale: string | undefined
@@ -105,21 +113,54 @@ const checkoutSessionIdSchema = z
   .trim()
   .regex(/^cs_[a-zA-Z0-9_]+$/, "Invalid checkout session ID");
 
-function getBearerDeviceId(c: any): string | null {
+async function getAuthenticatedDeviceId(c: any): Promise<string | null> {
   const authHeader = c.req.header("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
   const token = authHeader.slice(7).trim();
   if (!token) return null;
-  return token;
+  const user = await getUserByApiKey({ apiKey: token });
+  return user?.device_id ?? null;
+}
+
+async function requireAuthorizedDeviceId(
+  c: any,
+  requestedDeviceId: string
+): Promise<Response | null> {
+  const authDeviceId = await getAuthenticatedDeviceId(c);
+  if (!authDeviceId) {
+    return c.json(
+      {
+        error: "Missing authorization",
+        message: "Authorization header with a valid API token is required",
+      },
+      401
+    );
+  }
+
+  if (authDeviceId !== requestedDeviceId) {
+    return c.json(
+      {
+        error: "Forbidden",
+        message: "Checkout session does not belong to this device",
+      },
+      403
+    );
+  }
+
+  return null;
 }
 
 router.post("/create-session", async (c) => {
   try {
     const body = await c.req.json();
     const { packId, deviceId, locale } = createSessionSchema.parse(body);
+    const notAuthorized = await requireAuthorizedDeviceId(c, deviceId);
+    if (notAuthorized) {
+      return notAuthorized;
+    }
 
     const pack = packs[packId];
-    const uiOrigin = c.env.UI_ORIGIN || "https://stage5.tools";
+    const uiOrigin = resolveCheckoutUiOrigin(c.env.UI_ORIGIN);
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
     const checkoutLocale = resolveStripeCheckoutLocale(locale);
 
@@ -186,6 +227,10 @@ router.post("/create-byo-unlock", async c => {
   try {
     const body = await c.req.json();
     const { deviceId, locale } = createByoUnlockSchema.parse(body);
+    const notAuthorized = await requireAuthorizedDeviceId(c, deviceId);
+    if (notAuthorized) {
+      return notAuthorized;
+    }
 
     const priceId = c.env.STRIPE_BYO_UNLOCK_PRICE_ID;
     if (!priceId) {
@@ -201,7 +246,7 @@ router.post("/create-byo-unlock", async c => {
       );
     }
 
-    const uiOrigin = c.env.UI_ORIGIN || "https://stage5.tools";
+    const uiOrigin = resolveCheckoutUiOrigin(c.env.UI_ORIGIN);
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
     const checkoutLocale = resolveStripeCheckoutLocale(locale);
 
@@ -263,28 +308,14 @@ router.post("/create-byo-unlock", async c => {
 
 router.get("/session/:sessionId", async c => {
   try {
-    const authDeviceId = getBearerDeviceId(c);
+    const authDeviceId = await getAuthenticatedDeviceId(c);
     if (!authDeviceId) {
       return c.json(
         {
           error: "Missing authorization",
-          message: "Authorization header with Bearer device ID is required",
+          message: "Authorization header with a valid API token is required",
         },
         401
-      );
-    }
-
-    const parsedAuth = z
-      .string()
-      .uuid("Authorization token must be a valid UUID")
-      .safeParse(authDeviceId);
-    if (!parsedAuth.success) {
-      return c.json(
-        {
-          error: "Invalid authorization",
-          details: parsedAuth.error.errors,
-        },
-        400
       );
     }
 

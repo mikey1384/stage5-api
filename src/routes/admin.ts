@@ -16,17 +16,20 @@ const router = new Hono<{ Bindings: Stage5ApiBindings }>();
 
 function authorizeAdminDevice(
   c: Context<{ Bindings: Stage5ApiBindings }>,
-  rawDeviceId: unknown
+  providedSecret: string | undefined
 ): Response | null {
-  const configuredAdminDeviceId = String(c.env.ADMIN_DEVICE_ID || "").trim();
-  if (!configuredAdminDeviceId) {
-    console.error("[admin] Rejecting admin request: ADMIN_DEVICE_ID is not configured.");
+  const configuredAdminSecret =
+    String(c.env.ADMIN_API_SECRET || "").trim() ||
+    String(c.env.ADMIN_DEVICE_ID || "").trim();
+  if (!configuredAdminSecret) {
+    console.error(
+      "[admin] Rejecting admin request: neither ADMIN_API_SECRET nor legacy ADMIN_DEVICE_ID is configured."
+    );
     return c.json({ error: "admin-not-configured" }, 503);
   }
 
-  const requestDeviceId =
-    typeof rawDeviceId === "string" ? rawDeviceId.trim() : "";
-  if (!requestDeviceId || requestDeviceId !== configuredAdminDeviceId) {
+  const requestSecret = String(providedSecret || "").trim();
+  if (!requestSecret || requestSecret !== configuredAdminSecret) {
     return c.json({ error: "not-authorised" }, 403);
   }
 
@@ -35,13 +38,14 @@ function authorizeAdminDevice(
 
 router.post("/add-credits", async (c) => {
   try {
+    const adminSecret = c.req.header("X-Admin-Secret");
     const body = await c.req.json<{
       deviceId: string;
       pack: keyof typeof packs;
     }>();
     const { deviceId, pack } = body;
 
-    const notAuthorized = authorizeAdminDevice(c, deviceId);
+    const notAuthorized = authorizeAdminDevice(c, adminSecret);
     if (notAuthorized) return notAuthorized;
 
     // Validate pack exists
@@ -74,12 +78,13 @@ router.post("/add-credits", async (c) => {
 
 router.post("/reset-to-zero", async (c) => {
   try {
+    const adminSecret = c.req.header("X-Admin-Secret");
     const body = await c.req.json<{
       deviceId: string;
     }>();
     const { deviceId } = body;
 
-    const notAuthorized = authorizeAdminDevice(c, deviceId);
+    const notAuthorized = authorizeAdminDevice(c, adminSecret);
     if (notAuthorized) return notAuthorized;
 
     await resetCreditsToZero({ deviceId });
@@ -103,6 +108,7 @@ router.post("/reset-to-zero", async (c) => {
 
 router.post("/reconcile", async (c) => {
   try {
+    const adminSecret = c.req.header("X-Admin-Secret");
     const body = await c.req.json<{
       deviceId: string;
       dryRun?: boolean;
@@ -113,8 +119,7 @@ router.post("/reconcile", async (c) => {
       cleanupMaxAgeHours?: number;
     }>();
 
-    const { deviceId } = body;
-    const notAuthorized = authorizeAdminDevice(c, deviceId);
+    const notAuthorized = authorizeAdminDevice(c, adminSecret);
     if (notAuthorized) return notAuthorized;
 
     const report = await runReconciliation({
@@ -147,8 +152,8 @@ router.post("/reconcile", async (c) => {
 
 router.get("/metrics", async (c) => {
   try {
-    const deviceId = (c.req.query("deviceId") || "").trim();
-    const notAuthorized = authorizeAdminDevice(c, deviceId);
+    const adminSecret = c.req.header("X-Admin-Secret");
+    const notAuthorized = authorizeAdminDevice(c, adminSecret);
     if (notAuthorized) return notAuthorized;
 
     const observability = getObservabilitySnapshot();

@@ -32,7 +32,24 @@ wrangler secret put SECRET_NAME
 - **Purpose:** Enables creation of one-time checkout sessions that unlock BYO OpenAI entitlements
 - **Used in:** `/payments/create-byo-unlock` endpoint when generating checkout sessions
 
+### ADMIN_API_SECRET
+- **Value:** A dedicated secret string for admin-only routes
+- **Purpose:** Authorizes `/admin/*` maintenance actions such as add/reset credits
+- **Used in:** Admin tooling via `X-Admin-Secret`
+
+### ADMIN_DEVICE_ID
+- **Value:** Legacy admin secret value
+- **Purpose:** Backward-compatible fallback when `ADMIN_API_SECRET` has not been rolled out yet
+- **Used in:** `/admin/*` routes only when `ADMIN_API_SECRET` is unset
+
+### DEVICE_TOKEN_SECRET
+- **Value:** Optional dedicated secret for deterministic `/auth/device-token` replay
+- **Purpose:** Seeds the D1-backed canonical device-token root secret when you want explicit initial secret control
+- **Used in:** Device token bootstrap and recovery replay
+
 ## Notes
 - Keep this file updated when secrets change
 - Never commit actual secret values to git in code files
-- This reference file is safe to commit since secrets are set separately in Cloudflare 
+- This reference file is safe to commit since secrets are set separately in Cloudflare
+- stage5-api persists a canonical device-token secret in D1 on first use. If `DEVICE_TOKEN_SECRET` is set, it is used only as the initial seed value.
+- Later `DEVICE_TOKEN_SECRET` changes do not retroactively change pending replays or issued device-token credentials.

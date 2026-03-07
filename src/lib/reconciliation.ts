@@ -1,18 +1,20 @@
 import {
   cleanupOldRelayTranslationJobs,
   cleanupOldTranscriptionJobs,
-  deductTranslationCredits,
+  completeTranslationJobWithSettlement,
+  failTranslationJobWithReservationRelease,
   listTranscriptionJobsForReconciliation,
   listTranslationJobsForReconciliation,
-  markTranslationJobCredited,
+  releaseBillingReservation,
   resetTranslationJobRelay,
   storeTranscriptionJobError,
-  storeTranslationJobError,
   type TranslationJobRecord,
 } from "./db";
 import { API_ERRORS } from "./constants";
 import { isAllowedTranslationModel, normalizeTranslationModel } from "./pricing";
-import { resolveTranslationBillingIdempotencyKey } from "./translation-idempotency";
+import { estimateTranslationReservationCredits } from "./relay-billing";
+import { buildR2TranscriptionReservationKey } from "./transcription-billing";
+import { buildTranslationReservationKey } from "./translation-idempotency";
 
 export interface ReconciliationOptions {
   dryRun?: boolean;
@@ -127,13 +129,6 @@ function resolveCompletionTokens(job: TranslationJobRecord): number {
   return estimateCompletionTokens(parseJsonObject(job.result));
 }
 
-function resolveBillingIdempotencyKey(job: TranslationJobRecord): string {
-  return resolveTranslationBillingIdempotencyKey({
-    jobId: job.job_id,
-    payload: parseJsonObject(job.payload),
-  });
-}
-
 function buildDefaultOptions(
   options?: ReconciliationOptions
 ): Required<ReconciliationOptions> {
@@ -154,6 +149,30 @@ function buildDefaultOptions(
     ),
     cleanupMaxAgeHours: Math.max(1, Math.floor(options?.cleanupMaxAgeHours ?? 48)),
   };
+}
+
+async function failTranslationJobDuringReconciliation({
+  job,
+  message,
+}: {
+  job: TranslationJobRecord;
+  message: string;
+}): Promise<void> {
+  const result = await failTranslationJobWithReservationRelease({
+    jobId: job.job_id,
+    deviceId: job.device_id,
+    requestKey: buildTranslationReservationKey(job.job_id),
+    message,
+    reason: "TRANSLATE",
+    billingMeta: {
+      source: "reconciliation",
+      jobId: job.job_id,
+      deviceId: job.device_id,
+    },
+  });
+  if (!result.ok) {
+    throw new Error(`failed to mark translation job failed: ${result.error}`);
+  }
 }
 
 export async function runReconciliation(
@@ -218,7 +237,12 @@ export async function runReconciliation(
         continue;
       }
 
-      if (job.credited) {
+      const credited =
+        typeof job.credited === "number"
+          ? job.credited
+          : Number.parseInt(String(job.credited ?? 0), 10) || 0;
+
+      if (credited > 0) {
         report.translation.skipped += 1;
         continue;
       }
@@ -227,8 +251,8 @@ export async function runReconciliation(
         if (cfg.dryRun) {
           report.translation.markedFailed += 1;
         } else {
-          await storeTranslationJobError({
-            jobId: job.job_id,
+          await failTranslationJobDuringReconciliation({
+            job,
             message: "reconcile:completed-without-result",
           });
           report.translation.markedFailed += 1;
@@ -240,8 +264,8 @@ export async function runReconciliation(
       const normalizedModel = normalizeTranslationModel(rawModel || "");
       if (!rawModel || !isAllowedTranslationModel(normalizedModel)) {
         if (!cfg.dryRun) {
-          await storeTranslationJobError({
-            jobId: job.job_id,
+          await failTranslationJobDuringReconciliation({
+            job,
             message: `reconcile:unsupported-billing-model:${normalizedModel || "missing"}`,
           });
         }
@@ -256,24 +280,49 @@ export async function runReconciliation(
         continue;
       }
 
-      const deducted = await deductTranslationCredits({
+      const actualSpend = estimateTranslationReservationCredits({
+        promptTokens,
+        maxCompletionTokens: completionTokens,
+        model: normalizedModel,
+        webSearchCalls: 0,
+      });
+      // Queued translations now reserve upfront at creation time, so recovery
+      // must settle or release that reservation instead of charging again.
+      const completionResult = await completeTranslationJobWithSettlement({
+        jobId: job.job_id,
         deviceId: job.device_id,
+        requestKey: buildTranslationReservationKey(job.job_id),
+        result: parseJsonObject(job.result) ?? {},
         promptTokens,
         completionTokens,
-        model: normalizedModel,
-        idempotencyKey: resolveBillingIdempotencyKey(job),
+        actualSpend,
+        reason: "TRANSLATE",
+        billingMeta: {
+          source: "reconciliation",
+          jobId: job.job_id,
+          model: normalizedModel,
+          promptTokens,
+          completionTokens,
+          spend: actualSpend,
+        },
       });
 
-      if (!deducted) {
-        await storeTranslationJobError({
-          jobId: job.job_id,
-          message: API_ERRORS.INSUFFICIENT_CREDITS,
+      if (!completionResult.ok) {
+        await failTranslationJobDuringReconciliation({
+          job,
+          message:
+            completionResult.error === "actual-spend-exceeds-reserve"
+              ? API_ERRORS.INSUFFICIENT_CREDITS
+              : completionResult.error,
         });
-        report.translation.insufficientCredits += 1;
+        if (completionResult.error === "actual-spend-exceeds-reserve") {
+          report.translation.insufficientCredits += 1;
+        } else {
+          report.translation.markedFailed += 1;
+        }
         continue;
       }
 
-      await markTranslationJobCredited({ jobId: job.job_id });
       report.translation.rebilled += 1;
     } catch (error: any) {
       addReportError(
@@ -304,6 +353,24 @@ export async function runReconciliation(
       if (cfg.dryRun) {
         report.transcription.wouldMarkFailed += 1;
       } else {
+        const releaseResult = await releaseBillingReservation({
+          deviceId: job.device_id,
+          service: "transcription",
+          requestKey: buildR2TranscriptionReservationKey(job.job_id),
+          reason: "TRANSCRIBE",
+          meta: {
+            reason,
+            source: "reconciliation",
+            jobId: job.job_id,
+          },
+        });
+        if (!releaseResult.ok && releaseResult.error !== "missing-reservation") {
+          addReportError(
+            report.transcription.errors,
+            `${job.job_id}: failed to release stale reservation (${releaseResult.error})`
+          );
+        }
+
         await storeTranscriptionJobError({
           jobId: job.job_id,
           message: reason,

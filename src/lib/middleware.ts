@@ -1,6 +1,7 @@
 import { Context, Next } from "hono";
 import { API_ERRORS } from "./constants";
 import { getUserByApiKey } from "./db";
+import { RELAY_BILLING_API_PATHS } from "./relay-billing";
 
 /**
  * Shared user variables type for authenticated routes
@@ -26,8 +27,11 @@ export function bearerAuth() {
     const path = new URL(c.req.url).pathname;
     if (
       path.includes("/webhook/") ||
-      path.endsWith("/authorize") ||
-      path.endsWith("/deduct")
+      path === RELAY_BILLING_API_PATHS.AUTHORIZE ||
+      path === RELAY_BILLING_API_PATHS.CONFIRM ||
+      path === RELAY_BILLING_API_PATHS.RESERVE ||
+      path === RELAY_BILLING_API_PATHS.FINALIZE ||
+      path === RELAY_BILLING_API_PATHS.RELEASE
     ) {
       await next();
       return;

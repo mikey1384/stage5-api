@@ -31,3 +31,83 @@ export const getDatabase = (): Database => {
 };
 
 export const isDatabaseReady = (): boolean => !!db && tablesCreated;
+
+export function hasAtomicBatch(
+  candidate: Database = getDatabase()
+): candidate is Database & { batch: (statements: any[]) => Promise<any> } {
+  return typeof candidate.batch === "function";
+}
+
+export function buildRollbackIfNoChangesStatement(tag: string): any {
+  const db = getDatabase();
+  const rollbackTag = `rollback:${tag}`;
+  return db
+    .prepare(
+      `INSERT INTO billing_idempotency (
+         device_id,
+         reason,
+         idempotency_key,
+         spend,
+         meta,
+         created_at
+       )
+       SELECT ?, NULL, ?, 0, ?, CURRENT_TIMESTAMP
+        WHERE (SELECT changes()) = 0`
+    )
+    .bind(
+      rollbackTag,
+      `${rollbackTag}:${Date.now()}:${Math.random()}`,
+      JSON.stringify({ rollbackTag })
+    );
+}
+
+export function isRollbackIfNoChangesError(error: any): boolean {
+  const msg = String(error?.message || error || "");
+  return msg.includes("NOT NULL constraint failed: billing_idempotency.reason");
+}
+
+export async function executeAtomicBatch(statements: any[]): Promise<any[]> {
+  const db = getDatabase();
+  if (hasAtomicBatch(db)) {
+    return db.batch(statements);
+  }
+
+  await db.exec("BEGIN");
+  try {
+    const results: any[] = [];
+    for (const statement of statements) {
+      results.push(await statement.run());
+    }
+    await db.exec("COMMIT");
+    return results;
+  } catch (error) {
+    try {
+      await db.exec("ROLLBACK");
+    } catch {
+      // Ignore rollback failures.
+    }
+    throw error;
+  }
+}
+
+export async function runInTransaction<T>(work: () => Promise<T>): Promise<T> {
+  const db = getDatabase();
+  if (hasAtomicBatch(db)) {
+    throw new Error(
+      "runInTransaction is not safe for D1-backed databases; use executeAtomicBatch or atomic SQL instead."
+    );
+  }
+  await db.exec("BEGIN");
+  try {
+    const result = await work();
+    await db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await db.exec("ROLLBACK");
+    } catch {
+      // Ignore rollback failures.
+    }
+    throw error;
+  }
+}

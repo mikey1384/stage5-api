@@ -1,12 +1,10 @@
 import { Hono, Context } from "hono";
 import crypto from "node:crypto";
 import { z } from "zod";
-import { cors } from "hono/cors";
 import { API_ERRORS, getProviderFromModel } from "../lib/constants";
 import { isAllowedTranslationModel, normalizeTranslationModel } from "../lib/pricing";
-import { resolveTranslationBillingIdempotencyKey } from "../lib/translation-idempotency";
 import {
-  createTranslationJob,
+  createTranslationJobWithReservation,
   claimTranslationJobDispatch,
   countQueuedTranslationJobs,
   countTranslationJobsInFlight,
@@ -17,20 +15,34 @@ import {
   listQueuedTranslationJobs,
   resetTranslationJobRelay,
   getTranslationJob,
-  storeTranslationJobResult,
   storeTranslationJobError,
-  markTranslationJobCredited,
-  deductTranslationCredits,
+  completeTranslationJobWithSettlement,
+  releaseBillingReservation,
   TranslationJobRecord,
 } from "../lib/db";
+import { estimateTranslationReservationCredits } from "../lib/relay-billing";
 import {
   submitTranslationRelayJob,
   fetchRelayTranslationStatus,
   RelayHttpError,
 } from "../lib/openai-config";
+import {
+  isLikelySubtitleReviewMessages,
+  resolveAuthoritativeTranslationModel,
+  resolveTranslationReservationMaxCompletionTokens,
+} from "../lib/translation-model-selection";
+import {
+  estimateTranslationCompletionTokensFallback,
+  estimateTranslationPromptTokenReserve,
+} from "../lib/translation-token-estimator";
 import { bearerAuth, type AuthVariables } from "../lib/middleware";
 import { emitAlert, incrementCounter, observeDuration } from "../lib/observability";
-import { getRequestId, getRequestIdempotencyKey } from "../lib/request-utils";
+import {
+  buildScopedIdempotencyKey,
+  getRequestId,
+  getRequestIdempotencyKey,
+} from "../lib/request-utils";
+import { buildTranslationReservationKey } from "../lib/translation-idempotency";
 import {
   type ErrorStatusCode,
   encodeTranslationJobError,
@@ -49,30 +61,6 @@ const router = new Hono<{
   Bindings: Stage5ApiBindings;
   Variables: AuthVariables;
 }>();
-
-router.use(
-  "*",
-  cors({
-    origin: "*",
-    allowMethods: ["POST", "GET", "OPTIONS"],
-    allowHeaders: [
-      "Content-Type",
-      "Authorization",
-      "Idempotency-Key",
-      "X-Idempotency-Key",
-      "X-Request-Id",
-    ],
-  })
-);
-
-router.options(
-  "*",
-  (c) =>
-    new Response("", {
-      status: 204,
-      headers: { "Content-Type": "text/plain" },
-    })
-);
 
 // Use shared auth middleware
 router.use("*", bearerAuth());
@@ -268,20 +256,39 @@ router.post("/", async (c) => {
     // Forward caller model for non-subtitle compatibility. Relay remains authoritative
     // for subtitle draft/review phases via translationPhase + modelFamily.
     const normalizedRequestedModel = normalizeTranslationModel(requestedModel);
+    const isReviewPhase =
+      translationPhase === "review" ||
+      (translationPhase !== "draft" &&
+        isLikelySubtitleReviewMessages(messages));
+    const authoritativeReasoning = isReviewPhase ? undefined : reasoning;
 
-    const jobId = crypto.randomUUID();
     const requestIdempotencyKey = getRequestIdempotencyKey(c);
     const payload = {
       mode: "chat" as const,
       messages,
       model: normalizedRequestedModel,
       modelFamily,
-      reasoning,
+      reasoning: authoritativeReasoning,
       translationPhase,
       qualityMode,
       idempotencyKey: requestIdempotencyKey ?? null,
       traceId: requestId,
     };
+    const jobId = buildTranslationJobId({
+      deviceId: user.deviceId,
+      requestIdempotencyKey,
+      payload,
+    });
+
+    const existingJob = await getTranslationJob({ jobId });
+    if (existingJob) {
+      return await respondWithExistingTranslationJobFromCreate({
+        c,
+        job: existingJob,
+        requestId,
+        signal: c.req.raw.signal,
+      });
+    }
 
     const admissionResponse = await enforceTranslationAdmission({
       c,
@@ -292,24 +299,58 @@ router.post("/", async (c) => {
       return admissionResponse;
     }
 
-    try {
-      await createTranslationJob({
-        jobId,
-        deviceId: user.deviceId,
-        model: normalizedRequestedModel,
-        payload,
-      });
-      incrementCounter("translate.job_created_total");
-    } catch (error: any) {
-      incrementCounter("translate.job_create_failed_total");
-      return c.json(
-        {
-          error: "Failed to queue translation",
-          message: error?.message || "Failed to create translation job",
-        },
-        { status: 500 }
-      );
+    const reservedModel = resolveAuthoritativeTranslationModel({
+      requestedModel: normalizedRequestedModel,
+      messages,
+      modelFamily,
+      canUseAnthropic: Boolean(c.env.ANTHROPIC_API_KEY),
+      translationPhase,
+      qualityMode,
+    });
+    const estimatedPromptTokens = estimateTranslationPromptTokenReserve({
+      model: reservedModel,
+      payload,
+    });
+    const maxCompletionTokens = resolveTranslationReservationMaxCompletionTokens({
+      model: reservedModel,
+      reasoning: authoritativeReasoning,
+    });
+    const reservationSpend = estimateTranslationReservationCredits({
+      promptTokens: estimatedPromptTokens,
+      maxCompletionTokens,
+      model: reservedModel,
+      webSearchCalls: 0,
+    });
+    const reservationKey = buildTranslationReservationKey(jobId);
+    const createResult = await createTranslationJobWithReservation({
+      jobId,
+      deviceId: user.deviceId,
+      model: normalizedRequestedModel,
+      payload,
+      reservationRequestKey: reservationKey,
+      reservationSpend,
+      reservationReason: "TRANSLATE_RESERVE",
+      reservationMeta: {
+        reservedModel,
+        estimatedPromptTokens,
+        maxCompletionTokens,
+        requestId,
+      },
+    });
+    if (!createResult.ok) {
+      incrementCounter("translate.reserve_failed_total");
+      return c.json({ error: API_ERRORS.INSUFFICIENT_CREDITS }, { status: 402 });
     }
+    if (createResult.status === "duplicate") {
+      return await respondWithExistingTranslationJobFromCreate({
+        c,
+        job: createResult.job,
+        requestId,
+        signal: c.req.raw.signal,
+      });
+    }
+
+    incrementCounter("translate.job_created_total");
 
     const dispatchStartedAt = Date.now();
     try {
@@ -339,6 +380,11 @@ router.post("/", async (c) => {
 
     const refreshed = await getTranslationJob({ jobId });
     if (!refreshed) {
+      await releaseTranslationReservation({
+        jobId,
+        deviceId: user.deviceId,
+        meta: { reason: "job-missing-after-dispatch", requestId },
+      });
       incrementCounter("translate.job_not_found_total", { route: "create" });
       return c.json({ error: "Job not found" }, { status: 404 });
     }
@@ -397,6 +443,11 @@ router.get("/result/:jobId", async (c) => {
     if (!payload) {
       incrementCounter("translate.invalid_payload_total", { route: "result" });
       await storeTranslationJobError({ jobId, message: "Invalid payload" });
+      await releaseTranslationReservation({
+        jobId,
+        deviceId: job.device_id,
+        meta: { reason: "invalid-payload-result", requestId },
+      });
       return c.json({ error: "Translation job failed" }, { status: 500 });
     }
 
@@ -491,6 +542,61 @@ function parseJobPayload(
 
 function toClientJobStatus(status: string): string {
   return status === "dispatching" ? "queued" : status;
+}
+
+function getTranslationJobIdentityPayload({
+  deviceId,
+  payload,
+}: {
+  deviceId: string;
+  payload: Record<string, unknown>;
+}): Record<string, unknown> {
+  return {
+    deviceId,
+    mode: payload.mode ?? "chat",
+    messages: payload.messages ?? null,
+    model: payload.model ?? null,
+    modelFamily: payload.modelFamily ?? null,
+    reasoning: payload.reasoning ?? null,
+    translationPhase: payload.translationPhase ?? null,
+    qualityMode: payload.qualityMode ?? null,
+  };
+}
+
+function buildTranslationJobId({
+  deviceId,
+  requestIdempotencyKey,
+  payload,
+}: {
+  deviceId: string;
+  requestIdempotencyKey?: string;
+  payload: Record<string, unknown>;
+}): string {
+  return (
+    buildScopedIdempotencyKey({
+      scope: "translation-job-v1",
+      requestIdempotencyKey,
+      payload: getTranslationJobIdentityPayload({ deviceId, payload }),
+    }) || crypto.randomUUID()
+  );
+}
+
+async function releaseTranslationReservation({
+  jobId,
+  deviceId,
+  meta,
+}: {
+  jobId: string;
+  deviceId: string;
+  meta?: unknown;
+}): Promise<void> {
+  await releaseBillingReservation({
+    deviceId,
+    service: "translation",
+    requestKey: buildTranslationReservationKey(jobId),
+    reason: "TRANSLATE",
+    meta,
+  });
 }
 
 async function enforceTranslationAdmission({
@@ -830,6 +936,11 @@ async function dispatchSingleTranslationJob({
   if (!payload) {
     incrementCounter("translate.invalid_payload_total", { route: "dispatch" });
     await storeTranslationJobError({ jobId, message: "Invalid payload" });
+    await releaseTranslationReservation({
+      jobId,
+      deviceId: job.device_id,
+      meta: { reason: "invalid-payload-dispatch", requestId },
+    });
     return "terminal_failed";
   }
 
@@ -840,6 +951,8 @@ async function dispatchSingleTranslationJob({
       payload,
       signal,
       requestId,
+      deviceId: job.device_id,
+      requestKey: buildTranslationReservationKey(jobId),
     });
     observeDuration(
       "translate.relay_submit_duration_ms",
@@ -892,6 +1005,11 @@ async function dispatchSingleTranslationJob({
         jobId,
         message: encodeTranslationJobError(terminalFailure),
       });
+      await releaseTranslationReservation({
+        jobId,
+        deviceId: job.device_id,
+        meta: { reason: "relay-submit-terminal", requestId, status: error.status },
+      });
       return "terminal_failed";
     }
 
@@ -918,6 +1036,111 @@ function respondWithJobResult(c: Context<any>, job: TranslationJobRecord) {
 function respondWithJobFailure(c: Context<any>, job: TranslationJobRecord) {
   const { message, status } = parseTranslationJobError(job.error);
   return c.json({ error: message }, { status });
+}
+
+async function respondWithExistingTranslationJobFromCreate({
+  c,
+  job,
+  requestId,
+  signal,
+}: {
+  c: Context<any>;
+  job: TranslationJobRecord;
+  requestId: string;
+  signal?: AbortSignal;
+}): Promise<Response> {
+  if (job.status === "completed") {
+    incrementCounter("translate.completed_inline_total", { route: "create" });
+    return respondWithJobResult(c, job);
+  }
+
+  if (job.status === "failed") {
+    incrementCounter("translate.failed_total", { route: "create" });
+    return respondWithJobFailure(c, job);
+  }
+
+  const payload = parseJobPayload(job);
+  if (!payload) {
+    incrementCounter("translate.invalid_payload_total", { route: "create" });
+    await storeTranslationJobError({ jobId: job.job_id, message: "Invalid payload" });
+    await releaseTranslationReservation({
+      jobId: job.job_id,
+      deviceId: job.device_id,
+      meta: { reason: "invalid-payload-create-duplicate", requestId },
+    });
+    return c.json({ error: "Translation job failed" }, { status: 500 });
+  }
+
+  if (
+    !job.relay_job_id &&
+    (job.status === "queued" || job.status === "dispatching")
+  ) {
+    const dispatchStartedAt = Date.now();
+    try {
+      await dispatchQueuedTranslationJobs({
+        c,
+        preferredJobId: job.job_id,
+        signal,
+        requestId,
+      });
+      observeDuration(
+        "translate.dispatch_from_create_duration_ms",
+        Date.now() - dispatchStartedAt,
+        { outcome: "ok" }
+      );
+    } catch (error: any) {
+      observeDuration(
+        "translate.dispatch_from_create_duration_ms",
+        Date.now() - dispatchStartedAt,
+        { outcome: "error" }
+      );
+      incrementCounter("translate.dispatch_run_failed_total", { route: "create" });
+      console.warn(
+        `[translate] Dispatch queue run failed for duplicate ${job.job_id} requestId=${requestId}:`,
+        error?.message || error
+      );
+    }
+  }
+
+  const syncResult = await syncJobWithRelay({
+    c,
+    job,
+    payload,
+    signal,
+    requestId,
+  });
+
+  if (syncResult?.status === "error") {
+    incrementCounter("translate.relay_sync_failed_total", {
+      code: syncResult.code,
+    });
+    return c.json({ error: syncResult.message }, { status: syncResult.code });
+  }
+
+  const refreshed = await getTranslationJob({ jobId: job.job_id });
+  if (!refreshed) {
+    incrementCounter("translate.job_not_found_total", { route: "create" });
+    return c.json({ error: "Job not found" }, { status: 404 });
+  }
+
+  if (refreshed.status === "completed") {
+    incrementCounter("translate.completed_inline_total", { route: "create" });
+    return respondWithJobResult(c, refreshed);
+  }
+
+  if (refreshed.status === "failed") {
+    incrementCounter("translate.failed_total", { route: "create" });
+    return respondWithJobFailure(c, refreshed);
+  }
+
+  incrementCounter("translate.accepted_total", { route: "create" });
+  return c.json(
+    {
+      jobId: refreshed.job_id,
+      status: toClientJobStatus(refreshed.status),
+    },
+    { status: 202 }
+  );
 }
 
 async function syncJobWithRelay({
@@ -1019,6 +1242,11 @@ async function syncJobWithRelay({
           statusCode: 503,
         }),
       });
+      await releaseTranslationReservation({
+        jobId: job.job_id,
+        deviceId: job.device_id,
+        meta: { reason: "relay-status-escalation", requestId },
+      });
       return {
         status: "error",
         code: 503,
@@ -1032,6 +1260,11 @@ async function syncJobWithRelay({
       await storeTranslationJobError({
         jobId: job.job_id,
         message: status.message,
+      });
+      await releaseTranslationReservation({
+        jobId: job.job_id,
+        deviceId: job.device_id,
+        meta: { reason: "relay-status-error", requestId },
       });
       return { status: "error", code: 500, message: status.message };
     }
@@ -1066,6 +1299,11 @@ async function syncJobWithRelay({
         statusCode: 503,
       }),
     });
+    await releaseTranslationReservation({
+      jobId: job.job_id,
+      deviceId: job.device_id,
+      meta: { reason: "relay-status-exception-escalation", requestId },
+    });
     return {
       status: "error",
       code: 503,
@@ -1091,22 +1329,28 @@ async function persistCompletion({
   incrementCounter("translate.persist_attempt_total");
   try {
     const usage = completion?.usage ?? {};
+    const rawCompletionModel =
+      typeof completion?.model === "string" ? completion.model.trim() : "";
+    const billedModel = normalizeTranslationModel(rawCompletionModel);
+    const maxCompletionTokens = resolveTranslationReservationMaxCompletionTokens({
+      model: billedModel,
+      reasoning: (payload as any)?.reasoning,
+    });
     const promptTokens =
       typeof usage?.prompt_tokens === "number"
         ? usage.prompt_tokens
-        : estimatePromptTokens(payload);
+        : estimateTranslationPromptTokenReserve({
+            model: billedModel,
+            payload,
+          });
     const completionTokens =
       typeof usage?.completion_tokens === "number"
         ? usage.completion_tokens
-        : estimateCompletionTokens(completion);
-
-    await storeTranslationJobResult({
-      jobId,
-      result: completion,
-      promptTokens,
-      completionTokens,
-    });
-    incrementCounter("translate.persist_result_stored_total");
+        : estimateTranslationCompletionTokensFallback({
+            model: billedModel,
+            completion,
+            maxCompletionTokens,
+          });
 
     const job = await getTranslationJob({ jobId });
     if (!job) {
@@ -1116,9 +1360,12 @@ async function persistCompletion({
       return { status: "error", code: 500, message: "Job not found" };
     }
 
-    if (!job.credited) {
-      const rawCompletionModel =
-        typeof completion?.model === "string" ? completion.model.trim() : "";
+    const credited =
+      typeof job.credited === "number"
+        ? job.credited
+        : Number.parseInt(String(job.credited ?? 0), 10) || 0;
+
+    if (credited <= 0) {
       if (!rawCompletionModel) {
         incrementCounter("translate.persist_failed_total", {
           reason: "missing-completion-model",
@@ -1134,7 +1381,6 @@ async function persistCompletion({
         };
       }
 
-      const billedModel = normalizeTranslationModel(rawCompletionModel);
       if (!isAllowedTranslationModel(billedModel)) {
         incrementCounter("translate.persist_failed_total", {
           reason: "unsupported-billing-model",
@@ -1150,41 +1396,78 @@ async function persistCompletion({
         };
       }
 
-      const ok = await deductTranslationCredits({
-        deviceId: jobOwner,
+      const actualSpend = estimateTranslationReservationCredits({
         promptTokens: promptTokens ?? 0,
-        completionTokens: completionTokens ?? 0,
+        maxCompletionTokens: completionTokens ?? 0,
         model: billedModel,
-        idempotencyKey: resolveTranslationBillingIdempotencyKey({
-          jobId,
-          payload,
-        }),
+        webSearchCalls: 0,
+      });
+      const completionResult = await completeTranslationJobWithSettlement({
+        jobId,
+        deviceId: jobOwner,
+        requestKey: buildTranslationReservationKey(jobId),
+        result: completion,
+        promptTokens,
+        completionTokens,
+        actualSpend,
+        reason: "TRANSLATE",
+        billingMeta: {
+          promptTokens,
+          completionTokens,
+          model: billedModel,
+          spend: actualSpend,
+        },
       });
 
-      if (!ok) {
+      if (!completionResult.ok) {
         incrementCounter("translate.persist_failed_total", {
-          reason: API_ERRORS.INSUFFICIENT_CREDITS,
+          reason: completionResult.error,
         });
         await storeTranslationJobError({
           jobId,
-          message: API_ERRORS.INSUFFICIENT_CREDITS,
+          message: completionResult.error,
         });
         return {
           status: "error",
-          code: 402,
-          message: API_ERRORS.INSUFFICIENT_CREDITS,
+          code: 500,
+          message: completionResult.error,
         };
       }
 
-      await markTranslationJobCredited({ jobId });
-      incrementCounter("translate.credits_deducted_total");
+      if (completionResult.status === "completed") {
+        incrementCounter("translate.credits_deducted_total");
+      } else {
+        incrementCounter("translate.persist_already_credited_total");
+      }
+      incrementCounter("translate.persist_result_stored_total");
 
       const provider = getProviderFromModel(billedModel);
       console.log(
         `[translate] success for device ${jobOwner} model=${billedModel} provider=${provider} promptTokens=${promptTokens} completionTokens=${completionTokens}`
       );
     } else {
+      const completionResult = await completeTranslationJobWithSettlement({
+        jobId,
+        deviceId: jobOwner,
+        requestKey: buildTranslationReservationKey(jobId),
+        result: completion,
+        promptTokens,
+        completionTokens,
+        actualSpend: 0,
+        reason: "TRANSLATE",
+      });
+      if (!completionResult.ok) {
+        incrementCounter("translate.persist_failed_total", {
+          reason: completionResult.error,
+        });
+        return {
+          status: "error",
+          code: 500,
+          message: completionResult.error,
+        };
+      }
       incrementCounter("translate.persist_already_credited_total");
+      incrementCounter("translate.persist_result_stored_total");
     }
 
     return { status: "ok" };
@@ -1193,23 +1476,5 @@ async function persistCompletion({
       "translate.persist_attempt_duration_ms",
       Date.now() - startedAt
     );
-  }
-}
-
-function estimatePromptTokens(payload: Record<string, unknown>): number {
-  try {
-    const raw = JSON.stringify(payload?.messages ?? payload ?? {});
-    return Math.ceil(raw.length / 4);
-  } catch {
-    return 0;
-  }
-}
-
-function estimateCompletionTokens(completion: any): number {
-  try {
-    const content = completion?.choices?.[0]?.message?.content ?? "";
-    return Math.ceil(String(content).length / 4);
-  } catch {
-    return 0;
   }
 }

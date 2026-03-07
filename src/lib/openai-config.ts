@@ -26,26 +26,31 @@ export function makeOpenAI(c: Context<any>) {
 }
 
 /**
- * Send transcription to relay (provider/model authority is server-side).
+ * Send transcription to the internal relay endpoint.
+ * Billing stays owned by the worker via X-Stage5-* reservation headers.
  */
 export async function callRelayServer({
   c,
   file,
   model,
   qualityMode,
-  idempotencyKey,
   language,
   prompt,
   signal,
+  deviceId,
+  requestKey,
+  idempotencyKey,
 }: {
   c: Context<any>;
   file: File;
   model: string;
   qualityMode?: boolean;
-  idempotencyKey?: string;
   language?: string;
   prompt?: string;
   signal: AbortSignal;
+  deviceId: string;
+  requestKey: string;
+  idempotencyKey?: string;
 }) {
   // Prepare form data for relay
   const relayFormData = new FormData();
@@ -70,10 +75,12 @@ export async function callRelayServer({
     headers: {
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-OpenAI-Key": c.env.OPENAI_API_KEY,
-      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      "X-Stage5-Device-Id": deviceId,
+      "X-Stage5-Request-Key": requestKey,
       ...(c.env.ELEVENLABS_API_KEY
         ? { "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY }
         : {}),
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
     },
     body: relayFormData,
     signal,
@@ -84,7 +91,7 @@ export async function callRelayServer({
     console.error(
       `❌ Relay server error: ${relayResponse.status} ${errorText}`
     );
-    throw new Error(`Relay server error: ${relayResponse.status} ${errorText}`);
+    throw new RelayHttpError(relayResponse.status, errorText);
   }
 
   const result = (await relayResponse.json()) as any;
@@ -97,11 +104,15 @@ export async function submitTranslationRelayJob({
   payload,
   signal,
   requestId,
+  deviceId,
+  requestKey,
 }: {
   c: Context<any>;
   payload: Record<string, unknown>;
   signal?: AbortSignal;
   requestId?: string;
+  deviceId: string;
+  requestKey: string;
 }): Promise<
   | { type: "accepted"; relayJobId: string; status?: string }
   | { type: "completed"; result: any }
@@ -119,6 +130,8 @@ export async function submitTranslationRelayJob({
   if (requestId) {
     headers["X-Request-Id"] = requestId;
   }
+  headers["X-Stage5-Device-Id"] = deviceId;
+  headers["X-Stage5-Request-Key"] = requestKey;
 
   const resp = await fetch(`${OPENAI_RELAY_URL}/translate`, {
     method: "POST",
@@ -277,6 +290,8 @@ export async function callDubRelay({
   model,
   format,
   signal,
+  deviceId,
+  requestKey,
 }: {
   c: Context<any>;
   lines?: string[];
@@ -291,6 +306,8 @@ export async function callDubRelay({
   model: string;
   format: SpeechFormat;
   signal?: AbortSignal;
+  deviceId: string;
+  requestKey: string;
 }) {
   const payload: Record<string, unknown> = {
     voice,
@@ -318,6 +335,8 @@ export async function callDubRelay({
       "Content-Type": "application/json",
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-OpenAI-Key": c.env.OPENAI_API_KEY,
+      "X-Stage5-Device-Id": deviceId,
+      "X-Stage5-Request-Key": requestKey,
     },
     body: JSON.stringify(payload),
     signal,
@@ -359,18 +378,28 @@ export async function callElevenLabsTranscribeFromR2({
   r2Url,
   language,
   webhookUrl,
+  webhookToken,
+  deviceId,
+  requestKey,
 }: {
   c: Context<any>;
   r2Url: string;
   language?: string;
   webhookUrl?: string;
+  webhookToken?: string;
+  deviceId: string;
+  requestKey: string;
 }): Promise<{ status: "processing" } | any> {
   const payload: any = { r2Url };
   if (language) {
     payload.language = language;
   }
   if (webhookUrl) {
+    if (!webhookToken) {
+      throw new Error("webhookToken is required when webhookUrl is provided");
+    }
     payload.webhookUrl = webhookUrl;
+    payload.webhookToken = webhookToken;
   }
 
   const relayResponse = await fetch(`${OPENAI_RELAY_URL}/transcribe-from-r2`, {
@@ -379,6 +408,8 @@ export async function callElevenLabsTranscribeFromR2({
       "Content-Type": "application/json",
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
+      "X-Stage5-Device-Id": deviceId,
+      "X-Stage5-Request-Key": requestKey,
     },
     body: JSON.stringify(payload),
   });
@@ -401,7 +432,10 @@ export async function callElevenLabsDubRelay({
   c,
   segments,
   voice,
+  format,
   signal,
+  deviceId,
+  requestKey,
 }: {
   c: Context<any>;
   segments: Array<{
@@ -412,7 +446,10 @@ export async function callElevenLabsDubRelay({
     targetDuration?: number;
   }>;
   voice: string;
+  format: SpeechFormat;
   signal?: AbortSignal;
+  deviceId: string;
+  requestKey: string;
 }) {
   const payload = {
     segments: segments.map((seg, idx) => ({
@@ -421,6 +458,7 @@ export async function callElevenLabsDubRelay({
       targetDuration: seg.targetDuration,
     })),
     voice,
+    format,
   };
 
   const resp = await fetch(`${OPENAI_RELAY_URL}/dub-elevenlabs`, {
@@ -429,6 +467,8 @@ export async function callElevenLabsDubRelay({
       "Content-Type": "application/json",
       "X-Relay-Secret": c.env.RELAY_SECRET,
       "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
+      "X-Stage5-Device-Id": deviceId,
+      "X-Stage5-Request-Key": requestKey,
     },
     body: JSON.stringify(payload),
     signal,
@@ -452,65 +492,5 @@ export async function callElevenLabsDubRelay({
       audioBase64: string;
       targetDuration?: number;
     }>;
-  };
-}
-
-/**
- * Call relay server for ElevenLabs voice cloning dubbing (full Dubbing API)
- */
-export async function callVoiceCloningRelay({
-  c,
-  fileBuffer,
-  fileName,
-  mimeType,
-  targetLanguage,
-  sourceLanguage,
-  numSpeakers,
-  dropBackgroundAudio = true,
-}: {
-  c: Context<any>;
-  fileBuffer: ArrayBuffer;
-  fileName: string;
-  mimeType: string;
-  targetLanguage: string;
-  sourceLanguage?: string;
-  numSpeakers?: number;
-  dropBackgroundAudio?: boolean;
-}): Promise<{
-  audioBase64: string;
-  transcript: string;
-  format: string;
-}> {
-  const formData = new FormData();
-  formData.append("file", new Blob([fileBuffer], { type: mimeType }), fileName);
-  formData.append("target_language", targetLanguage);
-  if (sourceLanguage) {
-    formData.append("source_language", sourceLanguage);
-  }
-  if (numSpeakers !== undefined) {
-    formData.append("num_speakers", String(numSpeakers));
-  }
-  formData.append("drop_background_audio", String(dropBackgroundAudio));
-
-  const resp = await fetch(`${OPENAI_RELAY_URL}/dub-video-elevenlabs`, {
-    method: "POST",
-    headers: {
-      "X-Relay-Secret": c.env.RELAY_SECRET,
-      "X-ElevenLabs-Key": c.env.ELEVENLABS_API_KEY,
-    },
-    body: formData,
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(
-      `Voice cloning relay error: ${resp.status} ${text || resp.statusText}`
-    );
-  }
-
-  return (await resp.json()) as {
-    audioBase64: string;
-    transcript: string;
-    format: string;
   };
 }

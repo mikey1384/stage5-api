@@ -2,13 +2,16 @@ import { Hono } from "hono";
 import { getCredits, getLedgerEntries } from "../lib/db";
 import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
 import { uuidSchema } from "../lib/schemas";
-import { getErrorMessage } from "../lib/middleware";
+import { bearerAuth, getErrorMessage, type AuthVariables } from "../lib/middleware";
 
-const router = new Hono();
+const router = new Hono<{ Variables: AuthVariables }>();
+
+router.use("*", bearerAuth());
 
 // Get credits for a device
 router.get("/:deviceId", async (c) => {
   const deviceId = c.req.param("deviceId");
+  const user = c.get("user");
 
   // Validate UUID format
   const parsed = uuidSchema.safeParse(deviceId);
@@ -20,6 +23,10 @@ router.get("/:deviceId", async (c) => {
       },
       400
     );
+  }
+
+  if (user.deviceId !== deviceId) {
+    return c.json({ error: "Forbidden" }, 403);
   }
 
   try {
@@ -61,6 +68,7 @@ router.get("/:deviceId", async (c) => {
 // Get ledger entries for a device
 router.get("/:deviceId/ledger", async (c) => {
   const deviceId = c.req.param("deviceId");
+  const user = c.get("user");
 
   // Validate UUID format
   const parsed = uuidSchema.safeParse(deviceId);
@@ -72,6 +80,10 @@ router.get("/:deviceId/ledger", async (c) => {
       },
       400
     );
+  }
+
+  if (user.deviceId !== deviceId) {
+    return c.json({ error: "Forbidden" }, 403);
   }
 
   try {

@@ -1,0 +1,3 @@
+-- Intentionally left blank.
+-- Pending device-token replay now re-derives credentials from a stable
+-- server-side device-token secret instead of persisting raw pending tokens.

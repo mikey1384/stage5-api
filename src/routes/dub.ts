@@ -1,5 +1,5 @@
 import { Hono, Context } from "hono";
-import { cors } from "hono/cors";
+import crypto from "node:crypto";
 import { z } from "zod";
 import {
   ALLOWED_SPEECH_MODELS,
@@ -11,25 +11,42 @@ import {
   DEFAULT_SPEECH_VOICE,
   DEFAULT_SPEECH_FORMAT,
   SpeechFormat,
-  MAX_FILE_SIZE,
 } from "../lib/constants";
-import { deductTTSCredits, deductVoiceCloningCredits } from "../lib/db";
+import {
+  reserveBillingCredits,
+  releaseBillingReservation,
+  settleBillingReservation,
+} from "../lib/db";
 import {
   callDubRelay,
   callSpeechDirect,
   callElevenLabsDubRelay,
-  callVoiceCloningRelay,
 } from "../lib/openai-config";
 import {
   type TTSModel,
   estimateDubbingCredits,
-  estimateVoiceCloningCredits,
-  getVoiceCloningCreditsPerMinute,
-  TTS_PRICES,
 } from "../lib/pricing";
 import {
+  createJsonReplayEntry,
+  deleteStoredJsonReplayArtifact,
+  extractStoredJsonReplayEnvelope,
+  parseReplayMeta,
+  pruneJsonReplayCache,
+  resolveStoredJsonReplay,
+  storeSuccessJsonReplayArtifact,
+  settleJsonReplayEntry,
+  type JsonReplayEntry,
+  type JsonReplayResult,
+  type StoredJsonReplayResult,
+} from "../lib/json-replay";
+import {
+  createDirectRequestLease,
+  persistDirectReplayOrRelease,
+  recoverOrRestartDuplicateReservation,
+  startDirectRequestLeaseHeartbeat,
+} from "../lib/direct-request-recovery";
+import {
   bearerAuth,
-  getErrorMessage,
   type AuthVariables,
 } from "../lib/middleware";
 import {
@@ -43,6 +60,12 @@ const MAX_TOTAL_SEGMENT_CHARACTERS = 80_000;
 const MAX_SEGMENTS_PER_REQUEST = 240;
 const FALLBACK_SEGMENT_CONCURRENCY = 4;
 const HD_ONLY_VOICES = new Set<string>();
+const DUB_RESERVATION_SCOPE = "dub-billing-v2";
+const DUB_REPLAY_TTL_MS = Math.max(
+  1_000,
+  Number.parseInt(process.env.DUB_REPLAY_TTL_MS || String(10 * 60 * 1_000), 10)
+);
+const dubReplayCache = new Map<string, JsonReplayEntry>();
 
 function normalizeSegmentText(raw?: string | null): string {
   if (!raw) {
@@ -70,6 +93,228 @@ function normalizeSegmentText(raw?: string | null): string {
   return collapsed;
 }
 
+function buildDubReservationKey({
+  requestIdempotencyKey,
+  payload,
+}: {
+  requestIdempotencyKey?: string;
+  payload: unknown;
+}): string {
+  return (
+    buildScopedIdempotencyKey({
+      scope: DUB_RESERVATION_SCOPE,
+      requestIdempotencyKey,
+      payload,
+    }) || `${DUB_RESERVATION_SCOPE}:${crypto.randomUUID()}`
+  );
+}
+
+function buildDuplicateDirectDubResponse({
+  reservationStatus,
+  replayResult,
+}: {
+  reservationStatus: "reserved" | "settled" | "released";
+  replayResult: JsonReplayResult | null;
+}): JsonReplayResult {
+  if (reservationStatus === "settled" && replayResult) {
+    return replayResult;
+  }
+
+  return {
+    kind: "error",
+    status: 409,
+    body: {
+      error: "duplicate-request-in-progress",
+      message: "A dub request with this idempotency key is already in progress.",
+    },
+  };
+}
+
+function buildStoredDubReplayMeta(
+  storedReplay: StoredJsonReplayResult | null,
+): Record<string, unknown> {
+  if (!storedReplay) {
+    return {};
+  }
+  return {
+    directReplayResult: storedReplay,
+  };
+}
+
+async function loadStoredDubReplay({
+  bucket,
+  storedReplay,
+}: {
+  bucket: R2Bucket;
+  storedReplay: StoredJsonReplayResult | null;
+}): Promise<JsonReplayResult | null> {
+  return resolveStoredJsonReplay({
+    bucket,
+    storedReplay,
+  });
+}
+
+type PendingDirectDubFinalize = {
+  actualSpend: number;
+  settlementMeta: Record<string, unknown>;
+};
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function extractPendingDirectDubFinalize(
+  reservationMeta: unknown
+): PendingDirectDubFinalize | null {
+  const metaObject = asObject(reservationMeta);
+  const pendingObject = asObject(metaObject?.pendingFinalize);
+  const settlementMeta = asObject(pendingObject?.settlementMeta);
+  const actualSpend = Number(pendingObject?.actualSpend);
+  if (!settlementMeta || !Number.isFinite(actualSpend) || actualSpend < 0) {
+    return null;
+  }
+
+  return {
+    actualSpend,
+    settlementMeta,
+  };
+}
+
+async function resolveDuplicateDirectDubReservation({
+  bucket,
+  deviceId,
+  requestKey,
+  reservation,
+}: {
+  bucket: R2Bucket;
+  deviceId: string;
+  requestKey: string;
+  reservation: {
+    status: "reserved" | "settled" | "released";
+    meta: string | null;
+    updatedAt: string | null;
+  };
+}): Promise<
+  | { action: "retry-reserve" }
+  | { action: "respond"; replay: JsonReplayResult; cacheSuccess?: boolean }
+> {
+  const storedReplay = extractStoredJsonReplayEnvelope(
+    parseReplayMeta(reservation.meta)
+  );
+  const replayResult = await loadStoredDubReplay({
+    bucket,
+    storedReplay,
+  });
+  if (reservation.status === "released") {
+    return { action: "retry-reserve" };
+  }
+  if (reservation.status === "settled" && replayResult) {
+    return {
+      action: "respond",
+      replay: replayResult,
+      cacheSuccess: replayResult.kind === "success",
+    };
+  }
+
+  const pendingFinalize = extractPendingDirectDubFinalize(
+    parseReplayMeta(reservation.meta)
+  );
+  if (replayResult && pendingFinalize) {
+    const settled = await settleBillingReservation({
+      deviceId,
+      service: "tts",
+      requestKey,
+      actualSpend: pendingFinalize.actualSpend,
+      reason: "DUB",
+      meta: {
+        ...pendingFinalize.settlementMeta,
+        ...buildStoredDubReplayMeta(storedReplay),
+        pendingFinalize: null,
+      },
+    });
+    if (settled.ok) {
+      return {
+        action: "respond",
+        replay: replayResult,
+        cacheSuccess: replayResult.kind === "success",
+      };
+    }
+
+    return {
+      action: "respond",
+      replay: {
+        kind: "error",
+        status: settled.error === "actual-spend-exceeds-reserve" ? 409 : 500,
+        body: {
+          error: settled.error,
+          message: "Failed to finalize dubbing billing",
+        },
+      },
+    };
+  }
+
+  const recovery = await recoverOrRestartDuplicateReservation({
+    deviceId,
+    requestKey,
+    service: "tts",
+    reservation: {
+      status: reservation.status,
+      meta: reservation.meta,
+      updated_at: reservation.updatedAt,
+    },
+    releaseReason: "DUB",
+    releaseMeta: {
+      recoveryReason: "stale-direct-dub-retry",
+    },
+  });
+  if (!recovery.ok) {
+    return {
+      action: "respond",
+      replay: {
+        kind: "error",
+        status: recovery.status,
+        body: {
+          error:
+            recovery.status === 409
+              ? "duplicate-request-in-progress"
+              : "duplicate-request-recovery-failed",
+          message: recovery.error,
+        },
+      },
+    };
+  }
+
+  if (recovery.action === "retry-reserve") {
+    return { action: "retry-reserve" };
+  }
+
+  const settledStoredReplay = extractStoredJsonReplayEnvelope(
+    parseReplayMeta(recovery.reservationMeta)
+  );
+  const settledReplay = await loadStoredDubReplay({
+    bucket,
+    storedReplay: settledStoredReplay,
+  });
+  if (settledReplay?.kind === "success") {
+    return {
+      action: "respond",
+      replay: settledReplay,
+      cacheSuccess: true,
+    };
+  }
+
+  return {
+    action: "respond",
+    replay: buildDuplicateDirectDubResponse({
+      reservationStatus: "settled",
+      replayResult: settledReplay,
+    }),
+  };
+}
+
 const segmentSchema = z.object({
   start: z.number().optional(),
   end: z.number().optional(),
@@ -93,29 +338,6 @@ const router = new Hono<{
   Bindings: Stage5ApiBindings;
   Variables: AuthVariables;
 }>();
-
-router.use(
-  "*",
-  cors({
-    origin: "*",
-    allowMethods: ["POST", "OPTIONS"],
-    allowHeaders: [
-      "Content-Type",
-      "Authorization",
-      "Idempotency-Key",
-      "X-Idempotency-Key",
-    ],
-  })
-);
-
-router.options(
-  "*",
-  () =>
-    new Response("", {
-      status: 204,
-      headers: { "Content-Type": "text/plain" },
-    })
-);
 
 // Use shared auth middleware
 router.use("*", bearerAuth());
@@ -176,190 +398,31 @@ router.post("/estimate", async (c) => {
   }
 });
 
-/**
- * POST /voice-clone
- * Voice cloning dubbing using ElevenLabs Dubbing API
- * Expects multipart form data with audio/video file
- */
-router.post("/voice-clone", async (c) => {
-  const user = c.get("user");
-  const requestIdempotencyKey = getRequestIdempotencyKey(c);
-
-  try {
-    const formData = await c.req.formData();
-    const file = formData.get("file") as File | null;
-    const targetLanguage = formData.get("target_language") as string | null;
-    const sourceLanguage = formData.get("source_language") as string | null;
-    const durationSecondsStr = formData.get("duration_seconds") as
-      | string
-      | null;
-    const numSpeakersStr = formData.get("num_speakers") as string | null;
-    const dropBackgroundAudioStr = formData.get("drop_background_audio") as
-      | string
-      | null;
-
-    if (!file) {
-      return c.json(
-        { error: API_ERRORS.INVALID_REQUEST, message: "No file provided" },
-        400
-      );
-    }
-
-    // File size limit check
-    if (file.size > MAX_FILE_SIZE) {
-      return c.json(
-        {
-          error: API_ERRORS.FILE_TOO_LARGE,
-          message: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`,
-        },
-        400
-      );
-    }
-
-    if (!targetLanguage) {
-      return c.json(
-        {
-          error: API_ERRORS.INVALID_REQUEST,
-          message: "target_language is required",
-        },
-        400
-      );
-    }
-
-    // Parse duration (required for credit pre-check)
-    const durationSeconds = durationSecondsStr
-      ? parseFloat(durationSecondsStr)
-      : 0;
-    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-      return c.json(
-        {
-          error: API_ERRORS.INVALID_REQUEST,
-          message: "duration_seconds must be a positive number",
-        },
-        400
-      );
-    }
-
-    // Pre-check credits
-    const { credits: estimatedCredits } = estimateVoiceCloningCredits({
-      durationSeconds,
-    });
-    if (user.creditBalance < estimatedCredits) {
-      return c.json(
-        {
-          error: API_ERRORS.INSUFFICIENT_CREDITS,
-          message: `Insufficient credits. Required: ${estimatedCredits}, Available: ${user.creditBalance}`,
-          required: estimatedCredits,
-          available: user.creditBalance,
-        },
-        402
-      );
-    }
-
-    const numSpeakersRaw = numSpeakersStr
-      ? parseInt(numSpeakersStr, 10)
-      : undefined;
-    const numSpeakers =
-      numSpeakersRaw !== undefined &&
-      Number.isFinite(numSpeakersRaw) &&
-      numSpeakersRaw > 0
-        ? numSpeakersRaw
-        : undefined;
-    const dropBackgroundAudio = dropBackgroundAudioStr !== "false";
-
-    console.log(
-      `[voice-clone] Starting for ${user.deviceId}: ${file.name} (${(
-        file.size /
-        1024 /
-        1024
-      ).toFixed(1)}MB) → ${targetLanguage}, est credits: ${estimatedCredits}`
-    );
-
-    // Call the relay
-    const fileBuffer = await file.arrayBuffer();
-    const result = await callVoiceCloningRelay({
-      c,
-      fileBuffer,
-      fileName: file.name,
-      mimeType: file.type || "video/mp4",
-      targetLanguage,
-      sourceLanguage: sourceLanguage || undefined,
-      numSpeakers,
-      dropBackgroundAudio,
-    });
-
-    // Deduct credits on success
-    const billingIdempotencyKey = buildScopedIdempotencyKey({
-      scope: "voice-clone-billing-v1",
-      requestIdempotencyKey,
-      payload: {
-        deviceId: user.deviceId,
-        durationSeconds,
-        targetLanguage,
-        sourceLanguage: sourceLanguage || null,
-        numSpeakers: numSpeakers ?? null,
-        dropBackgroundAudio,
-      },
-    });
-    const ok = await deductVoiceCloningCredits({
-      deviceId: user.deviceId,
-      durationSeconds,
-      meta: {
-        targetLanguage,
-        sourceLanguage,
-        fileName: file.name,
-        fileSize: file.size,
-      },
-      idempotencyKey: billingIdempotencyKey,
-    });
-
-    if (!ok) {
-      // This shouldn't happen if pre-check passed, but handle gracefully
-      console.error(
-        `[voice-clone] Credit deduction failed for ${user.deviceId}`
-      );
-      return c.json({ error: API_ERRORS.INSUFFICIENT_CREDITS }, 402);
-    }
-
-    console.log(
-      `[voice-clone] Success for ${user.deviceId}, deducted ${estimatedCredits} credits`
-    );
-
-    return c.json({
-      audioBase64: result.audioBase64,
-      transcript: result.transcript,
-      format: result.format,
-      durationSeconds,
-      creditsUsed: estimatedCredits,
-    });
-  } catch (error: any) {
-    console.error("[voice-clone] Error:", error);
-    return c.json(
-      {
-        error: "Voice cloning failed",
-        message: error?.message || "Unknown error",
-      },
-      500
-    );
-  }
-});
-
-/**
- * GET /voice-clone/pricing
- * Get voice cloning pricing info for UI display
- */
-router.get("/voice-clone/pricing", async (c) => {
-  const creditsPerMinute = getVoiceCloningCreditsPerMinute();
-  return c.json({
-    creditsPerMinute,
-    description:
-      "Voice cloning uses ElevenLabs Dubbing API to clone the original speaker's voice",
-  });
-});
-
 router.post("/", async (c) => {
   const user = c.get("user");
   const requestIdempotencyKey = getRequestIdempotencyKey(c);
+  let reservationRequestKey: string | null = null;
+  let reservationActive = false;
+  let stopDirectRequestLeaseHeartbeat: (() => void) | null = null;
+  let replayContext:
+    | { requestKey: string; entry: JsonReplayEntry }
+    | null = null;
+  const respondReplay = (
+    replay: JsonReplayResult,
+    cacheSuccess = replay.kind === "success"
+  ) => {
+    if (replayContext) {
+      settleJsonReplayEntry({
+        cache: dubReplayCache,
+        requestKey: replayContext.requestKey,
+        entry: replayContext.entry,
+        result: replay,
+        ttlMs: DUB_REPLAY_TTL_MS,
+        cacheSuccess,
+      });
+    }
+    return c.json(replay.body as any, replay.status as any);
+  };
 
   try {
     if (c.req.raw.signal?.aborted) {
@@ -508,6 +571,116 @@ router.post("/", async (c) => {
       normalizedFormat && ALLOWED_SPEECH_FORMATS.includes(normalizedFormat)
         ? normalizedFormat
         : DEFAULT_SPEECH_FORMAT;
+    const reserveModel: TTSModel =
+      chosenTtsProvider === "elevenlabs"
+        ? "eleven_multilingual_v2"
+        : chosenModel === HIGH_QUALITY_SPEECH_MODEL
+          ? HIGH_QUALITY_SPEECH_MODEL
+          : DEFAULT_SPEECH_MODEL;
+    const reservationPayload = {
+      deviceId: user.deviceId,
+      voice: chosenVoice,
+      model: chosenModel,
+      reserveModel,
+      format: chosenFormat,
+      quality: quality ?? "standard",
+      ttsProvider: chosenTtsProvider,
+      segments: sanitizedSegments.map((segment) => ({
+        index: segment.index,
+        text: segment.text,
+        start: segment.start ?? null,
+        end: segment.end ?? null,
+        targetDuration: segment.targetDuration ?? null,
+      })),
+    };
+    const requestKey = buildDubReservationKey({
+      requestIdempotencyKey,
+      payload: reservationPayload,
+    });
+    const directRequestLease = createDirectRequestLease();
+    reservationRequestKey = requestKey;
+    pruneJsonReplayCache(dubReplayCache);
+    const existingReplay = dubReplayCache.get(requestKey);
+    if (existingReplay) {
+      const replay = existingReplay.result ?? (await existingReplay.promise);
+      return c.json(replay.body as any, replay.status as any);
+    }
+    const replayEntry = createJsonReplayEntry();
+    dubReplayCache.set(requestKey, replayEntry);
+    replayContext = { requestKey, entry: replayEntry };
+    const reserveSpend = estimateDubbingCredits({
+      characters: totalCharacters,
+      model: reserveModel,
+    }).credits;
+    let reserved: Awaited<ReturnType<typeof reserveBillingCredits>> | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      reserved = await reserveBillingCredits({
+        deviceId: user.deviceId,
+        service: "tts",
+        requestKey,
+        spend: reserveSpend,
+        reason: "DUB_RESERVE",
+        meta: {
+          ...reservationPayload,
+          totalCharacters,
+          reserveSpend,
+          directRequestLease,
+        },
+      });
+      if (!reserved.ok) {
+        return respondReplay({
+          kind: "error",
+          status: 402,
+          body: { error: API_ERRORS.INSUFFICIENT_CREDITS },
+        });
+      }
+      if (reserved.status === "reserved") {
+        break;
+      }
+      if (
+        reserved.reservation.status !== "reserved" &&
+        reserved.reservation.status !== "settled" &&
+        reserved.reservation.status !== "released"
+      ) {
+        throw new Error(
+          `Unexpected duplicate dub reservation status: ${reserved.reservation.status}`
+        );
+      }
+
+      const duplicateResolution = await resolveDuplicateDirectDubReservation({
+        bucket: c.env.TRANSCRIPTION_BUCKET,
+        deviceId: user.deviceId,
+        requestKey,
+        reservation: {
+          status: reserved.reservation.status,
+          meta: reserved.reservation.meta,
+          updatedAt: reserved.reservation.updated_at,
+        },
+      });
+      if (duplicateResolution.action === "respond") {
+        return respondReplay(
+          duplicateResolution.replay,
+          duplicateResolution.cacheSuccess
+        );
+      }
+    }
+    if (!reserved || !reserved.ok || reserved.status !== "reserved") {
+      return respondReplay({
+        kind: "error",
+        status: 409,
+        body: {
+          error: "duplicate-request-in-progress",
+          message: "A dub request with this idempotency key is already in progress.",
+        },
+      });
+    }
+    reservationActive = true;
+    stopDirectRequestLeaseHeartbeat = startDirectRequestLeaseHeartbeat({
+      deviceId: user.deviceId,
+      requestKey,
+      service: "tts",
+      lease: directRequestLease,
+    });
 
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => abortController.abort(), 300000);
@@ -529,22 +702,41 @@ router.post("/", async (c) => {
         format: chosenFormat,
         signal: abortController.signal,
         ttsProvider: chosenTtsProvider,
+        deviceId: user.deviceId,
+        requestKey,
       });
     } catch (synthesisError: any) {
       clearTimeout(timeoutId);
-
       if (abortController.signal.aborted) {
         const wasCancelled = c.req.raw.signal?.aborted;
-        return c.json(
-          {
+        console.warn(
+          `[dub] preserving reservation after ${
+            wasCancelled ? "client cancel" : "timeout"
+          } for requestKey=${requestKey}; retry will reuse or stale-recover the existing lease`
+        );
+        return respondReplay({
+          kind: "error",
+          status: 408,
+          body: {
             error: wasCancelled ? "Request cancelled" : "Request timeout",
             message: wasCancelled
               ? "Request was cancelled by client"
               : "Request exceeded timeout limit",
           },
-          408
-        );
+        });
       }
+
+      await releaseBillingReservation({
+        deviceId: user.deviceId,
+        service: "tts",
+        requestKey,
+        reason: "DUB",
+        meta: {
+          reason: "synthesis-error",
+          message: synthesisError?.message || String(synthesisError),
+        },
+      });
+      reservationActive = false;
 
       throw synthesisError;
     } finally {
@@ -555,6 +747,14 @@ router.post("/", async (c) => {
       !relayResult ||
       (!relayResult.audioBase64 && !relayResult.segments?.length)
     ) {
+      await releaseBillingReservation({
+        deviceId: user.deviceId,
+        service: "tts",
+        requestKey,
+        reason: "DUB",
+        meta: { reason: "empty-audio-result" },
+      });
+      reservationActive = false;
       throw new Error("Dub synthesis returned no audio segments");
     }
 
@@ -577,54 +777,13 @@ router.post("/", async (c) => {
       ttsModelForPricing = DEFAULT_SPEECH_MODEL;
     }
 
-    const ok = await deductTTSCredits({
-      deviceId: user.deviceId,
+    const actualSpend = estimateDubbingCredits({
       characters: totalCharacters,
       model: ttsModelForPricing,
-      meta: {
-        approxSeconds,
-        usedRelay,
-        ttsProvider: chosenTtsProvider,
-        openaiModel: chosenModel,
-        quality: quality ?? "standard",
-      },
-      idempotencyKey: buildScopedIdempotencyKey({
-        scope: "dub-billing-v1",
-        requestIdempotencyKey,
-        payload: {
-          deviceId: user.deviceId,
-          voice: chosenVoice,
-          model: chosenModel,
-          ttsModelForPricing,
-          format: chosenFormat,
-          quality: quality ?? "standard",
-          ttsProvider: chosenTtsProvider,
-          segments: sanitizedSegments.map((segment) => ({
-            index: segment.index,
-            text: segment.text,
-            start: segment.start ?? null,
-            end: segment.end ?? null,
-            targetDuration: segment.targetDuration ?? null,
-          })),
-        },
-      }),
-    });
-
-    if (!ok) {
-      return c.json({ error: API_ERRORS.INSUFFICIENT_CREDITS }, 402);
-    }
-
+    }).credits;
     const segmentCount =
       relayResult.segmentCount ?? relayResult.segments?.length ?? 0;
-    const chunkCount = relayResult.chunkCount ?? (segmentCount || undefined);
-
-    console.log(
-      `[dub] success for ${user.deviceId} provider=${
-        relayResult.usedElevenLabs ? "elevenlabs" : "openai"
-      } chars=${totalCharacters} segments=${segmentCount}`
-    );
-
-    return c.json({
+    const responsePayload = {
       audioBase64: relayResult.audioBase64,
       segments: relayResult.segments,
       voice: relayResult.voice ?? chosenVoice,
@@ -636,26 +795,132 @@ router.post("/", async (c) => {
       approxSeconds,
       usedRelay,
       usedElevenLabs: relayResult.usedElevenLabs ?? false,
-      chunkCount,
+      chunkCount: relayResult.chunkCount ?? (segmentCount || undefined),
       segmentCount,
+    };
+    const replaySuccess: JsonReplayResult = {
+      kind: "success",
+      status: 200,
+      body: responsePayload,
+    };
+    const settlementMeta = {
+      approxSeconds,
+      usedRelay,
+      ttsProvider: chosenTtsProvider,
+      openaiModel: chosenModel,
+      quality: quality ?? "standard",
+      totalCharacters,
+      billedModel: ttsModelForPricing,
+    };
+    const pendingFinalize: PendingDirectDubFinalize = {
+      actualSpend,
+      settlementMeta,
+    };
+    const storedReplaySuccess = await storeSuccessJsonReplayArtifact({
+      bucket: c.env.TRANSCRIPTION_BUCKET,
+      service: "tts",
+      deviceId: user.deviceId,
+      requestKey,
+      replay: replaySuccess,
+    });
+    const persistResult = await persistDirectReplayOrRelease({
+      deviceId: user.deviceId,
+      requestKey,
+      service: "tts",
+      replayResult: storedReplaySuccess,
+      pendingFinalize,
+      releaseReason: "DUB",
+    });
+    if (!persistResult.ok) {
+      await deleteStoredJsonReplayArtifact({
+        bucket: c.env.TRANSCRIPTION_BUCKET,
+        storedReplay: storedReplaySuccess,
+      });
+      if (persistResult.released) {
+        reservationActive = false;
+      }
+      return respondReplay({
+        kind: "error",
+        status: persistResult.status,
+        body: {
+          error: persistResult.error,
+          message: persistResult.details || "Failed to persist dub replay",
+        },
+      });
+    }
+    const settled = await settleBillingReservation({
+      deviceId: user.deviceId,
+      service: "tts",
+      requestKey,
+      actualSpend,
+      reason: "DUB",
+      meta: {
+        ...settlementMeta,
+        actualSpend,
+        ...buildStoredDubReplayMeta(storedReplaySuccess),
+        pendingFinalize: null,
+      },
+    });
+    if (settled.ok) {
+      reservationActive = false;
+    }
+
+    if (!settled.ok) {
+      return respondReplay({
+        kind: "error",
+        status:
+          settled.error === "actual-spend-exceeds-reserve" ? 409 : 500,
+        body: { error: settled.error },
+      });
+    }
+
+    console.log(
+      `[dub] success for ${user.deviceId} provider=${
+        relayResult.usedElevenLabs ? "elevenlabs" : "openai"
+      } chars=${totalCharacters} segments=${segmentCount}`
+    );
+
+    return respondReplay({
+      kind: "success",
+      status: 200,
+      body: responsePayload,
     });
   } catch (error: any) {
     console.error("Error generating dub:", error);
 
     if (c.req.raw.signal?.aborted) {
-      return c.json(
-        { error: "Request cancelled", message: "Request was cancelled" },
-        408
+      console.warn(
+        `[dub] preserving reservation after outer-route cancel for requestKey=${reservationRequestKey ?? "unknown"}; retry will reuse or stale-recover the existing lease`
       );
+      return respondReplay({
+        kind: "error",
+        status: 408,
+        body: { error: "Request cancelled", message: "Request was cancelled" },
+      });
     }
 
-    return c.json(
-      {
+    if (reservationRequestKey && reservationActive) {
+      await releaseBillingReservation({
+        deviceId: user.deviceId,
+        service: "tts",
+        requestKey: reservationRequestKey,
+        reason: "DUB",
+        meta: { reason: "route-error" },
+      }).catch(() => {});
+      reservationActive = false;
+    }
+
+    return respondReplay({
+      kind: "error",
+      status: 500,
+      body: {
         error: "Failed to generate dub",
         message: error?.message || "Unknown error",
       },
-      500
-    );
+    });
+  } finally {
+    stopDirectRequestLeaseHeartbeat?.();
+    stopDirectRequestLeaseHeartbeat = null;
   }
 });
 
@@ -724,6 +989,8 @@ interface SynthRequest {
   format: SpeechFormat;
   signal: AbortSignal;
   ttsProvider: "openai" | "elevenlabs";
+  deviceId: string;
+  requestKey: string;
 }
 
 interface SynthResult {
@@ -751,6 +1018,8 @@ async function synthesizeDubWithFallback({
   format,
   signal,
   ttsProvider,
+  deviceId,
+  requestKey,
 }: SynthRequest): Promise<SynthResult> {
   // Route based on user's provider preference
   if (ttsProvider === "elevenlabs") {
@@ -760,7 +1029,10 @@ async function synthesizeDubWithFallback({
         c,
         segments: sanitizedSegments,
         voice,
+        format,
         signal,
+        deviceId,
+        requestKey,
       });
       console.log(
         `[dub] ElevenLabs TTS succeeded, segments=${sanitizedSegments.length}`
@@ -791,6 +1063,8 @@ async function synthesizeDubWithFallback({
         model,
         format,
         signal,
+        deviceId,
+        requestKey,
       });
     }
   } else {
@@ -803,6 +1077,8 @@ async function synthesizeDubWithFallback({
       model,
       format,
       signal,
+      deviceId,
+      requestKey,
     });
   }
 }
@@ -815,6 +1091,8 @@ async function synthesizeWithOpenAI({
   model,
   format,
   signal,
+  deviceId,
+  requestKey,
 }: Omit<SynthRequest, "ttsProvider">): Promise<SynthResult> {
   try {
     const relayResponse = await callDubRelay({
@@ -825,6 +1103,8 @@ async function synthesizeWithOpenAI({
       model,
       format,
       signal,
+      deviceId,
+      requestKey,
     });
     return { ...relayResponse, usedRelay: true, usedElevenLabs: false };
   } catch (relayError: any) {

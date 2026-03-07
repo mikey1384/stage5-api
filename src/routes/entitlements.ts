@@ -1,33 +1,19 @@
 import { Hono } from "hono";
 import { getEntitlementsRecord } from "../lib/db";
 import { uuidSchema } from "../lib/schemas";
-import { getErrorMessage } from "../lib/middleware";
+import {
+  bearerAuth,
+  getErrorMessage,
+  type AuthVariables,
+} from "../lib/middleware";
 
-type Variables = {
-  authDeviceId: string;
-};
+const router = new Hono<{ Variables: AuthVariables }>();
 
-const router = new Hono<{ Variables: Variables }>();
+router.use("*", bearerAuth());
 
-router.use("*", async (c, next) => {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json({ error: "Missing authorization" }, 401);
-  }
-
-  const token = authHeader.slice(7);
-  try {
-    uuidSchema.parse(token);
-  } catch {
-    return c.json({ error: "Invalid Authorization token" }, 400);
-  }
-
-  c.set("authDeviceId", token);
-  await next();
-});
-
-router.get("/:deviceId", async c => {
+router.get("/:deviceId", async (c) => {
   const deviceId = c.req.param("deviceId");
+  const user = c.get("user");
 
   try {
     uuidSchema.parse(deviceId);
@@ -41,18 +27,15 @@ router.get("/:deviceId", async c => {
     );
   }
 
-  const authDeviceId = c.get("authDeviceId");
-  if (authDeviceId !== deviceId) {
+  if (user.deviceId !== deviceId) {
     return c.json({ error: "Forbidden" }, 403);
   }
 
   try {
     const record = await getEntitlementsRecord({ deviceId });
     const byoOpenAi = Boolean(record?.byo_openai);
-    // BYO unlock grants OpenAI, Anthropic, and ElevenLabs (single $10 purchase)
-    // If user has OpenAI unlocked, they also get the others (for existing users who paid before new provider support)
     const byoAnthropic = Boolean(record?.byo_anthropic) || byoOpenAi;
-    const byoElevenLabs = byoOpenAi; // ElevenLabs included with BYO unlock
+    const byoElevenLabs = byoOpenAi;
 
     return c.json({
       deviceId,

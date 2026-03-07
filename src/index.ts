@@ -14,9 +14,11 @@ import entitlementsRouter from "./routes/entitlements";
 import authRouter from "./routes/auth";
 import { ensureDatabase } from "./lib/db";
 import { runReconciliation } from "./lib/reconciliation";
+import { minimumTranslatorVersionGate } from "./lib/translator-version-gate";
 import type { Stage5ApiBindings } from "./types/env";
 
 const app = new Hono<{ Bindings: Stage5ApiBindings }>();
+const translatorVersionGate = minimumTranslatorVersionGate();
 
 // Middleware that does NOT consume the body
 app.use("*", logger());
@@ -39,6 +41,7 @@ app.use(
       "Idempotency-Key",
       "X-Idempotency-Key",
       "X-Request-Id",
+      "X-Stage5-App-Version",
     ],
     allowMethods: ["GET", "POST", "OPTIONS"],
     exposeHeaders: ["X-Request-Id"],
@@ -51,6 +54,23 @@ app.get("/health", (c) => c.json({ status: "ok", ts: Date.now() }));
 
 // Webhook first - needs raw body before any middleware consumes it
 app.route("/stripe/webhook", webhookRouter);
+
+// Translator desktop compatibility gate. Keep internal relay/webhook paths
+// outside this gate. /auth/authorize performs its own version enforcement so
+// it can honor the legacy body.appVersion fallback without the middleware
+// rejecting the request before the route reads the JSON body.
+app.use("/auth/device-token", translatorVersionGate);
+app.use("/payments/create-session", translatorVersionGate);
+app.use("/payments/create-byo-unlock", translatorVersionGate);
+app.use("/payments/session/*", translatorVersionGate);
+app.use("/credits/*", translatorVersionGate);
+app.use("/entitlements/*", translatorVersionGate);
+app.use("/transcribe", translatorVersionGate);
+app.use("/transcribe/*", translatorVersionGate);
+app.use("/translate", translatorVersionGate);
+app.use("/translate/*", translatorVersionGate);
+app.use("/dub", translatorVersionGate);
+app.use("/dub/*", translatorVersionGate);
 
 // Auth router for relay (uses X-Relay-Secret, not bearer auth)
 app.route("/auth", authRouter);

@@ -8,7 +8,9 @@ export type Stage5ApiBindings = {
   ANTHROPIC_API_KEY?: string;
   ELEVENLABS_API_KEY?: string;
   RELAY_SECRET: string;
+  DEVICE_TOKEN_SECRET?: string;
   ALLOWED_ORIGINS?: string;
+  ADMIN_API_SECRET?: string;
   ADMIN_DEVICE_ID?: string;
   RECONCILE_CRON_ENABLED?: string;
   RECONCILE_CRON_DRY_RUN?: string;
@@ -25,6 +27,9 @@ export type Stage5ApiBindings = {
   RELAY_TRANSLATION_GLOBAL_MAX_PENDING?: string;
   RELAY_TRANSLATION_USER_RATE_WINDOW_SEC?: string;
   RELAY_TRANSLATION_USER_RATE_MAX_REQUESTS?: string;
+  MIN_TRANSLATOR_VERSION?: string;
+  MIN_TRANSLATOR_VERSION_ENFORCEMENT?: string;
+  TRANSLATOR_DOWNLOAD_URL?: string;
 };
 
 export type RelayTranslationBindings = Pick<

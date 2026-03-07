@@ -10,6 +10,7 @@ import {
 export const USD_PER_CREDIT = 10 / 350_000;
 export const MARGIN = 2;
 export const CREDITS_PER_AUDIO_HOUR = 18_900; // ~12,600 base × 1.5x overhead
+export const WEB_SEARCH_USD_PER_CALL = 10 / 1_000; // $10 / 1K calls
 
 export const MODEL_PRICES = {
   ...STAGE5_TRANSLATION_MODEL_PRICES,
@@ -90,6 +91,18 @@ export function tokensToCredits({
   return Math.ceil(credits * TOKEN_CREDIT_CALIBRATION);
 }
 
+export function webSearchCallsToCredits({
+  calls,
+}: {
+  calls: number;
+}): number {
+  const normalizedCalls = Math.max(0, Math.ceil(calls));
+  if (normalizedCalls === 0) return 0;
+  const usd = normalizedCalls * WEB_SEARCH_USD_PER_CALL;
+  const credits = (usd * MARGIN) / USD_PER_CREDIT;
+  return Math.ceil(credits * TOKEN_CREDIT_CALIBRATION);
+}
+
 /**
  * Convert character count to credits for TTS models
  */
@@ -134,30 +147,4 @@ export function estimateDubbingCredits({
  */
 export function getAllowedTTSModels(): TTSModel[] {
   return Object.keys(TTS_PRICES) as TTSModel[];
-}
-
-// Voice cloning pricing (ElevenLabs Dubbing API)
-// ElevenLabs charges ~$0.50/min, we add MARGIN for Stage5 credits
-const VOICE_CLONING_USD_PER_MINUTE = 0.50;
-
-/**
- * Estimate credits for voice cloning dubbing (duration-based, not character-based)
- */
-export function estimateVoiceCloningCredits({
-  durationSeconds,
-}: {
-  durationSeconds: number;
-}): { credits: number; usdEstimate: number } {
-  const minutes = durationSeconds / 60;
-  const usd = minutes * VOICE_CLONING_USD_PER_MINUTE;
-  const credits = Math.ceil((usd * MARGIN) / USD_PER_CREDIT);
-  return { credits, usdEstimate: usd };
-}
-
-/**
- * Get credits per minute for voice cloning (for UI display)
- */
-export function getVoiceCloningCreditsPerMinute(): number {
-  const usdPerMinute = VOICE_CLONING_USD_PER_MINUTE;
-  return Math.ceil((usdPerMinute * MARGIN) / USD_PER_CREDIT);
 }

@@ -29,3 +29,7 @@ export function resolveTranslationBillingIdempotencyKey({
     .slice(0, 24);
   return `${scopedBaseKey}:req:${fingerprint}`;
 }
+
+export function buildTranslationReservationKey(jobId: string): string {
+  return `translation-job:${jobId}`;
+}

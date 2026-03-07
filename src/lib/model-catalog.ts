@@ -3,6 +3,7 @@ function canonicalizeModelId(model?: string): string {
 }
 
 export const DEFAULT_STAGE5_TRANSLATION_MODEL = "gpt-5.1";
+export const STAGE5_REVIEW_TRANSLATION_MODEL = "gpt-5.4";
 export const STAGE5_WHISPER_MODEL = "whisper-1";
 export const STAGE5_ELEVENLABS_SCRIBE_MODEL = "elevenlabs-scribe";
 export const STAGE5_TTS_MODEL_STANDARD = "tts-1";
@@ -17,6 +18,10 @@ export const STAGE5_TRANSLATION_MODEL_PRICES = {
     in: 1.25 / 1_000_000, // $1.25 per million tokens
     out: 10 / 1_000_000, // $10.00 per million tokens
   },
+  "gpt-5.4": {
+    in: 2.5 / 1_000_000, // $2.50 per million tokens
+    out: 15 / 1_000_000, // $15.00 per million tokens
+  },
   "claude-opus-4-6": {
     in: 5 / 1_000_000, // $5.00 per million tokens
     out: 25 / 1_000_000, // $25.00 per million tokens
@@ -28,7 +33,8 @@ export const STAGE5_TRANSCRIPTION_MODEL_PRICES = {
     perSecond: 0.006 / 60, // $0.006 per minute = $0.36/hr
   },
   [STAGE5_ELEVENLABS_SCRIBE_MODEL]: {
-    perSecond: 0.27 / 3600, // ~1.35x margin on $0.40/hr to match translation rate
+    // ElevenLabs Pro API overage rate: $0.40 per additional hour.
+    perSecond: 0.40 / 3600,
   },
 } as const;
 
@@ -40,10 +46,12 @@ export const STAGE5_TTS_MODEL_PRICES = {
     perChar: 30 / 1_000_000, // $30 per 1M characters
   },
   "eleven_multilingual_v2": {
-    perChar: 200 / 1_000_000, // ~$200 per 1M characters (Pro tier estimate)
+    // ElevenLabs Pro highest-quality TTS overage rate: $0.18 per 1K chars.
+    perChar: 180 / 1_000_000,
   },
   "eleven_turbo_v2_5": {
-    perChar: 100 / 1_000_000, // ~$100 per 1M characters (50% cheaper than v2)
+    // ElevenLabs Pro turbo/flash TTS overage rate: $0.09 per 1K chars.
+    perChar: 90 / 1_000_000,
   },
 } as const;
 

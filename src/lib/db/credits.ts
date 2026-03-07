@@ -1,18 +1,31 @@
 import { type PackId, packs } from "../../types/packs";
 import {
   charactersToCredits,
-  estimateVoiceCloningCredits,
   secondsToCredits,
   tokensToCredits,
+  webSearchCallsToCredits,
   type TTSModel,
 } from "../pricing";
 import { DEFAULT_STAGE5_TRANSLATION_MODEL } from "../model-catalog";
 import { getDatabase } from "./core";
+import {
+  getUserByOpaqueApiToken,
+  isLikelyLegacyDeviceId,
+  getDeviceApiTokenRecord,
+} from "./api-tokens";
 
 export interface CreditRecord {
   device_id: string;
   credit_balance: number;
-  updated_at: string;
+  updated_at: string | null;
+}
+
+function buildZeroBalanceCreditRecord(deviceId: string): CreditRecord {
+  return {
+    device_id: deviceId,
+    credit_balance: 0,
+    updated_at: null,
+  };
 }
 
 export const getCredits = async ({
@@ -129,13 +142,36 @@ export const resetCreditsToZero = async ({
   }
 };
 
-// Get user by API key (which is the device_id)
+// Transitional auth lookup:
+// - Prefer opaque API tokens
+// - Fall back to legacy device-id bearer auth only for devices that have not
+//   been provisioned with an opaque token yet.
 export const getUserByApiKey = async ({
   apiKey,
 }: {
   apiKey: string;
 }): Promise<CreditRecord | null> => {
-  return getCredits({ deviceId: apiKey });
+  const normalized = String(apiKey || "").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const opaqueUser = await getUserByOpaqueApiToken({ apiToken: normalized });
+  if (opaqueUser) {
+    return opaqueUser;
+  }
+
+  if (!isLikelyLegacyDeviceId(normalized)) {
+    return null;
+  }
+
+  const existingToken = await getDeviceApiTokenRecord({ deviceId: normalized });
+  if (existingToken) {
+    return null;
+  }
+
+  const credits = await getCredits({ deviceId: normalized });
+  return credits ?? buildZeroBalanceCreditRecord(normalized);
 };
 
 /**
@@ -373,21 +409,34 @@ export const deductTranslationCredits = async ({
   promptTokens,
   completionTokens,
   model = DEFAULT_STAGE5_TRANSLATION_MODEL,
+  webSearchCalls = 0,
   idempotencyKey,
 }: {
   deviceId: string;
   promptTokens: number;
   completionTokens: number;
   model?: string;
+  webSearchCalls?: number;
   idempotencyKey?: string;
 }): Promise<boolean> => {
-  const spend = tokensToCredits({
+  const tokenSpend = tokensToCredits({
     prompt: promptTokens,
     completion: completionTokens,
     model,
   });
+  const searchSpend = webSearchCallsToCredits({
+    calls: webSearchCalls,
+  });
+  const spend = tokenSpend + searchSpend;
   const reason = "TRANSLATE";
-  const meta = { promptTokens, completionTokens, model };
+  const meta = {
+    promptTokens,
+    completionTokens,
+    model,
+    webSearchCalls: Math.max(0, Math.ceil(webSearchCalls)),
+    tokenSpend,
+    searchSpend,
+  };
   if (idempotencyKey) {
     return updateBalanceIdempotent(deviceId, spend, {
       reason,
@@ -458,36 +507,6 @@ export const deductTTSCredits = async ({
   const spend = charactersToCredits({ characters, model });
   const reason = "DUB";
   const billingMeta = { characters, model, ...(meta ?? {}) };
-  if (idempotencyKey) {
-    return updateBalanceIdempotent(deviceId, spend, {
-      reason,
-      meta: billingMeta,
-      idempotencyKey,
-    });
-  }
-  return updateBalance(deviceId, spend, {
-    reason,
-    meta: billingMeta,
-  });
-};
-
-/**
- * Deduct credits for voice cloning (ElevenLabs Dubbing API) based on duration
- */
-export const deductVoiceCloningCredits = async ({
-  deviceId,
-  durationSeconds,
-  meta,
-  idempotencyKey,
-}: {
-  deviceId: string;
-  durationSeconds: number;
-  meta?: Record<string, unknown>;
-  idempotencyKey?: string;
-}): Promise<boolean> => {
-  const { credits: spend } = estimateVoiceCloningCredits({ durationSeconds });
-  const reason = "VOICE_CLONE";
-  const billingMeta = { durationSeconds, ...(meta ?? {}) };
   if (idempotencyKey) {
     return updateBalanceIdempotent(deviceId, spend, {
       reason,

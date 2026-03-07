@@ -22,20 +22,33 @@ export const createTranscriptionJob = async ({
   deviceId,
   fileKey,
   language,
+  durationSeconds,
 }: {
   jobId: string;
   deviceId: string;
   fileKey: string;
   language?: string;
+  durationSeconds?: number | null;
 }): Promise<void> => {
   const db = getDatabase();
 
   const stmt = db.prepare(`
-    INSERT INTO transcription_jobs (job_id, device_id, status, file_key, language, created_at, updated_at)
-    VALUES (?, ?, 'pending_upload', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    INSERT INTO transcription_jobs (
+      job_id,
+      device_id,
+      status,
+      file_key,
+      language,
+      duration_seconds,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, 'pending_upload', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
   `);
 
-  await stmt.bind(jobId, deviceId, fileKey, language ?? null).run();
+  await stmt
+    .bind(jobId, deviceId, fileKey, language ?? null, durationSeconds ?? null)
+    .run();
 };
 
 export const getTranscriptionJob = async ({

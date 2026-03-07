@@ -2,8 +2,8 @@ import { Hono } from "hono";
 import type Stripe from "stripe";
 import { getStripe } from "../lib/stripe";
 import {
-  creditDevice,
-  grantByoOpenAiEntitlement,
+  fulfillByoOpenAiUnlock,
+  fulfillCreditPackPurchase,
   isEventProcessed,
   markEventProcessed,
 } from "../lib/db";
@@ -17,6 +17,21 @@ const isCheckoutSessionFulfilled = (
 ): boolean => {
   return paymentStatus === "paid" || paymentStatus === "no_payment_required";
 };
+
+function getPaymentIntentIdFromCheckoutSession(
+  session: Stripe.Checkout.Session
+): string | null {
+  const paymentIntent = session.payment_intent;
+  if (!paymentIntent) {
+    return null;
+  }
+
+  if (typeof paymentIntent === "string") {
+    return paymentIntent;
+  }
+
+  return paymentIntent.id ?? null;
+}
 
 router.post("/", async (c) => {
   const signature = c.req.header("stripe-signature");
@@ -53,13 +68,21 @@ router.post("/", async (c) => {
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object as Stripe.Checkout.Session;
-          await handleCheckoutPaid({ session, eventType: event.type });
+          await handleCheckoutPaid({
+            session,
+            eventId: event.id,
+            eventType: event.type,
+          });
           break;
         }
 
         case "checkout.session.async_payment_succeeded": {
           const session = event.data.object as Stripe.Checkout.Session;
-          await handleCheckoutPaid({ session, eventType: event.type });
+          await handleCheckoutPaid({
+            session,
+            eventId: event.id,
+            eventType: event.type,
+          });
           break;
         }
 
@@ -71,7 +94,7 @@ router.post("/", async (c) => {
 
         case "payment_intent.succeeded": {
           const paymentIntent = event.data.object as Stripe.PaymentIntent;
-          await handlePaymentSucceeded({ paymentIntent });
+          await handlePaymentSucceeded({ paymentIntent, eventId: event.id });
           break;
         }
 
@@ -106,9 +129,11 @@ router.post("/", async (c) => {
 });
 
 const handleCheckoutPaid = async ({
+  eventId,
   session,
   eventType,
 }: {
+  eventId: string;
   session: Stripe.Checkout.Session;
   eventType:
     | "checkout.session.completed"
@@ -134,12 +159,27 @@ const handleCheckoutPaid = async ({
     return;
   }
 
+  const paymentIntentId = getPaymentIntentIdFromCheckoutSession(session);
+
   if (entitlement === "byo_openai") {
     try {
-      await grantByoOpenAiEntitlement({ deviceId });
-      console.log(
-        `Granted BYO OpenAI entitlement to device ${deviceId} via ${eventType}`
-      );
+      const result = await fulfillByoOpenAiUnlock({
+        deviceId,
+        entitlement: "byo_openai",
+        checkoutSessionId: session.id,
+        paymentIntentId,
+        stripeEventId: eventId,
+        stripeEventType: eventType,
+      });
+      if (result === "duplicate") {
+        console.log(
+          `Skipped duplicate BYO OpenAI fulfillment for device ${deviceId} via ${eventType}`
+        );
+      } else {
+        console.log(
+          `Granted BYO OpenAI entitlement to device ${deviceId} via ${eventType}`
+        );
+      }
     } catch (error) {
       console.error("Error granting BYO entitlement:", error);
       throw error;
@@ -158,16 +198,24 @@ const handleCheckoutPaid = async ({
   }
 
   try {
-    await creditDevice({
+    const result = await fulfillCreditPackPurchase({
       deviceId,
       packId: packId as PackId,
-      meta: {
-        checkoutSessionId: session.id,
-        checkoutEventType: eventType,
-        stripePaymentStatus: session.payment_status ?? null,
-      },
+      checkoutSessionId: session.id,
+      paymentIntentId,
+      stripeEventId: eventId,
+      stripeEventType: eventType,
+      stripePaymentStatus: session.payment_status ?? null,
     });
-    console.log(`Successfully credited ${packId} to device ${deviceId} via ${eventType}`);
+    if (result === "duplicate") {
+      console.log(
+        `Skipped duplicate credit fulfillment for ${packId} to device ${deviceId} via ${eventType}`
+      );
+    } else {
+      console.log(
+        `Successfully credited ${packId} to device ${deviceId} via ${eventType}`
+      );
+    }
   } catch (error) {
     console.error("Error crediting device:", error);
     throw error;
@@ -186,24 +234,63 @@ const handleCheckoutAsyncPaymentFailed = async ({
 };
 
 const handlePaymentSucceeded = async ({
+  eventId,
   paymentIntent,
 }: {
+  eventId: string;
   paymentIntent: Stripe.PaymentIntent;
 }) => {
   console.log(`Payment succeeded: ${paymentIntent.id}`);
-  const { entitlement, deviceId } = paymentIntent.metadata || {};
+  const { entitlement, deviceId, packId } = paymentIntent.metadata || {};
   if (entitlement === "byo_openai" && deviceId) {
     try {
-      await grantByoOpenAiEntitlement({ deviceId });
-      console.log(
-        `Granted BYO OpenAI entitlement (payment_intent) to device ${deviceId}`
-      );
+      const result = await fulfillByoOpenAiUnlock({
+        deviceId,
+        entitlement: "byo_openai",
+        paymentIntentId: paymentIntent.id,
+        stripeEventId: eventId,
+        stripeEventType: "payment_intent.succeeded",
+      });
+      if (result === "duplicate") {
+        console.log(
+          `Skipped duplicate BYO OpenAI entitlement (payment_intent) for device ${deviceId}`
+        );
+      } else {
+        console.log(
+          `Granted BYO OpenAI entitlement (payment_intent) to device ${deviceId}`
+        );
+      }
     } catch (error) {
       console.error("Error granting BYO entitlement from payment intent:", error);
       throw error;
     }
+    return;
   }
-  // Additional success handling if needed
+
+  if (deviceId && packId && isValidPackId(packId)) {
+    try {
+      const result = await fulfillCreditPackPurchase({
+        deviceId,
+        packId: packId as PackId,
+        paymentIntentId: paymentIntent.id,
+        stripeEventId: eventId,
+        stripeEventType: "payment_intent.succeeded",
+        stripePaymentStatus: paymentIntent.status ?? null,
+      });
+      if (result === "duplicate") {
+        console.log(
+          `Skipped duplicate credit fulfillment (payment_intent) for ${packId} to device ${deviceId}`
+        );
+      } else {
+        console.log(
+          `Credited ${packId} to device ${deviceId} via payment_intent.succeeded`
+        );
+      }
+    } catch (error) {
+      console.error("Error crediting device from payment intent:", error);
+      throw error;
+    }
+  }
 };
 
 const handlePaymentFailed = async ({
