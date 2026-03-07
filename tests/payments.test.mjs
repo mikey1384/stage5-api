@@ -306,6 +306,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.equal((await createByo.json()).sessionId, "cs_test_byo_create");
   assert.equal(createdParams[0]?.metadata?.deviceId, deviceId);
   assert.equal(createdParams[0]?.metadata?.packId, "MICRO");
+  assert.equal("payment_method_types" in createdParams[0], false);
   assert.equal(
     createdParams[1]?.success_url,
     "https://translator.tools/checkout/success?mode=byo&session_id={CHECKOUT_SESSION_ID}"
@@ -314,6 +315,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
     createdParams[1]?.cancel_url,
     "https://translator.tools/checkout/cancelled?mode=byo"
   );
+  assert.equal("payment_method_types" in createdParams[1], false);
 
   const settlement = await apiRequest("/payments/session/cs_test_pack", {
     headers: authHeaders(apiToken),

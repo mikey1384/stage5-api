@@ -168,7 +168,6 @@ router.post("/create-session", async (c) => {
       mode: "payment",
       allow_promotion_codes: true,
       locale: checkoutLocale,
-      payment_method_types: ["card"],
       line_items: [
         {
           price: pack.priceId,
@@ -254,7 +253,6 @@ router.post("/create-byo-unlock", async c => {
       mode: "payment",
       allow_promotion_codes: true,
       locale: checkoutLocale,
-      payment_method_types: ["card"],
       line_items: [
         {
           price: priceId,
