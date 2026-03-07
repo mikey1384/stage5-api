@@ -9,14 +9,16 @@ async function ensureRuntimeStateTable(): Promise<void> {
   }
 
   const db = getDatabase();
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS runtime_state (
-      state_key TEXT PRIMARY KEY,
-      state_value TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS runtime_state (
+         state_key TEXT PRIMARY KEY,
+         state_value TEXT NOT NULL,
+         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+       )`
     )
-  `);
+    .run();
   runtimeStateTableEnsured = true;
 }
 
