@@ -23,7 +23,7 @@ const DIRECT_REQUEST_LEASE_HEARTBEAT_MS = Math.max(
     )
   )
 );
-const STAGE5_API_INSTANCE_ID = `stage5-api:${crypto.randomUUID()}`;
+let stage5ApiInstanceId: string | null = null;
 
 export type DirectRequestLease = {
   version: 1;
@@ -192,9 +192,12 @@ function isDirectRequestLeaseFresh({
 
 export function createDirectRequestLease(): DirectRequestLease {
   const now = new Date().toISOString();
+  if (!stage5ApiInstanceId) {
+    stage5ApiInstanceId = `stage5-api:${crypto.randomUUID()}`;
+  }
   return {
     version: 1,
-    instanceId: STAGE5_API_INSTANCE_ID,
+    instanceId: stage5ApiInstanceId,
     ownerId: crypto.randomUUID(),
     acquiredAt: now,
     lastHeartbeatAt: now,
