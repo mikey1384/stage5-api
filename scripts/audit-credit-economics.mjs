@@ -17,14 +17,14 @@ const translationPrices = {
 
 const transcriptionPrices = {
   "whisper-1": { perSecond: 0.006 / 60 },
-  "elevenlabs-scribe": { perSecond: 0.40 / 3600 },
+  "elevenlabs-scribe": { perSecond: 0.4 / 3600 },
 };
 
 const ttsPrices = {
   "tts-1": { perChar: 15 / 1_000_000 },
   "tts-1-hd": { perChar: 30 / 1_000_000 },
-  "eleven_multilingual_v2": { perChar: 180 / 1_000_000 },
-  "eleven_turbo_v2_5": { perChar: 90 / 1_000_000 },
+  eleven_v3: { perChar: 180 / 1_000_000 },
+  eleven_turbo_v2_5: { perChar: 90 / 1_000_000 },
 };
 
 function formatUsd(value, digits = 4) {
@@ -98,8 +98,8 @@ const rows = [
     vendorCostUsd: 1_000_000 * ttsPrices["tts-1-hd"].perChar,
   },
   {
-    label: "ElevenLabs multilingual / 1M chars",
-    vendorCostUsd: 1_000_000 * ttsPrices["eleven_multilingual_v2"].perChar,
+    label: "ElevenLabs v3 / 1M chars",
+    vendorCostUsd: 1_000_000 * ttsPrices.eleven_v3.perChar,
   },
   {
     label: "ElevenLabs turbo / 1M chars",
@@ -109,7 +109,9 @@ const rows = [
 
 console.log("Stage5 credit economics audit");
 console.log(`Baseline USD/credit: ${USD_PER_CREDIT}`);
-console.log(`Search surcharge per tool call: ${formatUsd(WEB_SEARCH_USD_PER_CALL)}`);
+console.log(
+  `Search surcharge per tool call: ${formatUsd(WEB_SEARCH_USD_PER_CALL)}`,
+);
 console.log("");
 
 console.log("Per-pack realized margin vs billed vendor cost");
@@ -119,8 +121,8 @@ for (const packId of Object.keys(packs)) {
   const breakEven = searchBreakEvenTokenCostUsd(packId);
   console.log(
     `${packId.padEnd(8)} revenue=${revenueMultiple.toFixed(3)}x vendor cost  gm=${formatPercent(
-      margin
-    )}  search-break-even-token-cost=${formatUsd(breakEven)}`
+      margin,
+    )}  search-break-even-token-cost=${formatUsd(breakEven)}`,
   );
 }
 
@@ -130,9 +132,9 @@ for (const row of rows) {
   const revenueUsd = chargeForVendorCost(row.vendorCostUsd);
   console.log(
     `${row.label.padEnd(34)} vendor=${formatUsd(
-      row.vendorCostUsd
+      row.vendorCostUsd,
     )}  stage5=${formatUsd(revenueUsd)}  gm=${formatPercent(
-      grossMarginPercent(revenueUsd, row.vendorCostUsd)
-    )}`
+      grossMarginPercent(revenueUsd, row.vendorCostUsd),
+    )}`,
   );
 }

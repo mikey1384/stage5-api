@@ -22,10 +22,8 @@ import {
   callSpeechDirect,
   callElevenLabsDubRelay,
 } from "../lib/openai-config";
-import {
-  type TTSModel,
-  estimateDubbingCredits,
-} from "../lib/pricing";
+import { STAGE5_TTS_MODEL_ELEVEN_V3 } from "../lib/model-catalog";
+import { type TTSModel, estimateDubbingCredits } from "../lib/pricing";
 import {
   createJsonReplayEntry,
   deleteStoredJsonReplayArtifact,
@@ -45,10 +43,7 @@ import {
   recoverOrRestartDuplicateReservation,
   startDirectRequestLeaseHeartbeat,
 } from "../lib/direct-request-recovery";
-import {
-  bearerAuth,
-  type AuthVariables,
-} from "../lib/middleware";
+import { bearerAuth, type AuthVariables } from "../lib/middleware";
 import {
   buildScopedIdempotencyKey,
   getRequestIdempotencyKey,
@@ -58,12 +53,13 @@ import type { Stage5ApiBindings } from "../types/env";
 const MAX_SCRIPT_CHARACTERS = 200_000;
 const MAX_TOTAL_SEGMENT_CHARACTERS = 80_000;
 const MAX_SEGMENTS_PER_REQUEST = 240;
+const ELEVENLABS_TTS_MAX_TEXT_CHARACTERS = 5_000;
 const FALLBACK_SEGMENT_CONCURRENCY = 4;
 const HD_ONLY_VOICES = new Set<string>();
 const DUB_RESERVATION_SCOPE = "dub-billing-v2";
 const DUB_REPLAY_TTL_MS = Math.max(
   1_000,
-  Number.parseInt(process.env.DUB_REPLAY_TTL_MS || String(10 * 60 * 1_000), 10)
+  Number.parseInt(process.env.DUB_REPLAY_TTL_MS || String(10 * 60 * 1_000), 10),
 );
 const dubReplayCache = new Map<string, JsonReplayEntry>();
 
@@ -125,7 +121,8 @@ function buildDuplicateDirectDubResponse({
     status: 409,
     body: {
       error: "duplicate-request-in-progress",
-      message: "A dub request with this idempotency key is already in progress.",
+      message:
+        "A dub request with this idempotency key is already in progress.",
     },
   };
 }
@@ -167,7 +164,7 @@ function asObject(value: unknown): Record<string, unknown> | null {
 }
 
 function extractPendingDirectDubFinalize(
-  reservationMeta: unknown
+  reservationMeta: unknown,
 ): PendingDirectDubFinalize | null {
   const metaObject = asObject(reservationMeta);
   const pendingObject = asObject(metaObject?.pendingFinalize);
@@ -202,7 +199,7 @@ async function resolveDuplicateDirectDubReservation({
   | { action: "respond"; replay: JsonReplayResult; cacheSuccess?: boolean }
 > {
   const storedReplay = extractStoredJsonReplayEnvelope(
-    parseReplayMeta(reservation.meta)
+    parseReplayMeta(reservation.meta),
   );
   const replayResult = await loadStoredDubReplay({
     bucket,
@@ -220,7 +217,7 @@ async function resolveDuplicateDirectDubReservation({
   }
 
   const pendingFinalize = extractPendingDirectDubFinalize(
-    parseReplayMeta(reservation.meta)
+    parseReplayMeta(reservation.meta),
   );
   if (replayResult && pendingFinalize) {
     const settled = await settleBillingReservation({
@@ -292,7 +289,7 @@ async function resolveDuplicateDirectDubReservation({
   }
 
   const settledStoredReplay = extractStoredJsonReplayEnvelope(
-    parseReplayMeta(recovery.reservationMeta)
+    parseReplayMeta(recovery.reservationMeta),
   );
   const settledReplay = await loadStoredDubReplay({
     bucket,
@@ -367,7 +364,7 @@ router.post("/estimate", async (c) => {
     });
     const elevenLabsEstimate = estimateDubbingCredits({
       characters,
-      model: "eleven_multilingual_v2",
+      model: STAGE5_TTS_MODEL_ELEVEN_V3,
     });
 
     return c.json({
@@ -386,10 +383,10 @@ router.post("/estimate", async (c) => {
           description: "OpenAI TTS HD - Higher quality audio",
         },
         elevenlabs: {
-          model: "eleven_multilingual_v2",
+          model: STAGE5_TTS_MODEL_ELEVEN_V3,
           credits: elevenLabsEstimate.credits,
           usdCost: elevenLabsEstimate.usdEstimate,
-          description: "ElevenLabs - Premium quality, most expressive",
+          description: "ElevenLabs v3 - Premium quality, most expressive",
         },
       },
     });
@@ -404,12 +401,11 @@ router.post("/", async (c) => {
   let reservationRequestKey: string | null = null;
   let reservationActive = false;
   let stopDirectRequestLeaseHeartbeat: (() => void) | null = null;
-  let replayContext:
-    | { requestKey: string; entry: JsonReplayEntry }
-    | null = null;
+  let replayContext: { requestKey: string; entry: JsonReplayEntry } | null =
+    null;
   const respondReplay = (
     replay: JsonReplayResult,
-    cacheSuccess = replay.kind === "success"
+    cacheSuccess = replay.kind === "success",
   ) => {
     if (replayContext) {
       settleJsonReplayEntry({
@@ -428,7 +424,7 @@ router.post("/", async (c) => {
     if (c.req.raw.signal?.aborted) {
       return c.json(
         { error: "Request cancelled", message: "Request was cancelled" },
-        408
+        408,
       );
     }
 
@@ -441,7 +437,7 @@ router.post("/", async (c) => {
           error: API_ERRORS.INVALID_REQUEST,
           details: parsed.error.flatten(),
         },
-        400
+        400,
       );
     }
 
@@ -503,9 +499,24 @@ router.post("/", async (c) => {
       });
     });
 
+    if (chosenTtsProvider === "elevenlabs") {
+      const oversizedSegment = sanitizedSegments.find(
+        (segment) => segment.text.length > ELEVENLABS_TTS_MAX_TEXT_CHARACTERS,
+      );
+      if (oversizedSegment) {
+        return c.json(
+          {
+            error: API_ERRORS.INVALID_REQUEST,
+            message: `Segment ${oversizedSegment.index} has ${oversizedSegment.text.length} characters. ElevenLabs v3 accepts at most ${ELEVENLABS_TTS_MAX_TEXT_CHARACTERS} characters per segment.`,
+          },
+          413,
+        );
+      }
+    }
+
     const totalCharacters = sanitizedSegments.reduce(
       (sum, seg) => sum + seg.text.length,
-      0
+      0,
     );
     if (totalCharacters > MAX_TOTAL_SEGMENT_CHARACTERS) {
       return c.json(
@@ -513,7 +524,7 @@ router.post("/", async (c) => {
           error: API_ERRORS.INVALID_REQUEST,
           message: `Dub request includes ${totalCharacters} characters (max ${MAX_TOTAL_SEGMENT_CHARACTERS}). Please split the job into smaller batches.`,
         },
-        413
+        413,
       );
     }
 
@@ -523,7 +534,7 @@ router.post("/", async (c) => {
           error: API_ERRORS.INVALID_REQUEST,
           message: `Dub request contains ${sanitizedSegments.length} segments (max ${MAX_SEGMENTS_PER_REQUEST}). Reduce the number of segments and retry.`,
         },
-        413
+        413,
       );
     }
 
@@ -535,7 +546,7 @@ router.post("/", async (c) => {
           error: API_ERRORS.INVALID_REQUEST,
           message: "No text available for dubbing",
         },
-        400
+        400,
       );
     }
 
@@ -546,7 +557,7 @@ router.post("/", async (c) => {
           error: API_ERRORS.INVALID_REQUEST,
           message: `Script exceeds ${MAX_SCRIPT_CHARACTERS} characters`,
         },
-        413
+        413,
       );
     }
 
@@ -560,8 +571,8 @@ router.post("/", async (c) => {
       model && ALLOWED_SPEECH_MODELS.includes(model)
         ? model
         : quality === "high" || prefersHd
-        ? HIGH_QUALITY_SPEECH_MODEL
-        : DEFAULT_SPEECH_MODEL;
+          ? HIGH_QUALITY_SPEECH_MODEL
+          : DEFAULT_SPEECH_MODEL;
 
     if (prefersHd && chosenModel !== HIGH_QUALITY_SPEECH_MODEL) {
       chosenModel = HIGH_QUALITY_SPEECH_MODEL;
@@ -573,7 +584,7 @@ router.post("/", async (c) => {
         : DEFAULT_SPEECH_FORMAT;
     const reserveModel: TTSModel =
       chosenTtsProvider === "elevenlabs"
-        ? "eleven_multilingual_v2"
+        ? STAGE5_TTS_MODEL_ELEVEN_V3
         : chosenModel === HIGH_QUALITY_SPEECH_MODEL
           ? HIGH_QUALITY_SPEECH_MODEL
           : DEFAULT_SPEECH_MODEL;
@@ -612,7 +623,8 @@ router.post("/", async (c) => {
       characters: totalCharacters,
       model: reserveModel,
     }).credits;
-    let reserved: Awaited<ReturnType<typeof reserveBillingCredits>> | null = null;
+    let reserved: Awaited<ReturnType<typeof reserveBillingCredits>> | null =
+      null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       reserved = await reserveBillingCredits({
         deviceId: user.deviceId,
@@ -643,7 +655,7 @@ router.post("/", async (c) => {
         reserved.reservation.status !== "released"
       ) {
         throw new Error(
-          `Unexpected duplicate dub reservation status: ${reserved.reservation.status}`
+          `Unexpected duplicate dub reservation status: ${reserved.reservation.status}`,
         );
       }
 
@@ -660,7 +672,7 @@ router.post("/", async (c) => {
       if (duplicateResolution.action === "respond") {
         return respondReplay(
           duplicateResolution.replay,
-          duplicateResolution.cacheSuccess
+          duplicateResolution.cacheSuccess,
         );
       }
     }
@@ -670,7 +682,8 @@ router.post("/", async (c) => {
         status: 409,
         body: {
           error: "duplicate-request-in-progress",
-          message: "A dub request with this idempotency key is already in progress.",
+          message:
+            "A dub request with this idempotency key is already in progress.",
         },
       });
     }
@@ -712,7 +725,7 @@ router.post("/", async (c) => {
         console.warn(
           `[dub] preserving reservation after ${
             wasCancelled ? "client cancel" : "timeout"
-          } for requestKey=${requestKey}; retry will reuse or stale-recover the existing lease`
+          } for requestKey=${requestKey}; retry will reuse or stale-recover the existing lease`,
         );
         return respondReplay({
           kind: "error",
@@ -770,7 +783,7 @@ router.post("/", async (c) => {
     // Determine TTS model for pricing based on provider and what was actually used
     let ttsModelForPricing: TTSModel;
     if (relayResult.usedElevenLabs) {
-      ttsModelForPricing = "eleven_multilingual_v2";
+      ttsModelForPricing = STAGE5_TTS_MODEL_ELEVEN_V3;
     } else if (chosenModel === HIGH_QUALITY_SPEECH_MODEL) {
       ttsModelForPricing = HIGH_QUALITY_SPEECH_MODEL;
     } else {
@@ -788,8 +801,8 @@ router.post("/", async (c) => {
       segments: relayResult.segments,
       voice: relayResult.voice ?? chosenVoice,
       model: relayResult.usedElevenLabs
-        ? "eleven_multilingual_v2"
-        : relayResult.model ?? chosenModel,
+        ? STAGE5_TTS_MODEL_ELEVEN_V3
+        : (relayResult.model ?? chosenModel),
       format: relayResult.format ?? chosenFormat,
       totalCharacters,
       approxSeconds,
@@ -868,8 +881,7 @@ router.post("/", async (c) => {
     if (!settled.ok) {
       return respondReplay({
         kind: "error",
-        status:
-          settled.error === "actual-spend-exceeds-reserve" ? 409 : 500,
+        status: settled.error === "actual-spend-exceeds-reserve" ? 409 : 500,
         body: { error: settled.error },
       });
     }
@@ -877,7 +889,7 @@ router.post("/", async (c) => {
     console.log(
       `[dub] success for ${user.deviceId} provider=${
         relayResult.usedElevenLabs ? "elevenlabs" : "openai"
-      } chars=${totalCharacters} segments=${segmentCount}`
+      } chars=${totalCharacters} segments=${segmentCount}`,
     );
 
     return respondReplay({
@@ -890,7 +902,7 @@ router.post("/", async (c) => {
 
     if (c.req.raw.signal?.aborted) {
       console.warn(
-        `[dub] preserving reservation after outer-route cancel for requestKey=${reservationRequestKey ?? "unknown"}; retry will reuse or stale-recover the existing lease`
+        `[dub] preserving reservation after outer-route cancel for requestKey=${reservationRequestKey ?? "unknown"}; retry will reuse or stale-recover the existing lease`,
       );
       return respondReplay({
         kind: "error",
@@ -1035,7 +1047,7 @@ async function synthesizeDubWithFallback({
         requestKey,
       });
       console.log(
-        `[dub] ElevenLabs TTS succeeded, segments=${sanitizedSegments.length}`
+        `[dub] ElevenLabs TTS succeeded, segments=${sanitizedSegments.length}`,
       );
       return {
         ...elevenLabsResponse,
@@ -1051,7 +1063,7 @@ async function synthesizeDubWithFallback({
       console.warn(
         `[dub] ElevenLabs failed (${
           elevenLabsError?.message || elevenLabsError
-        }); trying OpenAI relay...`
+        }); trying OpenAI relay...`,
       );
 
       // Fall back to OpenAI relay
@@ -1119,7 +1131,7 @@ async function synthesizeWithOpenAI({
     console.warn(
       `[dub] OpenAI relay failed (${
         relayError?.message || relayError
-      }); falling back to direct. segments=${sanitizedSegments.length}`
+      }); falling back to direct. segments=${sanitizedSegments.length}`,
     );
 
     // Fall back to direct OpenAI
@@ -1179,7 +1191,7 @@ async function synthesizeSegmentsDirect({
 
   const maxConcurrency = Math.max(
     1,
-    Math.min(FALLBACK_SEGMENT_CONCURRENCY, segments.length)
+    Math.min(FALLBACK_SEGMENT_CONCURRENCY, segments.length),
   );
 
   const workers = Array.from({ length: maxConcurrency }, async () => {
