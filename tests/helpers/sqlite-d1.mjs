@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS entitlements (
 `;
 
 const RESET_TABLES_SQL = `
+DROP TABLE IF EXISTS transcription_jobs;
+DROP TABLE IF EXISTS translation_jobs;
 DROP TABLE IF EXISTS relay_translation_jobs;
 DROP TABLE IF EXISTS stripe_fulfillments;
 DROP TABLE IF EXISTS processed_events;

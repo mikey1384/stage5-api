@@ -1,14 +1,14 @@
 import { Hono } from "hono";
 import crypto from "node:crypto";
 import {
+  clearFailedTranscriptionJobClientRequestKey,
   confirmExistingBillingReservation,
   createTranscriptionJob,
   getBillingReservation,
   getTranscriptionJob,
+  getTranscriptionJobByClientRequestKey,
   setTranscriptionJobProcessing,
-  storeTranscriptionJobResult,
   storeTranscriptionJobError,
-  cleanupOldTranscriptionJobs,
   reserveBillingCredits,
   releaseBillingReservation,
   settleBillingReservation,
@@ -19,12 +19,21 @@ import {
   STAGE5_API_BASE_URL,
 } from "../lib/constants";
 import {
+  buildRollbackIfNoChangesStatement,
+  executeAtomicBatch,
+  getDatabase,
+  hasAtomicBatch,
+  isRollbackIfNoChangesError,
+  runInTransaction,
+} from "../lib/db/core";
+import {
   callRelayServer,
   callElevenLabsTranscribeFromR2,
   RelayHttpError,
 } from "../lib/openai-config";
 import { bearerAuth, type AuthVariables } from "../lib/middleware";
 import {
+  buildScopedIdempotencyKey,
   getRequestIdempotencyKey,
   parseBooleanLike,
 } from "../lib/request-utils";
@@ -61,6 +70,16 @@ import {
   generateFileKey,
   deleteFile,
 } from "../lib/r2-config";
+import {
+  deleteReplayArtifact,
+  isReplayArtifactRef,
+  loadReplayArtifact,
+  storeReplayArtifact,
+} from "../lib/replay-artifacts";
+import {
+  cleanupAbandonedPendingUploadTranscriptionJobs,
+  cleanupDurableTranscriptionJobs,
+} from "../lib/transcription-job-cleanup";
 import { buildDirectTranscriptionReservationKey } from "../lib/transcription-idempotency";
 import { v4 as uuidv4 } from "uuid";
 import type { Stage5ApiBindings } from "../types/env";
@@ -104,7 +123,25 @@ const TRANSCRIPTION_REPLAY_TTL_MS = Math.max(
     10
   )
 );
+const DURABLE_PENDING_UPLOAD_MAX_AGE_HOURS = 24;
+const R2_ASYNC_TRANSCRIPTION_DOWNLOAD_URL_EXPIRY_SECONDS = Math.min(
+  7 * 24 * 60 * 60,
+  Math.max(
+    60 * 60,
+    Number.parseInt(
+      process.env.R2_ASYNC_TRANSCRIPTION_DOWNLOAD_URL_EXPIRY_SECONDS ||
+        String(7 * 24 * 60 * 60),
+      10
+    )
+  )
+);
 const transcriptionReplayCache = new Map<string, JsonReplayEntry>();
+
+function isDurableTranscriptionClientRequestKeyConflict(error: unknown): boolean {
+  return String(error instanceof Error ? error.message : error || "").includes(
+    "UNIQUE constraint failed: transcription_jobs.device_id, transcription_jobs.client_request_key"
+  );
+}
 
 
 function normalizeTranscriptionModelForBilling(model?: string): string {
@@ -192,6 +229,98 @@ function extractRelayErrorMessage(body: string, fallback: string): string {
   }
 
   return body.trim() || fallback;
+}
+
+function parseStoredTranscriptionJobResult(
+  raw: string | null | undefined
+): unknown {
+  if (typeof raw !== "string" || !raw.trim()) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function storeDurableTranscriptionJobResult({
+  bucket,
+  deviceId,
+  jobId,
+  result,
+}: {
+  bucket: R2Bucket;
+  deviceId: string;
+  jobId: string;
+  result: unknown;
+}): Promise<unknown> {
+  return storeReplayArtifact({
+    bucket,
+    service: "transcription-job-result",
+    deviceId,
+    requestKey: jobId,
+    payload: result ?? {},
+  });
+}
+
+async function resolveDurableTranscriptionJobResult({
+  bucket,
+  storedResult,
+}: {
+  bucket: R2Bucket;
+  storedResult: string | null | undefined;
+}): Promise<unknown> {
+  const parsed = parseStoredTranscriptionJobResult(storedResult);
+  if (!isReplayArtifactRef(parsed)) {
+    return parsed;
+  }
+
+  return loadReplayArtifact({
+    bucket,
+    artifact: parsed,
+  });
+}
+
+function buildDurableTranscriptionClientRequestKey({
+  requestIdempotencyKey,
+  language,
+  contentType,
+  fileSizeMB,
+  requestedDurationSeconds,
+}: {
+  requestIdempotencyKey?: string;
+  language?: string;
+  contentType: string;
+  fileSizeMB?: number;
+  requestedDurationSeconds?: number | null;
+}): string | undefined {
+  return buildScopedIdempotencyKey({
+    scope: "transcribe-r2-upload",
+    requestIdempotencyKey,
+    payload: {
+      language: language ?? null,
+      contentType,
+      fileSizeMB:
+        typeof fileSizeMB === "number" && Number.isFinite(fileSizeMB)
+          ? Number(fileSizeMB.toFixed(3))
+          : null,
+      requestedDurationSeconds:
+        typeof requestedDurationSeconds === "number" &&
+        Number.isFinite(requestedDurationSeconds)
+          ? Math.round(requestedDurationSeconds)
+          : null,
+    },
+  });
+}
+
+function isJobOlderThanHours(createdAt: string | null | undefined, hours: number): boolean {
+  const createdAtMs = Date.parse(String(createdAt || ""));
+  if (!Number.isFinite(createdAtMs)) {
+    return false;
+  }
+  return Date.now() - createdAtMs >= hours * 60 * 60 * 1_000;
 }
 
 function resolveDirectTranscriptionQuality({
@@ -716,6 +845,285 @@ async function finalizeTranscriptionCredits({
   return { ok: true };
 }
 
+async function completeDurableTranscriptionJobAndFinalizeCredits({
+  jobId,
+  deviceId,
+  requestKey,
+  storedResult,
+  actualSeconds,
+  billedModel,
+  meta,
+}: {
+  jobId: string;
+  deviceId: string;
+  requestKey: string;
+  storedResult: unknown;
+  actualSeconds: number;
+  billedModel: string;
+  meta?: unknown;
+}): Promise<
+  | { ok: true; status: "completed" | "duplicate" }
+  | { ok: false; status: 409 | 500; error: string }
+> {
+  const db = getDatabase();
+  const resultJson = JSON.stringify(storedResult ?? {});
+  const actualSpend = estimateTranscriptionCredits({
+    seconds: actualSeconds,
+    model: billedModel,
+  });
+  const billingMetaJson = JSON.stringify({
+    billedModel,
+    actualSeconds,
+    actualSpend,
+    ...(meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {}),
+  });
+
+  const updateCompletedJob = async (): Promise<void> => {
+    await db
+      .prepare(
+        `UPDATE transcription_jobs
+            SET status = 'completed',
+                result = ?,
+                duration_seconds = ?,
+                error = NULL,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE job_id = ?`
+      )
+      .bind(resultJson, actualSeconds, jobId)
+      .run();
+  };
+
+  const reserveErrorStatus = (error: string): 409 | 500 =>
+    error === "actual-spend-exceeds-reserve" ? 409 : 500;
+
+  if (hasAtomicBatch(db)) {
+    const job = await getTranscriptionJob({ jobId });
+    if (!job) {
+      return { ok: false, status: 500, error: "job-not-found" };
+    }
+
+    const reservation = await getBillingReservation({
+      deviceId,
+      service: "transcription",
+      requestKey,
+    });
+    if (!reservation) {
+      return { ok: false, status: 500, error: "missing-reservation" };
+    }
+
+    const reservedSpend =
+      typeof reservation.reserved_spend === "number"
+        ? reservation.reserved_spend
+        : Number.parseInt(String(reservation.reserved_spend ?? 0), 10) || 0;
+
+    if (reservation.status === "settled") {
+      await updateCompletedJob();
+      return { ok: true, status: "duplicate" };
+    }
+
+    if (reservation.status !== "reserved") {
+      return { ok: false, status: 500, error: "missing-reservation" };
+    }
+
+    if (actualSpend > reservedSpend) {
+      await releaseTranscriptionReservation({
+        deviceId,
+        requestKey,
+        meta: {
+          releaseReason: "actual-spend-exceeds-reserve",
+          reservedSpend,
+          actualSpend,
+          ...(meta && typeof meta === "object"
+            ? (meta as Record<string, unknown>)
+            : {}),
+        },
+      });
+      return {
+        ok: false,
+        status: 409,
+        error: "actual-spend-exceeds-reserve",
+      };
+    }
+
+    const refund = reservedSpend - actualSpend;
+
+    try {
+      const statements = [
+        db
+          .prepare(
+            `UPDATE transcription_jobs
+                SET status = 'completed',
+                    result = ?,
+                    duration_seconds = ?,
+                    error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+              WHERE job_id = ?`
+          )
+          .bind(resultJson, actualSeconds, jobId),
+        db
+          .prepare(
+            `UPDATE billing_reservations
+                SET status = 'settled',
+                    settled_spend = ?,
+                    meta = ?,
+                    updated_at = CURRENT_TIMESTAMP
+              WHERE device_id = ?
+                AND service = 'transcription'
+                AND request_key = ?
+                AND status = 'reserved'
+                AND reserved_spend = ?`
+          )
+          .bind(actualSpend, billingMetaJson, deviceId, requestKey, reservedSpend),
+        buildRollbackIfNoChangesStatement(
+          `transcription-job-settle:${requestKey}`,
+        ),
+      ];
+
+      if (refund > 0) {
+        statements.push(
+          db
+            .prepare(
+              `UPDATE credits
+                  SET credit_balance = credit_balance + ?,
+                      updated_at = CURRENT_TIMESTAMP
+                WHERE device_id = ?`
+            )
+            .bind(refund, deviceId),
+          db
+            .prepare(
+              `INSERT INTO credit_ledger (device_id, delta, reason, meta)
+               VALUES (?, ?, ?, ?)`
+            )
+            .bind(deviceId, refund, `TRANSCRIBE_REFUND`, billingMetaJson),
+        );
+      }
+
+      await executeAtomicBatch(statements);
+      return { ok: true, status: "completed" };
+    } catch (error: unknown) {
+      if (isRollbackIfNoChangesError(error)) {
+        const currentReservation = await getBillingReservation({
+          deviceId,
+          service: "transcription",
+          requestKey,
+        });
+        if (currentReservation?.status === "settled") {
+          await updateCompletedJob();
+          return { ok: true, status: "duplicate" };
+        }
+        return {
+          ok: false,
+          status: reserveErrorStatus("missing-reservation"),
+          error: "missing-reservation",
+        };
+      }
+      throw error;
+    }
+  }
+
+  return runInTransaction(async () => {
+    const job = await getTranscriptionJob({ jobId });
+    if (!job) {
+      return { ok: false, status: 500, error: "job-not-found" } as const;
+    }
+
+    const reservation = await getBillingReservation({
+      deviceId,
+      service: "transcription",
+      requestKey,
+    });
+    if (!reservation) {
+      return { ok: false, status: 500, error: "missing-reservation" } as const;
+    }
+
+    const reservedSpend =
+      typeof reservation.reserved_spend === "number"
+        ? reservation.reserved_spend
+        : Number.parseInt(String(reservation.reserved_spend ?? 0), 10) || 0;
+
+    if (reservation.status === "settled") {
+      await updateCompletedJob();
+      return { ok: true, status: "duplicate" } as const;
+    }
+
+    if (reservation.status !== "reserved") {
+      return { ok: false, status: 500, error: "missing-reservation" } as const;
+    }
+
+    if (actualSpend > reservedSpend) {
+      await releaseTranscriptionReservation({
+        deviceId,
+        requestKey,
+        meta: {
+          releaseReason: "actual-spend-exceeds-reserve",
+          reservedSpend,
+          actualSpend,
+          ...(meta && typeof meta === "object"
+            ? (meta as Record<string, unknown>)
+            : {}),
+        },
+      });
+      return {
+        ok: false,
+        status: 409,
+        error: "actual-spend-exceeds-reserve",
+      } as const;
+    }
+
+    const refund = reservedSpend - actualSpend;
+
+    await db
+      .prepare(
+        `UPDATE transcription_jobs
+            SET status = 'completed',
+                result = ?,
+                duration_seconds = ?,
+                error = NULL,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE job_id = ?`
+      )
+      .bind(resultJson, actualSeconds, jobId)
+      .run();
+
+    await db
+      .prepare(
+        `UPDATE billing_reservations
+            SET status = 'settled',
+                settled_spend = ?,
+                meta = ?,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE device_id = ?
+            AND service = 'transcription'
+            AND request_key = ?
+            AND status = 'reserved'
+            AND reserved_spend = ?`
+      )
+      .bind(actualSpend, billingMetaJson, deviceId, requestKey, reservedSpend)
+      .run();
+
+    if (refund > 0) {
+      await db
+        .prepare(
+          `UPDATE credits
+              SET credit_balance = credit_balance + ?,
+                  updated_at = CURRENT_TIMESTAMP
+            WHERE device_id = ?`
+        )
+        .bind(refund, deviceId)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO credit_ledger (device_id, delta, reason, meta)
+           VALUES (?, ?, ?, ?)`
+        )
+        .bind(deviceId, refund, `TRANSCRIBE_REFUND`, billingMetaJson)
+        .run();
+    }
+
+    return { ok: true, status: "completed" } as const;
+  });
+}
+
 async function releaseTranscriptionReservation({
   deviceId,
   requestKey,
@@ -831,32 +1239,48 @@ router.post("/webhook/:jobId", async (c) => {
     }
 
     const seconds = Math.ceil(billingDur);
-    const finalized = await finalizeTranscriptionCredits({
+    const storedResult = await storeDurableTranscriptionJobResult({
+      bucket: c.env.TRANSCRIPTION_BUCKET,
+      deviceId: job.device_id,
+      jobId,
+      result,
+    });
+
+    const completed = await completeDurableTranscriptionJobAndFinalizeCredits({
+      jobId,
       deviceId: job.device_id,
       requestKey: buildR2TranscriptionReservationKey(jobId),
+      storedResult,
       actualSeconds: seconds,
       billedModel: STAGE5_ELEVENLABS_SCRIBE_MODEL,
       meta: { source: "r2-webhook", jobId },
     });
 
-    if (!finalized.ok) {
+    if (!completed.ok) {
+      if (isReplayArtifactRef(storedResult)) {
+        try {
+          await deleteReplayArtifact({
+            bucket: c.env.TRANSCRIPTION_BUCKET,
+            artifact: storedResult,
+          });
+        } catch (artifactCleanupError) {
+          console.warn(
+            `[transcribe/webhook] Failed to cleanup stored result artifact for job ${jobId}:`,
+            artifactCleanupError,
+          );
+        }
+      }
       await storeTranscriptionJobError({
         jobId,
-        message: finalized.error,
+        message: completed.error,
       });
-      await cleanupR2File(finalized.error);
-      return c.json({ status: finalized.error }, finalized.status);
+      await cleanupR2File(completed.error);
+      return c.json({ status: completed.error }, completed.status);
     }
 
     console.log(
       `[transcribe/webhook] Job ${jobId} completed, ${seconds}s transcribed`
     );
-
-    await storeTranscriptionJobResult({
-      jobId,
-      result,
-      durationSeconds: seconds,
-    });
 
     await cleanupR2File("success");
 
@@ -1414,19 +1838,132 @@ router.post("/", async (c) => {
  */
 router.post("/upload-url", async (c) => {
   const user = c.get("user");
+  const requestIdempotencyKey = getRequestIdempotencyKey(c);
+  const body = await c.req.json().catch(() => ({}));
+  const language = body.language as string | undefined;
+  const contentType = body.contentType || "audio/webm";
+  const fileSizeMB = body.fileSizeMB as number | undefined;
+  const requestedDurationSeconds = parseRequestedDurationSeconds(
+    body.durationSeconds ?? body.durationSec
+  );
+  const clientRequestKey = buildDurableTranscriptionClientRequestKey({
+    requestIdempotencyKey,
+    language,
+    contentType,
+    fileSizeMB,
+    requestedDurationSeconds,
+  });
 
   // Cleanup old jobs in background (non-blocking)
-  c.executionCtx.waitUntil(cleanupOldTranscriptionJobs({ maxAgeHours: 24 }));
+  c.executionCtx.waitUntil(
+    (async () => {
+      const results = await Promise.allSettled([
+        cleanupDurableTranscriptionJobs({
+          bucket: c.env.TRANSCRIPTION_BUCKET,
+          maxAgeHours: DURABLE_PENDING_UPLOAD_MAX_AGE_HOURS,
+        }),
+        cleanupAbandonedPendingUploadTranscriptionJobs({
+          bucket: c.env.TRANSCRIPTION_BUCKET,
+          maxAgeHours: DURABLE_PENDING_UPLOAD_MAX_AGE_HOURS,
+        }),
+      ]);
+
+      for (const result of results) {
+        if (result.status === "rejected") {
+          console.warn(
+            "[transcribe/upload-url] Background durable cleanup failed:",
+            result.reason,
+          );
+        }
+      }
+    })()
+  );
+
+  const r2Client = createR2Client({
+    accountId: c.env.R2_ACCOUNT_ID,
+    accessKeyId: c.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: c.env.R2_SECRET_ACCESS_KEY,
+  });
+
+  const buildExistingJobResponse = async (existingJob: {
+    job_id: string;
+    file_key: string | null;
+    status: string;
+  }) => {
+    const fileKey = existingJob.file_key;
+    if (!fileKey) {
+      throw new Error("Existing durable transcription job is missing file key");
+    }
+    const reservedPendingUpload =
+      existingJob.status === "pending_upload"
+        ? await confirmExistingBillingReservation({
+            deviceId: user.deviceId,
+            service: "transcription",
+            requestKey: buildR2TranscriptionReservationKey(existingJob.job_id),
+          })
+        : null;
+    const alreadyInFlight =
+      existingJob.status === "pending_upload" && reservedPendingUpload?.ok;
+    const effectiveStatus = alreadyInFlight ? "processing" : existingJob.status;
+    const uploadUrl =
+      effectiveStatus === "pending_upload"
+        ? await generateUploadUrl(r2Client, fileKey, contentType)
+        : null;
+    return c.json({
+      jobId: existingJob.job_id,
+      uploadUrl,
+      fileKey,
+      expiresIn: uploadUrl ? 3600 : null,
+      status: effectiveStatus,
+      uploadRequired: effectiveStatus === "pending_upload",
+      reusedJob: true,
+    });
+  };
+
+  const loadExistingDurableJob = async () => {
+    if (!clientRequestKey) {
+      return null;
+    }
+    return getTranscriptionJobByClientRequestKey({
+      deviceId: user.deviceId,
+      clientRequestKey,
+    });
+  };
+
+  const retireStalePendingUploadJob = async (existingJob: {
+    job_id: string;
+    file_key: string | null;
+    status: string;
+    created_at: string;
+  }) => {
+    if (
+      existingJob.status !== "pending_upload" ||
+      !isJobOlderThanHours(
+        existingJob.created_at,
+        DURABLE_PENDING_UPLOAD_MAX_AGE_HOURS,
+      )
+    ) {
+      return false;
+    }
+
+    console.warn(
+      `[transcribe/upload-url] Retiring stale pending_upload job ${existingJob.job_id} before reuse`,
+    );
+    await storeTranscriptionJobError({
+      jobId: existingJob.job_id,
+      message: "pending-upload-expired",
+    });
+    if (clientRequestKey) {
+      await clearFailedTranscriptionJobClientRequestKey({
+        jobId: existingJob.job_id,
+        clientRequestKey,
+      });
+    }
+
+    return true;
+  };
 
   try {
-    const body = await c.req.json().catch(() => ({}));
-    const language = body.language as string | undefined;
-    const contentType = body.contentType || "audio/webm";
-    const fileSizeMB = body.fileSizeMB as number | undefined;
-    const requestedDurationSeconds = parseRequestedDurationSeconds(
-      body.durationSeconds ?? body.durationSec
-    );
-
     // Validate file size if provided (max 500MB)
     if (fileSizeMB && fileSizeMB > 500) {
       return c.json(
@@ -1438,7 +1975,17 @@ router.post("/upload-url", async (c) => {
       );
     }
 
-    // Check user has credits before allowing upload
+    const existingJob = await loadExistingDurableJob();
+    if (existingJob?.job_id && existingJob.file_key) {
+      const retiredStalePendingUpload = await retireStalePendingUploadJob(
+        existingJob,
+      );
+      if (!retiredStalePendingUpload && existingJob.status !== "failed") {
+        return buildExistingJobResponse(existingJob);
+      }
+    }
+
+    // Check user has credits before allowing a new upload/job.
     if (user.creditBalance <= 0) {
       return c.json(
         {
@@ -1449,39 +1996,77 @@ router.post("/upload-url", async (c) => {
       );
     }
 
-    // Generate job ID and file key
-    const jobId = uuidv4();
-    const fileKey = generateFileKey(user.deviceId, jobId);
+    if (existingJob?.status === "failed" && clientRequestKey) {
+      await clearFailedTranscriptionJobClientRequestKey({
+        jobId: existingJob.job_id,
+        clientRequestKey,
+      });
+    }
 
-    // Create R2 client and generate presigned URL
-    const r2Client = createR2Client({
-      accountId: c.env.R2_ACCOUNT_ID,
-      accessKeyId: c.env.R2_ACCESS_KEY_ID,
-      secretAccessKey: c.env.R2_SECRET_ACCESS_KEY,
-    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const jobId = uuidv4();
+      const fileKey = generateFileKey(user.deviceId, jobId);
+      const uploadUrl = await generateUploadUrl(r2Client, fileKey, contentType);
 
-    const uploadUrl = await generateUploadUrl(r2Client, fileKey, contentType);
+      try {
+        await createTranscriptionJob({
+          jobId,
+          deviceId: user.deviceId,
+          clientRequestKey,
+          fileKey,
+          language,
+          durationSeconds: requestedDurationSeconds,
+        });
 
-    // Store job in D1 database
-    await createTranscriptionJob({
-      jobId,
-      deviceId: user.deviceId,
-      fileKey,
-      language,
-      durationSeconds: requestedDurationSeconds,
-    });
+        console.log(
+          `[transcribe/upload-url] Created job ${jobId} for device ${user.deviceId}`
+        );
 
-    console.log(
-      `[transcribe/upload-url] Created job ${jobId} for device ${user.deviceId}`
-    );
+        return c.json({
+          jobId,
+          uploadUrl,
+          fileKey,
+          expiresIn: 3600, // 1 hour
+          status: "pending_upload",
+          uploadRequired: true,
+          reusedJob: false,
+        });
+      } catch (error) {
+        if (!clientRequestKey || !isDurableTranscriptionClientRequestKeyConflict(error)) {
+          throw error;
+        }
 
-    return c.json({
-      jobId,
-      uploadUrl,
-      fileKey,
-      expiresIn: 3600, // 1 hour
-    });
+        const concurrentJob = await loadExistingDurableJob();
+        if (concurrentJob?.job_id && concurrentJob.file_key) {
+          if (concurrentJob.status !== "failed") {
+            return buildExistingJobResponse(concurrentJob);
+          }
+
+          if (attempt === 0) {
+            await clearFailedTranscriptionJobClientRequestKey({
+              jobId: concurrentJob.job_id,
+              clientRequestKey,
+            });
+            continue;
+          }
+        }
+
+        throw error;
+      }
+    }
+
+    throw new Error("Failed to create durable transcription job after retry");
   } catch (error) {
+    if (isDurableTranscriptionClientRequestKeyConflict(error)) {
+      const existingJob = await loadExistingDurableJob();
+      if (
+        existingJob?.job_id &&
+        existingJob.file_key &&
+        existingJob.status !== "failed"
+      ) {
+        return buildExistingJobResponse(existingJob);
+      }
+    }
     console.error("[transcribe/upload-url] Error:", error);
     return c.json(
       {
@@ -1549,7 +2134,11 @@ router.post("/process/:jobId", async (c) => {
       accessKeyId: c.env.R2_ACCESS_KEY_ID,
       secretAccessKey: c.env.R2_SECRET_ACCESS_KEY,
     });
-    const downloadUrl = await generateDownloadUrl(r2Client, job.file_key!);
+    const downloadUrl = await generateDownloadUrl(
+      r2Client,
+      job.file_key!,
+      R2_ASYNC_TRANSCRIPTION_DOWNLOAD_URL_EXPIRY_SECONDS
+    );
 
     // Build the webhook URL for the relay to call when done
     // The relay will POST the result to this URL, avoiding Worker timeout issues
@@ -1671,8 +2260,10 @@ router.get("/status/:jobId", async (c) => {
   }
 
   if (job.status === "completed") {
-    // Parse and return the result
-    const result = job.result ? JSON.parse(job.result) : null;
+    const result = await resolveDurableTranscriptionJobResult({
+      bucket: c.env.TRANSCRIPTION_BUCKET,
+      storedResult: job.result,
+    });
     return c.json({
       jobId: job.job_id,
       status: job.status,

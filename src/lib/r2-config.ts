@@ -2,7 +2,8 @@ import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } fro
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const BUCKET_NAME = "stage5-transcription-uploads";
-const PRESIGNED_URL_EXPIRY = 3600; // 1 hour
+const PRESIGNED_UPLOAD_URL_EXPIRY = 3600; // 1 hour
+const PRESIGNED_DOWNLOAD_URL_EXPIRY = 3600; // 1 hour
 
 export interface R2Config {
   accountId: string;
@@ -35,7 +36,9 @@ export async function generateUploadUrl(
     ContentType: contentType,
   });
 
-  return getSignedUrl(client, command, { expiresIn: PRESIGNED_URL_EXPIRY });
+  return getSignedUrl(client, command, {
+    expiresIn: PRESIGNED_UPLOAD_URL_EXPIRY,
+  });
 }
 
 /**
@@ -43,14 +46,15 @@ export async function generateUploadUrl(
  */
 export async function generateDownloadUrl(
   client: S3Client,
-  key: string
+  key: string,
+  expiresInSeconds: number = PRESIGNED_DOWNLOAD_URL_EXPIRY
 ): Promise<string> {
   const command = new GetObjectCommand({
     Bucket: BUCKET_NAME,
     Key: key,
   });
 
-  return getSignedUrl(client, command, { expiresIn: PRESIGNED_URL_EXPIRY });
+  return getSignedUrl(client, command, { expiresIn: expiresInSeconds });
 }
 
 /**

@@ -131,6 +131,7 @@ router.post("/reconcile", async (c) => {
       transcriptionProcessingStaleMinutes:
         body?.transcriptionProcessingStaleMinutes,
       cleanupMaxAgeHours: body?.cleanupMaxAgeHours,
+      transcriptionBucket: c.env.TRANSCRIPTION_BUCKET,
     });
 
     console.log(

@@ -48,6 +48,7 @@ beforeEach(async () => {
     CREATE TABLE IF NOT EXISTS transcription_jobs (
       job_id TEXT PRIMARY KEY,
       device_id TEXT NOT NULL,
+      client_request_key TEXT,
       status TEXT NOT NULL,
       file_name TEXT,
       file_key TEXT,

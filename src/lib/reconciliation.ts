@@ -13,6 +13,7 @@ import {
 import { API_ERRORS } from "./constants";
 import { isAllowedTranslationModel, normalizeTranslationModel } from "./pricing";
 import { estimateTranslationReservationCredits } from "./relay-billing";
+import { cleanupDurableTranscriptionJobs } from "./transcription-job-cleanup";
 import { buildR2TranscriptionReservationKey } from "./transcription-billing";
 import { buildTranslationReservationKey } from "./translation-idempotency";
 
@@ -23,6 +24,10 @@ export interface ReconciliationOptions {
   transcriptionPendingUploadStaleMinutes?: number;
   transcriptionProcessingStaleMinutes?: number;
   cleanupMaxAgeHours?: number;
+}
+
+export interface ReconciliationRuntimeOptions extends ReconciliationOptions {
+  transcriptionBucket?: R2Bucket;
 }
 
 export interface ReconciliationReport {
@@ -176,7 +181,7 @@ async function failTranslationJobDuringReconciliation({
 }
 
 export async function runReconciliation(
-  options?: ReconciliationOptions
+  options?: ReconciliationRuntimeOptions
 ): Promise<ReconciliationReport> {
   const startMs = Date.now();
   const cfg = buildDefaultOptions(options);
@@ -387,9 +392,14 @@ export async function runReconciliation(
 
   if (!cfg.dryRun) {
     try {
-      report.cleanup.transcriptionJobsDeleted = await cleanupOldTranscriptionJobs({
-        maxAgeHours: cfg.cleanupMaxAgeHours,
-      });
+      report.cleanup.transcriptionJobsDeleted = options?.transcriptionBucket
+        ? await cleanupDurableTranscriptionJobs({
+            bucket: options.transcriptionBucket,
+            maxAgeHours: cfg.cleanupMaxAgeHours,
+          })
+        : await cleanupOldTranscriptionJobs({
+            maxAgeHours: cfg.cleanupMaxAgeHours,
+          });
     } catch (error: any) {
       addReportError(
         report.transcription.errors,

@@ -131,6 +131,7 @@ export default {
         try {
           const report = await runReconciliation({
             dryRun: env.RECONCILE_CRON_DRY_RUN === "1",
+            transcriptionBucket: env.TRANSCRIPTION_BUCKET,
           });
           console.log(
             `[cron/reconcile] dryRun=${report.dryRun} durationMs=${report.durationMs} translation(scanned=${report.translation.scanned}, rebilled=${report.translation.rebilled}, reset=${report.translation.staleRelayReset}) transcription(scanned=${report.transcription.scanned}, failed=${report.transcription.markedFailed})`
