@@ -1,7 +1,7 @@
 import { Hono, Context } from "hono";
 import crypto from "node:crypto";
 import { z } from "zod";
-import { API_ERRORS, getProviderFromModel } from "../lib/constants";
+import { API_ERRORS, getProviderFromModel, isClaudeModel } from "../lib/constants";
 import { isAllowedTranslationModel, normalizeTranslationModel } from "../lib/pricing";
 import {
   createTranslationJobWithReservation,
@@ -26,6 +26,10 @@ import {
   fetchRelayTranslationStatus,
   RelayHttpError,
 } from "../lib/openai-config";
+import {
+  fetchRelayCapabilities,
+  getCachedRelayCapabilities,
+} from "../lib/relay-capabilities";
 import {
   isLikelySubtitleReviewMessages,
   resolveAuthoritativeTranslationModel,
@@ -261,13 +265,15 @@ router.post("/", async (c) => {
       (translationPhase !== "draft" &&
         isLikelySubtitleReviewMessages(messages));
     const authoritativeReasoning = isReviewPhase ? undefined : reasoning;
+    let effectiveRequestedModel: string | undefined = normalizedRequestedModel;
+    let effectiveModelFamily = modelFamily;
 
     const requestIdempotencyKey = getRequestIdempotencyKey(c);
     const payload = {
       mode: "chat" as const,
       messages,
-      model: normalizedRequestedModel,
-      modelFamily,
+      model: effectiveRequestedModel,
+      modelFamily: effectiveModelFamily,
       reasoning: authoritativeReasoning,
       translationPhase,
       qualityMode,
@@ -299,11 +305,46 @@ router.post("/", async (c) => {
       return admissionResponse;
     }
 
+    let canUseAnthropicReview = false;
+    if (isReviewPhase) {
+      try {
+        const relayCapabilities = await fetchRelayCapabilities({
+          relaySecret: c.env.RELAY_SECRET,
+          workerAnthropicAvailable: Boolean(c.env.ANTHROPIC_API_KEY),
+        });
+        canUseAnthropicReview =
+          relayCapabilities.stage5AnthropicReviewAvailable;
+      } catch (error: any) {
+        const cachedCapabilities = getCachedRelayCapabilities();
+        if (cachedCapabilities) {
+          canUseAnthropicReview =
+            cachedCapabilities.stage5AnthropicReviewAvailable;
+          console.warn(
+            `[translate] Relay capability lookup failed requestId=${requestId}; using cached capabilities.`,
+            error?.message || error,
+          );
+        } else {
+          console.warn(
+            `[translate] Relay capability lookup failed requestId=${requestId}; using conservative OpenAI review fallback.`,
+            error?.message || error,
+          );
+        }
+      }
+    }
+    if (isReviewPhase && !canUseAnthropicReview) {
+      effectiveModelFamily = "gpt";
+      if (isClaudeModel(effectiveRequestedModel)) {
+        effectiveRequestedModel = normalizeTranslationModel(undefined);
+      }
+      payload.modelFamily = effectiveModelFamily;
+      payload.model = effectiveRequestedModel;
+    }
+
     const reservedModel = resolveAuthoritativeTranslationModel({
-      requestedModel: normalizedRequestedModel,
+      requestedModel: effectiveRequestedModel,
       messages,
-      modelFamily,
-      canUseAnthropic: Boolean(c.env.ANTHROPIC_API_KEY),
+      modelFamily: effectiveModelFamily,
+      canUseAnthropic: canUseAnthropicReview,
       translationPhase,
       qualityMode,
     });
@@ -325,7 +366,7 @@ router.post("/", async (c) => {
     const createResult = await createTranslationJobWithReservation({
       jobId,
       deviceId: user.deviceId,
-      model: normalizedRequestedModel,
+      model: reservedModel,
       payload,
       reservationRequestKey: reservationKey,
       reservationSpend,

@@ -19,12 +19,12 @@ const REVIEW_MESSAGES = [
   },
 ];
 
-test("subtitle review always resolves to GPT-5.4 on the Stage5 credit path", () => {
-  for (const modelFamily of [undefined, "auto", "gpt", "claude"]) {
+test("subtitle review defaults to GPT-5.4 on the Stage5 credit path", () => {
+  for (const modelFamily of [undefined, "auto", "gpt"]) {
     for (const canUseAnthropic of [false, true]) {
       assert.equal(
         resolveAuthoritativeTranslationModel({
-          requestedModel: "claude-opus-4-6",
+          requestedModel: "gpt-5.4",
           modelFamily,
           messages: REVIEW_MESSAGES,
           canUseAnthropic,
@@ -35,6 +35,34 @@ test("subtitle review always resolves to GPT-5.4 on the Stage5 credit path", () 
       );
     }
   }
+});
+
+test("subtitle review honors the Anthropic family hint when worker-side Anthropic review is available", () => {
+  assert.equal(
+    resolveAuthoritativeTranslationModel({
+      requestedModel: "claude-opus-4-6",
+      modelFamily: "claude",
+      messages: REVIEW_MESSAGES,
+      canUseAnthropic: true,
+      translationPhase: "review",
+      qualityMode: true,
+    }),
+    "claude-opus-4-6",
+  );
+});
+
+test("subtitle review falls back to GPT-5.4 when worker-side Anthropic review is unavailable", () => {
+  assert.equal(
+    resolveAuthoritativeTranslationModel({
+      requestedModel: "claude-opus-4-6",
+      modelFamily: "claude",
+      messages: REVIEW_MESSAGES,
+      canUseAnthropic: false,
+      translationPhase: "review",
+      qualityMode: true,
+    }),
+    STAGE5_REVIEW_TRANSLATION_MODEL,
+  );
 });
 
 test("subtitle draft remains on the default Stage5 translation model", () => {

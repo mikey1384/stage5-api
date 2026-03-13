@@ -1,6 +1,9 @@
 import { isClaudeModel } from "./constants";
 import { isAllowedTranslationModel, normalizeTranslationModel } from "./pricing";
-import { STAGE5_REVIEW_TRANSLATION_MODEL } from "./model-catalog";
+import {
+  STAGE5_REVIEW_TRANSLATION_MODEL,
+  normalizeStage5TranslationModel,
+} from "./model-catalog";
 
 export type TranslationModelFamily = "gpt" | "claude" | "auto";
 export type TranslationPhase = "draft" | "review";
@@ -12,6 +15,9 @@ export type TranslationChatMessage = {
 
 export const DEFAULT_TRANSLATION_MAX_COMPLETION_TOKENS = 16_000;
 export const EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS = 32_000;
+const STAGE5_ANTHROPIC_REVIEW_TRANSLATION_MODEL = normalizeStage5TranslationModel(
+  "claude-opus-4.6"
+);
 
 export function isLikelySubtitleReviewMessages(
   messages: TranslationChatMessage[] | undefined
@@ -68,8 +74,6 @@ export function resolveAuthoritativeTranslationModel({
   qualityMode?: boolean;
 }): string {
   const normalizedRequestedModel = normalizeTranslationModel(requestedModel);
-  void modelFamily;
-  void canUseAnthropic;
   const reviewByHeuristic = isLikelySubtitleReviewMessages(messages);
   const draftByHeuristic = isLikelySubtitleDraftMessages(messages);
   const isSubtitleWorkflow =
@@ -99,7 +103,13 @@ export function resolveAuthoritativeTranslationModel({
     return normalizeTranslationModel(undefined);
   }
 
-  return STAGE5_REVIEW_TRANSLATION_MODEL;
+  const prefersClaudeReview =
+    canUseAnthropic &&
+    (modelFamily === "claude" || isClaudeModel(normalizedRequestedModel));
+
+  return prefersClaudeReview
+    ? STAGE5_ANTHROPIC_REVIEW_TRANSLATION_MODEL
+    : STAGE5_REVIEW_TRANSLATION_MODEL;
 }
 
 export function resolveTranslationReservationMaxCompletionTokens({

@@ -9,6 +9,7 @@ import {
 } from "../src/lib/db.ts";
 import { buildScopedIdempotencyKey } from "../src/lib/request-utils.ts";
 import { normalizeTranslationModel } from "../src/lib/pricing.ts";
+import { clearRelayCapabilitiesCacheForTests } from "../src/lib/relay-capabilities.ts";
 import { encodeTranslationJobError } from "../src/routes/translate/error-utils.ts";
 import {
   createSqliteD1Database,
@@ -34,6 +35,8 @@ const ctx = {
   waitUntil() {},
   passThroughOnException() {},
 };
+
+const originalFetch = globalThis.fetch;
 
 async function apiRequest(path, init = {}) {
   const request = new Request(`http://localhost${path}`, init);
@@ -64,6 +67,8 @@ before(async () => {
 
 beforeEach(() => {
   resetSqliteD1Database(sqlite);
+  globalThis.fetch = originalFetch;
+  clearRelayCapabilitiesCacheForTests();
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS translation_jobs (
       job_id TEXT PRIMARY KEY,
@@ -81,6 +86,10 @@ beforeEach(() => {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+});
+
+test.afterEach(() => {
+  globalThis.fetch = originalFetch;
 });
 
 test("same-idempotency retries against failed translation jobs do not reserve credits", async () => {
@@ -169,4 +178,279 @@ test("same-idempotency retries against failed translation jobs do not reserve cr
       .prepare("SELECT credit_balance FROM credits WHERE device_id = ?")
       .get(deviceId)?.credit_balance ?? 0;
   assert.equal(endingCredits, startingCredits);
+});
+
+test("queued subtitle review reserves Claude when relay capabilities expose Anthropic review", async () => {
+  const deviceId = "30000000-0000-4000-8000-000000000002";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  await creditDevice({ deviceId, packId: "MICRO" });
+  sqlite
+    .prepare(
+      "UPDATE credits SET credit_balance = 250000, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?"
+    )
+    .run(deviceId);
+
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url;
+    if (url === "https://translator-relay.fly.dev/translation-capabilities") {
+      return new Response(
+        JSON.stringify({
+          capabilities: { stage5AnthropicReviewAvailable: true },
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    if (url === "https://translator-relay.fly.dev/translate") {
+      return new Response(
+        JSON.stringify({ jobId: "relay-job-claude", status: "queued" }),
+        {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const response = await apiRequest("/translate", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+      "Idempotency-Key": "translate-claude-queued",
+    },
+    body: JSON.stringify({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a subtitle reviewer. Output exactly @@SUB_LINE@@ entries with no commentary.",
+        },
+        {
+          role: "user",
+          content: "@@SUB_LINE@@ 1: Hello world",
+        },
+      ],
+      modelFamily: "claude",
+      translationPhase: "review",
+      qualityMode: true,
+    }),
+  });
+
+  assert.equal(response.status, 202);
+  const reservation = sqlite
+    .prepare(
+      "SELECT meta FROM billing_reservations WHERE device_id = ? AND service = 'translation' ORDER BY created_at DESC LIMIT 1"
+    )
+    .get(deviceId);
+  const meta = JSON.parse(String(reservation?.meta || "{}"));
+  assert.equal(meta.reservedModel, "claude-opus-4-6");
+});
+
+test("draft translations do not depend on relay capability probe availability", async () => {
+  const deviceId = "30000000-0000-4000-8000-000000000003";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  await creditDevice({ deviceId, packId: "MICRO" });
+
+  let capabilityProbeCalls = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url;
+    if (url === "https://translator-relay.fly.dev/translation-capabilities") {
+      capabilityProbeCalls += 1;
+      throw new Error("capability probe unavailable");
+    }
+
+    if (url === "https://translator-relay.fly.dev/translate") {
+      return new Response(
+        JSON.stringify({ jobId: "relay-job-draft", status: "queued" }),
+        {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const response = await apiRequest("/translate", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+      "Idempotency-Key": "translate-draft-no-capability-dependency",
+    },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: "Translate this plain sentence" }],
+      translationPhase: "draft",
+      qualityMode: false,
+    }),
+  });
+
+  assert.equal(response.status, 202);
+  assert.equal(capabilityProbeCalls, 0);
+});
+
+test("review translations normalize Claude hints when capability probe falls back with no cache", async () => {
+  const deviceId = "30000000-0000-4000-8000-000000000004";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  await creditDevice({ deviceId, packId: "MICRO" });
+  sqlite
+    .prepare(
+      "UPDATE credits SET credit_balance = 250000, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?"
+    )
+    .run(deviceId);
+
+  let capabilityProbeCalls = 0;
+  let relayTranslatePayload = null;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url;
+    if (url === "https://translator-relay.fly.dev/translation-capabilities") {
+      capabilityProbeCalls += 1;
+      throw new Error("capability probe unavailable");
+    }
+
+    if (url === "https://translator-relay.fly.dev/translate") {
+      relayTranslatePayload = init?.body ? JSON.parse(String(init.body)) : null;
+      return new Response(
+        JSON.stringify({ jobId: "relay-job-review-fallback", status: "queued" }),
+        {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const response = await apiRequest("/translate", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+      "Idempotency-Key": "translate-review-capability-fallback",
+    },
+    body: JSON.stringify({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a subtitle reviewer. Output exactly @@SUB_LINE@@ entries with no commentary.",
+        },
+        { role: "user", content: "@@SUB_LINE@@ 1: Hello world" },
+      ],
+      model: "claude-opus-4-6",
+      modelFamily: "claude",
+      translationPhase: "review",
+      qualityMode: true,
+    }),
+  });
+
+  assert.equal(response.status, 202);
+  assert.equal(capabilityProbeCalls, 1);
+
+  const reservation = sqlite
+    .prepare(
+      "SELECT meta FROM billing_reservations WHERE device_id = ? AND service = 'translation' ORDER BY created_at DESC LIMIT 1"
+    )
+    .get(deviceId);
+  const meta = JSON.parse(String(reservation?.meta || "{}"));
+  assert.equal(meta.reservedModel, "gpt-5.4");
+  assert.equal(relayTranslatePayload?.modelFamily, "gpt");
+  assert.notEqual(relayTranslatePayload?.model, "claude-opus-4-6");
+});
+
+test("review translations use cached relay capabilities when the probe fails", async () => {
+  const deviceId = "30000000-0000-4000-8000-000000000005";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  await creditDevice({ deviceId, packId: "MICRO" });
+  sqlite
+    .prepare(
+      "UPDATE credits SET credit_balance = 250000, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?"
+    )
+    .run(deviceId);
+
+  let capabilityProbeCalls = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input?.url;
+    if (url === "https://translator-relay.fly.dev/translation-capabilities") {
+      capabilityProbeCalls += 1;
+      if (capabilityProbeCalls === 1) {
+        return new Response(
+          JSON.stringify({
+            capabilities: { stage5AnthropicReviewAvailable: true },
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+      throw new Error("capability probe unavailable");
+    }
+
+    if (url === "https://translator-relay.fly.dev/translate") {
+      return new Response(
+        JSON.stringify({ jobId: "relay-job-review-cached", status: "queued" }),
+        {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const body = {
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a subtitle reviewer. Output exactly @@SUB_LINE@@ entries with no commentary.",
+      },
+      { role: "user", content: "@@SUB_LINE@@ 1: Hello world" },
+    ],
+    modelFamily: "claude",
+    translationPhase: "review",
+    qualityMode: true,
+  };
+
+  const warmResponse = await apiRequest("/translate", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+      "Idempotency-Key": "translate-review-capability-cache-warm",
+    },
+    body: JSON.stringify(body),
+  });
+  assert.equal(warmResponse.status, 202);
+
+  const fallbackResponse = await apiRequest("/translate", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+      "Idempotency-Key": "translate-review-capability-cache-fallback",
+    },
+    body: JSON.stringify(body),
+  });
+
+  assert.equal(fallbackResponse.status, 202);
+  assert.equal(capabilityProbeCalls, 2);
+
+  const reservation = sqlite
+    .prepare(
+      "SELECT meta FROM billing_reservations WHERE device_id = ? AND service = 'translation' ORDER BY created_at DESC LIMIT 1"
+    )
+    .get(deviceId);
+  const meta = JSON.parse(String(reservation?.meta || "{}"));
+  assert.equal(meta.reservedModel, "claude-opus-4-6");
 });
