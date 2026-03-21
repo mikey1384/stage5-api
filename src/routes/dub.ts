@@ -1194,17 +1194,21 @@ async function synthesizeSegmentsDirect({
     Math.min(FALLBACK_SEGMENT_CONCURRENCY, segments.length),
   );
 
+  const claimNextSegmentIndex = (): number | null => {
+    if (signal.aborted || errors.length > 0 || cursor >= segments.length) {
+      return null;
+    }
+    const currentIndex = cursor;
+    cursor += 1;
+    return currentIndex;
+  };
+
   const workers = Array.from({ length: maxConcurrency }, async () => {
-    while (true) {
-      if (signal.aborted) {
-        return;
-      }
-
-      const currentIndex = cursor++;
-      if (currentIndex >= segments.length) {
-        return;
-      }
-
+    for (
+      let currentIndex = claimNextSegmentIndex();
+      currentIndex !== null;
+      currentIndex = claimNextSegmentIndex()
+    ) {
       const seg = segments[currentIndex];
       try {
         const direct = await callSpeechDirect({

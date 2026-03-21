@@ -71,16 +71,13 @@ export async function cleanupDurableTranscriptionJobs({
 }): Promise<number> {
   const safeBatchSize = Math.max(1, Math.floor(batchSize));
   let deleted = 0;
+  let jobs = await listOldTranscriptionJobs({
+    maxAgeHours,
+    limit: safeBatchSize,
+    statuses: ["completed", "failed"],
+  });
 
-  while (true) {
-    const jobs = await listOldTranscriptionJobs({
-      maxAgeHours,
-      limit: safeBatchSize,
-      statuses: ["completed", "failed"],
-    });
-    if (jobs.length === 0) {
-      return deleted;
-    }
+  while (jobs.length > 0) {
 
     for (const job of jobs) {
       const deletedRows = await deleteTranscriptionJobsByIds({
@@ -112,7 +109,15 @@ export async function cleanupDurableTranscriptionJobs({
     if (jobs.length < safeBatchSize) {
       return deleted;
     }
+
+    jobs = await listOldTranscriptionJobs({
+      maxAgeHours,
+      limit: safeBatchSize,
+      statuses: ["completed", "failed"],
+    });
   }
+
+  return deleted;
 }
 
 export async function cleanupAbandonedPendingUploadTranscriptionJobs({
@@ -127,17 +132,14 @@ export async function cleanupAbandonedPendingUploadTranscriptionJobs({
   const safeBatchSize = Math.max(1, Math.floor(batchSize));
   let deleted = 0;
   const skippedReservedJobIds = new Set<string>();
+  let jobs = await listOldTranscriptionJobs({
+    maxAgeHours,
+    limit: safeBatchSize,
+    statuses: ["pending_upload"],
+    excludeJobIds: Array.from(skippedReservedJobIds),
+  });
 
-  while (true) {
-    const jobs = await listOldTranscriptionJobs({
-      maxAgeHours,
-      limit: safeBatchSize,
-      statuses: ["pending_upload"],
-      excludeJobIds: Array.from(skippedReservedJobIds),
-    });
-    if (jobs.length === 0) {
-      return deleted;
-    }
+  while (jobs.length > 0) {
 
     for (const job of jobs) {
       const reservation = await confirmExistingBillingReservation({
@@ -175,5 +177,14 @@ export async function cleanupAbandonedPendingUploadTranscriptionJobs({
     if (jobs.length < safeBatchSize) {
       return deleted;
     }
+
+    jobs = await listOldTranscriptionJobs({
+      maxAgeHours,
+      limit: safeBatchSize,
+      statuses: ["pending_upload"],
+      excludeJobIds: Array.from(skippedReservedJobIds),
+    });
   }
+
+  return deleted;
 }

@@ -11,12 +11,13 @@ async function hashFileContents(file: File): Promise<string> {
   if (stream && typeof (stream as ReadableStream<Uint8Array>).getReader === "function") {
     const reader = (stream as ReadableStream<Uint8Array>).getReader();
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      let readResult = await reader.read();
+      while (!readResult.done) {
+        const { value } = readResult;
         if (value && value.byteLength > 0) {
           hasher.update(value);
         }
+        readResult = await reader.read();
       }
       return hasher.digest("hex").slice(0, 32);
     } finally {

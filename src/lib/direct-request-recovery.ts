@@ -296,14 +296,17 @@ export async function resolveAbortReservationDisposition({
   | { action: "release"; reservation: BillingReservationRecord | null }
 > {
   const deadline = Date.now() + Math.max(0, graceMs);
+  let keepPolling = true;
+  let reservationToRelease: BillingReservationRecord | null = null;
 
-  while (true) {
+  while (keepPolling) {
     const reservation = await getBillingReservation({
       deviceId,
       service,
       requestKey,
     });
     const reservationMeta = parseReservationMeta(reservation?.meta);
+    reservationToRelease = reservation ?? null;
 
     if (!reservation) {
       return { action: "release", reservation: null };
@@ -320,14 +323,15 @@ export async function resolveAbortReservationDisposition({
       return { action: "preserve", reservation };
     }
 
-    if (Date.now() >= deadline) {
-      return { action: "release", reservation };
+    keepPolling = Date.now() < deadline;
+    if (keepPolling) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(10, pollIntervalMs))
+      );
     }
-
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.max(10, pollIntervalMs))
-    );
   }
+
+  return { action: "release", reservation: reservationToRelease };
 }
 
 export async function recoverOrRestartDuplicateReservation({
