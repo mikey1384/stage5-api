@@ -16,7 +16,7 @@ export type TranslationChatMessage = {
 export const DEFAULT_TRANSLATION_MAX_COMPLETION_TOKENS = 16_000;
 export const EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS = 32_000;
 const STAGE5_ANTHROPIC_REVIEW_TRANSLATION_MODEL = normalizeStage5TranslationModel(
-  "claude-opus-4.6"
+  "claude-opus-4.7"
 );
 
 export function isLikelySubtitleReviewMessages(
@@ -120,7 +120,10 @@ export function resolveTranslationReservationMaxCompletionTokens({
   reasoning?: unknown;
 }): number {
   const effort = String((reasoning as any)?.effort || "").trim().toLowerCase();
-  if (isClaudeModel(model) && (effort === "medium" || effort === "high")) {
+  if (
+    isClaudeModel(model) &&
+    (effort === "medium" || effort === "high" || effort === "xhigh")
+  ) {
     return EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS;
   }
   return DEFAULT_TRANSLATION_MAX_COMPLETION_TOKENS;

@@ -12,7 +12,7 @@ const packs = {
 const translationPrices = {
   "gpt-5.1": { in: 1.25 / 1_000_000, out: 10 / 1_000_000 },
   "gpt-5.4": { in: 2.5 / 1_000_000, out: 15 / 1_000_000 },
-  "claude-opus-4-6": { in: 5 / 1_000_000, out: 25 / 1_000_000 },
+  "claude-opus-4-7": { in: 5 / 1_000_000, out: 25 / 1_000_000 },
 };
 
 const transcriptionPrices = {
@@ -74,12 +74,12 @@ const rows = [
     vendorCostUsd: 1_000_000 * translationPrices["gpt-5.4"].out,
   },
   {
-    label: "Claude Opus 4.6 input / 1M tokens",
-    vendorCostUsd: 1_000_000 * translationPrices["claude-opus-4-6"].in,
+    label: "Claude Opus 4.7 input / 1M tokens",
+    vendorCostUsd: 1_000_000 * translationPrices["claude-opus-4-7"].in,
   },
   {
-    label: "Claude Opus 4.6 output / 1M tokens",
-    vendorCostUsd: 1_000_000 * translationPrices["claude-opus-4-6"].out,
+    label: "Claude Opus 4.7 output / 1M tokens",
+    vendorCostUsd: 1_000_000 * translationPrices["claude-opus-4-7"].out,
   },
   {
     label: "Whisper-1 / hour",

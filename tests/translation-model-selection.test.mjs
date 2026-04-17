@@ -47,7 +47,7 @@ test("subtitle review honors the Anthropic family hint when worker-side Anthropi
       translationPhase: "review",
       qualityMode: true,
     }),
-    "claude-opus-4-6",
+    "claude-opus-4-7",
   );
 });
 
@@ -93,6 +93,6 @@ test("non-subtitle translation requests still honor explicit allowed models", ()
       messages: [{ role: "user", content: "Translate this paragraph." }],
       canUseAnthropic: true,
     }),
-    "claude-opus-4-6",
+    "claude-opus-4-7",
   );
 });

@@ -14,7 +14,10 @@ export const STAGE5_TTS_MODEL_ELEVEN_V3 = "eleven_v3";
 const STAGE5_TTS_MODEL_ELEVEN_MULTILINGUAL_V2_LEGACY = "eleven_multilingual_v2";
 
 export const STAGE5_TRANSLATION_MODEL_ALIASES = {
-  "claude-opus-4.6": "claude-opus-4-6",
+  // Legacy Opus 4.6 values from older clients and in-flight jobs normalize forward.
+  "claude-opus-4-6": "claude-opus-4-7",
+  "claude-opus-4.6": "claude-opus-4-7",
+  "claude-opus-4.7": "claude-opus-4-7",
 } as const;
 
 export const STAGE5_TRANSLATION_MODEL_PRICES = {
@@ -26,7 +29,7 @@ export const STAGE5_TRANSLATION_MODEL_PRICES = {
     in: 2.5 / 1_000_000, // $2.50 per million tokens
     out: 15 / 1_000_000, // $15.00 per million tokens
   },
-  "claude-opus-4-6": {
+  "claude-opus-4-7": {
     in: 5 / 1_000_000, // $5.00 per million tokens
     out: 25 / 1_000_000, // $25.00 per million tokens
   },

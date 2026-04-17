@@ -249,7 +249,7 @@ test("queued subtitle review reserves Claude when relay capabilities expose Anth
     )
     .get(deviceId);
   const meta = JSON.parse(String(reservation?.meta || "{}"));
-  assert.equal(meta.reservedModel, "claude-opus-4-6");
+  assert.equal(meta.reservedModel, "claude-opus-4-7");
 });
 
 test("draft translations do not depend on relay capability probe availability", async () => {
@@ -345,7 +345,7 @@ test("review translations normalize Claude hints when capability probe falls bac
         },
         { role: "user", content: "@@SUB_LINE@@ 1: Hello world" },
       ],
-      model: "claude-opus-4-6",
+      model: "claude-opus-4-7",
       modelFamily: "claude",
       translationPhase: "review",
       qualityMode: true,
@@ -363,7 +363,7 @@ test("review translations normalize Claude hints when capability probe falls bac
   const meta = JSON.parse(String(reservation?.meta || "{}"));
   assert.equal(meta.reservedModel, "gpt-5.4");
   assert.equal(relayTranslatePayload?.modelFamily, "gpt");
-  assert.notEqual(relayTranslatePayload?.model, "claude-opus-4-6");
+  assert.notEqual(relayTranslatePayload?.model, "claude-opus-4-7");
 });
 
 test("review translations use cached relay capabilities when the probe fails", async () => {
@@ -452,5 +452,5 @@ test("review translations use cached relay capabilities when the probe fails", a
     )
     .get(deviceId);
   const meta = JSON.parse(String(reservation?.meta || "{}"));
-  assert.equal(meta.reservedModel, "claude-opus-4-6");
+  assert.equal(meta.reservedModel, "claude-opus-4-7");
 });
