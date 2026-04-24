@@ -1,5 +1,6 @@
 export type Stage5ApiBindings = {
   DB: D1Database;
+  PAYMENT_EVENTS?: DurableObjectNamespace;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   STRIPE_BYO_UNLOCK_PRICE_ID?: string;
@@ -12,6 +13,14 @@ export type Stage5ApiBindings = {
   ALLOWED_ORIGINS?: string;
   ADMIN_API_SECRET?: string;
   ADMIN_DEVICE_ID?: string;
+  SENDGRID_API_KEY?: string;
+  SENDGRID_API_URL?: string;
+  ALERT_EMAIL_TO?: string;
+  ALERT_EMAIL_FROM?: string;
+  EMAIL_SENDER?: string;
+  PAYMENT_ALERTS_ENABLED?: string;
+  PAYMENT_ALERT_EMAIL_TO?: string;
+  PAYMENT_ALERT_EMAIL_FROM?: string;
   RECONCILE_CRON_ENABLED?: string;
   RECONCILE_CRON_DRY_RUN?: string;
   TRANSCRIPTION_BUCKET: R2Bucket;

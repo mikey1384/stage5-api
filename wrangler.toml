@@ -22,6 +22,9 @@ RELAY_TRANSLATION_USER_RATE_MAX_REQUESTS = "12"
 RELAY_TRANSLATION_ALERT_QUEUE_DEPTH = "120"
 RELAY_TRANSLATION_ALERT_CONSECUTIVE_FAILURES = "4"
 RELAY_TRANSLATION_ALERT_COOLDOWN_MS = "60000"
+PAYMENT_ALERTS_ENABLED = "1"
+PAYMENT_ALERT_EMAIL_FROM = "noreply@stage5.tools"
+PAYMENT_ALERT_EMAIL_TO = "mikey@stage5.tools"
 
 
 # D1 Database binding
@@ -29,6 +32,14 @@ RELAY_TRANSLATION_ALERT_COOLDOWN_MS = "60000"
 binding = "DB"
 database_name = "stage5_db"
 database_id = "84286ce2-3c1f-45ba-8183-a8540bd5b32b"
+
+[[durable_objects.bindings]]
+name = "PAYMENT_EVENTS"
+class_name = "PaymentEventsDurableObject"
+
+[[migrations]]
+tag = "payment-events-v1"
+new_sqlite_classes = ["PaymentEventsDurableObject"]
 
 # R2 Storage for large file uploads (transcription)
 [[r2_buckets]]

@@ -17,6 +17,8 @@ import { runReconciliation } from "./lib/reconciliation";
 import { minimumTranslatorVersionGate } from "./lib/translator-version-gate";
 import type { Stage5ApiBindings } from "./types/env";
 
+export { PaymentEventsDurableObject } from "./lib/payment-events-do";
+
 const app = new Hono<{ Bindings: Stage5ApiBindings }>();
 const translatorVersionGate = minimumTranslatorVersionGate();
 
@@ -62,6 +64,8 @@ app.route("/stripe/webhook", webhookRouter);
 app.use("/auth/device-token", translatorVersionGate);
 app.use("/payments/create-session", translatorVersionGate);
 app.use("/payments/create-byo-unlock", translatorVersionGate);
+app.use("/payments/checkout-event", translatorVersionGate);
+app.use("/payments/events/*", translatorVersionGate);
 app.use("/payments/session/*", translatorVersionGate);
 app.use("/credits/*", translatorVersionGate);
 app.use("/entitlements/*", translatorVersionGate);

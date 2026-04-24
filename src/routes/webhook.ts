@@ -4,9 +4,22 @@ import { getStripe } from "../lib/stripe";
 import {
   fulfillByoOpenAiUnlock,
   fulfillCreditPackPurchase,
+  getCheckoutSessionRecord,
   isEventProcessed,
+  markCheckoutSessionFailed,
+  markCheckoutSessionFulfilledCredits,
+  markCheckoutSessionFulfilledEntitlement,
   markEventProcessed,
 } from "../lib/db";
+import {
+  checkoutSessionFailureContext,
+  paymentIntentFailureContext,
+  sendPaymentAlert,
+} from "../lib/payment-alerts";
+import {
+  buildCreditPaymentEvent,
+  notifyDevicePaymentEvent,
+} from "../lib/payment-events";
 import { isValidPackId, type PackId } from "../types/packs";
 import type { Stage5ApiBindings } from "../types/env";
 
@@ -31,6 +44,59 @@ function getPaymentIntentIdFromCheckoutSession(
   }
 
   return paymentIntent.id ?? null;
+}
+
+type CheckoutPaymentIntentDetails = {
+  checkoutSessionId: string | null;
+  checkoutSessionStatus: Stripe.Checkout.Session.Status | null;
+  checkoutSessionPaymentStatus: Stripe.Checkout.Session.PaymentStatus | null;
+  deviceId: string | null;
+  packId: string | null;
+  entitlement: string | null;
+  mode: "credits" | "byo";
+};
+
+async function resolveCheckoutDetailsFromPaymentIntent({
+  env,
+  paymentIntent,
+  logContext,
+}: {
+  env: Stage5ApiBindings;
+  paymentIntent: Stripe.PaymentIntent;
+  logContext: string;
+}): Promise<CheckoutPaymentIntentDetails> {
+  let session: Stripe.Checkout.Session | null = null;
+
+  try {
+    const stripe = getStripe(env.STRIPE_SECRET_KEY);
+    const sessions = await stripe.checkout.sessions.list({
+      payment_intent: paymentIntent.id,
+      limit: 1,
+    });
+    session = sessions.data[0] ?? null;
+  } catch (error) {
+    console.warn(
+      `Could not resolve Checkout session for ${logContext} payment intent ${paymentIntent.id}:`,
+      error
+    );
+  }
+
+  const metadata = {
+    ...(paymentIntent.metadata || {}),
+    ...(session?.metadata || {}),
+  };
+  const entitlement =
+    typeof metadata.entitlement === "string" ? metadata.entitlement : null;
+
+  return {
+    checkoutSessionId: session?.id ?? null,
+    checkoutSessionStatus: session?.status ?? null,
+    checkoutSessionPaymentStatus: session?.payment_status ?? null,
+    deviceId: typeof metadata.deviceId === "string" ? metadata.deviceId : null,
+    packId: typeof metadata.packId === "string" ? metadata.packId : null,
+    entitlement,
+    mode: entitlement === "byo_openai" ? "byo" : "credits",
+  };
 }
 
 router.post("/", async (c) => {
@@ -69,6 +135,7 @@ router.post("/", async (c) => {
         case "checkout.session.completed": {
           const session = event.data.object as Stripe.Checkout.Session;
           await handleCheckoutPaid({
+            env: c.env,
             session,
             eventId: event.id,
             eventType: event.type,
@@ -79,6 +146,7 @@ router.post("/", async (c) => {
         case "checkout.session.async_payment_succeeded": {
           const session = event.data.object as Stripe.Checkout.Session;
           await handleCheckoutPaid({
+            env: c.env,
             session,
             eventId: event.id,
             eventType: event.type,
@@ -88,19 +156,33 @@ router.post("/", async (c) => {
 
         case "checkout.session.async_payment_failed": {
           const session = event.data.object as Stripe.Checkout.Session;
-          await handleCheckoutAsyncPaymentFailed({ session });
+          await handleCheckoutAsyncPaymentFailed({
+            session,
+            eventId: event.id,
+            eventType: event.type,
+            env: c.env,
+          });
           break;
         }
 
         case "payment_intent.succeeded": {
           const paymentIntent = event.data.object as Stripe.PaymentIntent;
-          await handlePaymentSucceeded({ paymentIntent, eventId: event.id });
+          await handlePaymentSucceeded({
+            env: c.env,
+            paymentIntent,
+            eventId: event.id,
+          });
           break;
         }
 
         case "payment_intent.payment_failed": {
           const paymentIntent = event.data.object as Stripe.PaymentIntent;
-          await handlePaymentFailed({ paymentIntent });
+          await handlePaymentFailed({
+            paymentIntent,
+            eventId: event.id,
+            eventType: event.type,
+            env: c.env,
+          });
           break;
         }
 
@@ -129,10 +211,12 @@ router.post("/", async (c) => {
 });
 
 const handleCheckoutPaid = async ({
+  env,
   eventId,
   session,
   eventType,
 }: {
+  env: Stage5ApiBindings;
   eventId: string;
   session: Stripe.Checkout.Session;
   eventType:
@@ -180,6 +264,27 @@ const handleCheckoutPaid = async ({
           `Granted BYO OpenAI entitlement to device ${deviceId} via ${eventType}`
         );
       }
+      const { entitlements, updatedAt } =
+        await markCheckoutSessionFulfilledEntitlement({
+          deviceId,
+          entitlement: "byo_openai",
+          checkoutSessionId: session.id,
+          paymentIntentId,
+          stripeEventId: eventId,
+          stripeEventType: eventType,
+        });
+      await notifyDevicePaymentEvent(env, {
+        type: "entitlements.updated",
+        source: "stripe_webhook",
+        deviceId,
+        checkoutSessionId: session.id,
+        paymentIntentId,
+        entitlement: "byo_openai",
+        entitlements,
+        updatedAt,
+        stripeEventId: eventId,
+        stripeEventType: eventType,
+      });
     } catch (error) {
       console.error("Error granting BYO entitlement:", error);
       throw error;
@@ -216,6 +321,28 @@ const handleCheckoutPaid = async ({
         `Successfully credited ${packId} to device ${deviceId} via ${eventType}`
       );
     }
+    const { balanceAfter, updatedAt } =
+      await markCheckoutSessionFulfilledCredits({
+        deviceId,
+        packId,
+        checkoutSessionId: session.id,
+        paymentIntentId,
+        stripeEventId: eventId,
+        stripeEventType: eventType,
+      });
+    await notifyDevicePaymentEvent(
+      env,
+      buildCreditPaymentEvent({
+        deviceId,
+        checkoutSessionId: session.id,
+        paymentIntentId,
+        packId,
+        balanceAfter,
+        updatedAt,
+        stripeEventId: eventId,
+        stripeEventType: eventType,
+      })
+    );
   } catch (error) {
     console.error("Error crediting device:", error);
     throw error;
@@ -223,30 +350,82 @@ const handleCheckoutPaid = async ({
 };
 
 const handleCheckoutAsyncPaymentFailed = async ({
+  env,
+  eventId,
+  eventType,
   session,
 }: {
+  env: Stage5ApiBindings;
+  eventId: string;
+  eventType: "checkout.session.async_payment_failed";
   session: Stripe.Checkout.Session;
 }) => {
   const { deviceId, packId, entitlement } = session.metadata || {};
+  const paymentIntentId = getPaymentIntentIdFromCheckoutSession(session);
+  const message =
+    "Stripe reported checkout.session.async_payment_failed for this session";
   console.warn(
     `Async checkout payment failed for session ${session.id} (deviceId=${deviceId ?? "unknown"}, packId=${packId ?? "none"}, entitlement=${entitlement ?? "none"})`
   );
+  await markCheckoutSessionFailed({
+    checkoutSessionId: session.id,
+    deviceId: deviceId || null,
+    paymentIntentId,
+    stripeEventId: eventId,
+    stripeEventType: eventType,
+    errorMessage: message,
+  });
+  await notifyDevicePaymentEvent(env, {
+    type: "checkout.failed",
+    source: "stripe_webhook",
+    deviceId: deviceId || null,
+    checkoutSessionId: session.id,
+    paymentIntentId,
+    mode: entitlement === "byo_openai" ? "byo" : "credits",
+    packId: packId || null,
+    entitlement: entitlement || null,
+    message,
+    stripeEventId: eventId,
+    stripeEventType: eventType,
+  });
+  await sendPaymentAlert(env, {
+    title: "Stripe async checkout payment failed",
+    severity: "critical",
+    context: {
+      eventId,
+      eventType,
+      ...checkoutSessionFailureContext(session),
+    },
+  });
 };
 
 const handlePaymentSucceeded = async ({
+  env,
   eventId,
   paymentIntent,
 }: {
+  env: Stage5ApiBindings;
   eventId: string;
   paymentIntent: Stripe.PaymentIntent;
 }) => {
   console.log(`Payment succeeded: ${paymentIntent.id}`);
-  const { entitlement, deviceId, packId } = paymentIntent.metadata || {};
+  const checkoutDetails = await resolveCheckoutDetailsFromPaymentIntent({
+    env,
+    paymentIntent,
+    logContext: "succeeded",
+  });
+  const {
+    checkoutSessionId,
+    entitlement,
+    deviceId,
+    packId,
+  } = checkoutDetails;
   if (entitlement === "byo_openai" && deviceId) {
     try {
       const result = await fulfillByoOpenAiUnlock({
         deviceId,
         entitlement: "byo_openai",
+        checkoutSessionId,
         paymentIntentId: paymentIntent.id,
         stripeEventId: eventId,
         stripeEventType: "payment_intent.succeeded",
@@ -260,6 +439,27 @@ const handlePaymentSucceeded = async ({
           `Granted BYO OpenAI entitlement (payment_intent) to device ${deviceId}`
         );
       }
+      const { entitlements, updatedAt } =
+        await markCheckoutSessionFulfilledEntitlement({
+          deviceId,
+          entitlement: "byo_openai",
+          checkoutSessionId,
+          paymentIntentId: paymentIntent.id,
+          stripeEventId: eventId,
+          stripeEventType: "payment_intent.succeeded",
+        });
+      await notifyDevicePaymentEvent(env, {
+        type: "entitlements.updated",
+        source: "stripe_webhook",
+        deviceId,
+        checkoutSessionId,
+        paymentIntentId: paymentIntent.id,
+        entitlement: "byo_openai",
+        entitlements,
+        updatedAt,
+        stripeEventId: eventId,
+        stripeEventType: "payment_intent.succeeded",
+      });
     } catch (error) {
       console.error("Error granting BYO entitlement from payment intent:", error);
       throw error;
@@ -272,6 +472,7 @@ const handlePaymentSucceeded = async ({
       const result = await fulfillCreditPackPurchase({
         deviceId,
         packId: packId as PackId,
+        checkoutSessionId,
         paymentIntentId: paymentIntent.id,
         stripeEventId: eventId,
         stripeEventType: "payment_intent.succeeded",
@@ -286,6 +487,28 @@ const handlePaymentSucceeded = async ({
           `Credited ${packId} to device ${deviceId} via payment_intent.succeeded`
         );
       }
+      const { balanceAfter, updatedAt } =
+        await markCheckoutSessionFulfilledCredits({
+          deviceId,
+          packId,
+          checkoutSessionId,
+          paymentIntentId: paymentIntent.id,
+          stripeEventId: eventId,
+          stripeEventType: "payment_intent.succeeded",
+        });
+      await notifyDevicePaymentEvent(
+        env,
+        buildCreditPaymentEvent({
+          deviceId,
+          checkoutSessionId,
+          paymentIntentId: paymentIntent.id,
+          packId,
+          balanceAfter,
+          updatedAt,
+          stripeEventId: eventId,
+          stripeEventType: "payment_intent.succeeded",
+        })
+      );
     } catch (error) {
       console.error("Error crediting device from payment intent:", error);
       throw error;
@@ -294,12 +517,102 @@ const handlePaymentSucceeded = async ({
 };
 
 const handlePaymentFailed = async ({
+  env,
+  eventId,
+  eventType,
   paymentIntent,
 }: {
+  env: Stage5ApiBindings;
+  eventId: string;
+  eventType: "payment_intent.payment_failed";
   paymentIntent: Stripe.PaymentIntent;
 }) => {
-  console.log(`Payment failed: ${paymentIntent.id}`);
-  // Handle failed payments if needed
+  console.warn(`Payment failed: ${paymentIntent.id}`);
+  const message =
+    paymentIntent.last_payment_error?.message ||
+    "Stripe reported payment_intent.payment_failed";
+  const failureDetails = await resolveCheckoutDetailsFromPaymentIntent({
+    env,
+    paymentIntent,
+    logContext: "failed",
+  });
+
+  if (failureDetails.checkoutSessionStatus === "open") {
+    console.info(
+      `Payment attempt failed for open Checkout session ${failureDetails.checkoutSessionId}; leaving checkout recoverable.`
+    );
+    return;
+  }
+
+  if (
+    !failureDetails.checkoutSessionId ||
+    !failureDetails.checkoutSessionStatus
+  ) {
+    console.info(
+      `Payment intent ${paymentIntent.id} failed, but no terminal Checkout session could be resolved; leaving checkout state recoverable.`
+    );
+    await sendPaymentAlert(env, {
+      title: "Stripe payment intent failed without resolved Checkout session",
+      severity: "warning",
+      context: {
+        eventId,
+        eventType,
+        ...paymentIntentFailureContext(paymentIntent),
+      },
+    });
+    return;
+  }
+
+  if (
+    isCheckoutSessionFulfilled(failureDetails.checkoutSessionPaymentStatus)
+  ) {
+    console.info(
+      `Payment attempt failed for already-paid Checkout session ${failureDetails.checkoutSessionId}; ignoring stale failure.`
+    );
+    return;
+  }
+
+  const checkoutRecord = await getCheckoutSessionRecord({
+    checkoutSessionId: failureDetails.checkoutSessionId,
+    deviceId: failureDetails.deviceId,
+  });
+  if (checkoutRecord?.status === "fulfilled") {
+    console.info(
+      `Payment attempt failed for already-fulfilled tracked checkout ${failureDetails.checkoutSessionId}; ignoring stale failure.`
+    );
+    return;
+  }
+
+  await markCheckoutSessionFailed({
+    checkoutSessionId: failureDetails.checkoutSessionId,
+    deviceId: failureDetails.deviceId,
+    paymentIntentId: paymentIntent.id,
+    stripeEventId: eventId,
+    stripeEventType: eventType,
+    errorMessage: message,
+  });
+  await notifyDevicePaymentEvent(env, {
+    type: "checkout.failed",
+    source: "stripe_webhook",
+    deviceId: failureDetails.deviceId,
+    checkoutSessionId: failureDetails.checkoutSessionId,
+    paymentIntentId: paymentIntent.id,
+    mode: failureDetails.mode,
+    packId: failureDetails.packId,
+    entitlement: failureDetails.entitlement,
+    message,
+    stripeEventId: eventId,
+    stripeEventType: eventType,
+  });
+  await sendPaymentAlert(env, {
+    title: "Stripe payment intent failed",
+    severity: "critical",
+    context: {
+      eventId,
+      eventType,
+      ...paymentIntentFailureContext(paymentIntent),
+    },
+  });
 };
 
 export default router;

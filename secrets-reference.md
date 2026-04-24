@@ -47,6 +47,21 @@ wrangler secret put SECRET_NAME
 - **Purpose:** Seeds the D1-backed canonical device-token root secret when you want explicit initial secret control
 - **Used in:** Device token bootstrap and recovery replay
 
+### SENDGRID_API_KEY
+- **Value:** SendGrid API key
+- **Purpose:** Sends operational email alerts for payment failures and checkout client failures
+- **Used in:** Stripe webhook failure handlers and `/payments/checkout-event`
+
+### PAYMENT_ALERT_EMAIL_TO
+- **Value:** Comma-separated alert recipients (for example `mikey@stage5.tools`)
+- **Purpose:** Recipients for immediate payment/checkout failure notices
+- **Used in:** Payment alert email delivery
+
+### PAYMENT_ALERT_EMAIL_FROM
+- **Value:** Verified sender email address (for example `alerts@stage5.tools`)
+- **Purpose:** Sender for immediate payment/checkout failure notices
+- **Used in:** Payment alert email delivery
+
 ## Notes
 - Keep this file updated when secrets change
 - Never commit actual secret values to git in code files
