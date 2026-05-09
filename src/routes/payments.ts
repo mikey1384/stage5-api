@@ -69,45 +69,11 @@ const STRIPE_CHECKOUT_LOCALE_MAP = new Map<string, StripeCheckoutLocale>(
   STRIPE_CHECKOUT_LOCALES.map((locale) => [locale.toLowerCase(), locale]),
 );
 const DEFAULT_CHECKOUT_UI_ORIGIN = "https://translator.tools";
-const BYO_UNLOCK_KRW_AMOUNT = 15_422;
-const BYO_UNLOCK_PRODUCT_NAME = "BYO API Keys Unlock";
-const KOREAN_CHECKOUT_PAYMENT_METHOD_TYPES: Stripe.Checkout.SessionCreateParams.PaymentMethodType[] =
-  ["card", "kr_card", "kakao_pay", "naver_pay"];
-
-function shouldUseKoreanReliableCheckout(
-  checkoutCountry: string | null,
-): boolean {
-  return checkoutCountry === "KR";
-}
-
-function buildCheckoutPaymentMethodTypes(
-  checkoutCountry: string | null,
-): Stripe.Checkout.SessionCreateParams.PaymentMethodType[] | undefined {
-  if (!shouldUseKoreanReliableCheckout(checkoutCountry)) return undefined;
-
-  // Dynamic methods did not reliably surface KR local rails in live Checkout.
-  // Keep KR wallets explicit, but use the normal card rail for international cards.
-  return [...KOREAN_CHECKOUT_PAYMENT_METHOD_TYPES];
-}
 
 function buildCreditLineItem(
   packId: PackId,
-  checkoutCountry: string | null,
 ): Stripe.Checkout.SessionCreateParams.LineItem {
   const pack = packs[packId];
-
-  if (shouldUseKoreanReliableCheckout(checkoutCountry)) {
-    return {
-      price_data: {
-        currency: "krw",
-        unit_amount: pack.krw,
-        product_data: {
-          name: `${packId} - ${pack.credits.toLocaleString("en-US")} AI Credits`,
-        },
-      },
-      quantity: 1,
-    };
-  }
 
   return {
     price: pack.priceId,
@@ -117,21 +83,7 @@ function buildCreditLineItem(
 
 function buildByoUnlockLineItem(
   priceId: string | undefined,
-  checkoutCountry: string | null,
 ): Stripe.Checkout.SessionCreateParams.LineItem {
-  if (shouldUseKoreanReliableCheckout(checkoutCountry)) {
-    return {
-      price_data: {
-        currency: "krw",
-        unit_amount: BYO_UNLOCK_KRW_AMOUNT,
-        product_data: {
-          name: BYO_UNLOCK_PRODUCT_NAME,
-        },
-      },
-      quantity: 1,
-    };
-  }
-
   if (!priceId) {
     throw new Error("Missing Stripe BYO unlock price configuration");
   }
@@ -145,19 +97,7 @@ function buildByoUnlockLineItem(
 function resolveCheckoutCountry(
   rawCountry: string | undefined,
   requestCountry: string | null,
-  rawLocale: string | undefined,
 ): string | null {
-  const normalizedLocale = String(rawLocale || "")
-    .trim()
-    .replace(/_/g, "-")
-    .toLowerCase();
-
-  // Korean UI locale is the product signal for the KR reliable-payment route.
-  // Machine/IP regions can be TH/US/etc. while the user still needs Korean rails.
-  if (normalizedLocale === "ko" || normalizedLocale.startsWith("ko-")) {
-    return "KR";
-  }
-
   const candidates = [requestCountry, rawCountry];
 
   for (const candidate of candidates) {
@@ -403,7 +343,6 @@ router.post("/create-session", async (c) => {
     const checkoutCountry = resolveCheckoutCountry(
       country,
       getRequestCountry(c),
-      locale,
     );
     alertContext = {
       route: "/payments/create-session",
@@ -421,17 +360,14 @@ router.post("/create-session", async (c) => {
     const uiOrigin = resolveCheckoutUiOrigin(c.env.UI_ORIGIN);
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
     const checkoutLocale = resolveStripeCheckoutLocale(locale);
-    const paymentMethodTypes = buildCheckoutPaymentMethodTypes(checkoutCountry);
     const checkoutReturnId = createCheckoutReturnId();
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       allow_promotion_codes: true,
+      adaptive_pricing: { enabled: false },
       locale: checkoutLocale,
-      ...(paymentMethodTypes
-        ? { payment_method_types: paymentMethodTypes }
-        : {}),
-      line_items: [buildCreditLineItem(packId, checkoutCountry)],
+      line_items: [buildCreditLineItem(packId)],
       success_url: buildCheckoutReturnPageUrl({
         uiOrigin,
         status: "success",
@@ -532,7 +468,6 @@ router.post("/create-byo-unlock", async (c) => {
     const checkoutCountry = resolveCheckoutCountry(
       country,
       getRequestCountry(c),
-      locale,
     );
     alertContext = {
       route: "/payments/create-byo-unlock",
@@ -547,7 +482,7 @@ router.post("/create-byo-unlock", async (c) => {
     }
 
     const priceId = c.env.STRIPE_BYO_UNLOCK_PRICE_ID;
-    if (!priceId && !shouldUseKoreanReliableCheckout(checkoutCountry)) {
+    if (!priceId) {
       console.error(
         "STRIPE_BYO_UNLOCK_PRICE_ID is not configured; cannot create BYO checkout",
       );
@@ -568,17 +503,14 @@ router.post("/create-byo-unlock", async (c) => {
     const uiOrigin = resolveCheckoutUiOrigin(c.env.UI_ORIGIN);
     const stripe = getStripe(c.env.STRIPE_SECRET_KEY);
     const checkoutLocale = resolveStripeCheckoutLocale(locale);
-    const paymentMethodTypes = buildCheckoutPaymentMethodTypes(checkoutCountry);
     const checkoutReturnId = createCheckoutReturnId();
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       allow_promotion_codes: true,
+      adaptive_pricing: { enabled: false },
       locale: checkoutLocale,
-      ...(paymentMethodTypes
-        ? { payment_method_types: paymentMethodTypes }
-        : {}),
-      line_items: [buildByoUnlockLineItem(priceId, checkoutCountry)],
+      line_items: [buildByoUnlockLineItem(priceId)],
       success_url: buildCheckoutReturnPageUrl({
         uiOrigin,
         status: "success",

@@ -12,6 +12,11 @@ import {
   reserveBillingCredits,
 } from "../src/lib/db.ts";
 import {
+  estimateTranslationReservationCredits,
+  finalizeRelayCredits,
+  reserveRelayCredits,
+} from "../src/lib/relay-billing.ts";
+import {
   createSqliteD1Database,
   resetSqliteD1Database,
 } from "./helpers/sqlite-d1.mjs";
@@ -189,4 +194,58 @@ test("released reservations are re-reserved instead of replayed as duplicates", 
     endingCredits?.credit_balance ?? null,
     (startingCredits?.credit_balance ?? 0) - spend
   );
+});
+
+test("relay translation finalization settles legacy GPT-5.4 reservations at reserved pricing", async () => {
+  const deviceId = "20000000-0000-4000-8000-000000000004";
+  const requestKey = "translation:legacy-gpt54-direct-finalize";
+  const promptTokens = 1_000_000;
+  const completionTokens = 0;
+  const legacySpend = estimateTranslationReservationCredits({
+    promptTokens,
+    maxCompletionTokens: completionTokens,
+    model: "gpt-5.4",
+    webSearchCalls: 0,
+  });
+  const routedSpend = estimateTranslationReservationCredits({
+    promptTokens,
+    maxCompletionTokens: completionTokens,
+    model: "gpt-5.5",
+    webSearchCalls: 0,
+  });
+
+  assert.ok(routedSpend > legacySpend);
+  await creditDevice({ deviceId, packId: "PRO" });
+
+  const reserved = await reserveRelayCredits({
+    deviceId,
+    service: "translation",
+    requestKey,
+    promptTokens,
+    maxCompletionTokens: completionTokens,
+    model: "gpt-5.4",
+    webSearchCalls: 0,
+  });
+  assert.ok(reserved.ok);
+  assert.equal(reserved.status, "reserved");
+
+  const finalized = await finalizeRelayCredits({
+    deviceId,
+    service: "translation",
+    requestKey,
+    promptTokens,
+    completionTokens,
+    model: "gpt-5.5",
+    webSearchCalls: 0,
+  });
+  assert.ok(finalized.ok);
+  assert.equal(finalized.status, "settled");
+
+  const reservation = await getBillingReservation({
+    deviceId,
+    service: "translation",
+    requestKey,
+  });
+  assert.equal(reservation?.status, "settled");
+  assert.equal(reservation?.settled_spend, legacySpend);
 });

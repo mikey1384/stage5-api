@@ -1,5 +1,6 @@
 import {
   DEFAULT_STAGE5_TRANSLATION_MODEL,
+  normalizeStage5TranslationBillingModel,
   normalizeStage5TranslationModel,
   STAGE5_TRANSCRIPTION_MODEL_PRICES,
   STAGE5_TTS_MODEL_STANDARD,
@@ -31,10 +32,14 @@ export function normalizeTranslationModel(model?: string): string {
   return normalizeStage5TranslationModel(model);
 }
 
+export function normalizeTranslationBillingModel(model?: string): string {
+  return normalizeStage5TranslationBillingModel(model);
+}
+
 function getTokenModelPricing(
   model: string
 ): { in: number; out: number } | null {
-  const normalizedModel = normalizeTranslationModel(model);
+  const normalizedModel = normalizeTranslationBillingModel(model);
   const pricing = MODEL_PRICES[normalizedModel as keyof typeof MODEL_PRICES];
   if (!pricing || !("in" in pricing) || !("out" in pricing)) {
     return null;
@@ -67,7 +72,7 @@ export function getAllowedTranslationModels(): string[] {
 }
 
 export function isAllowedTranslationModel(model?: string): boolean {
-  const normalizedModel = normalizeTranslationModel(model);
+  const normalizedModel = normalizeTranslationBillingModel(model);
   return getTokenModelPricing(normalizedModel) !== null;
 }
 
@@ -80,7 +85,7 @@ export function tokensToCredits({
   completion: number;
   model?: string;
 }): number {
-  const normalizedModel = normalizeTranslationModel(model);
+  const normalizedModel = normalizeTranslationBillingModel(model);
   const pricing = getTokenModelPricing(normalizedModel);
   if (!pricing) {
     throw new Error(`No translation pricing defined for model: ${normalizedModel}`);

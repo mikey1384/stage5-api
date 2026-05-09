@@ -4,12 +4,17 @@ import test, { before, beforeEach } from "node:test";
 import worker from "../src/index.ts";
 import { ensureDatabase } from "../src/lib/db/core.ts";
 import {
+  createTranslationJobWithReservation,
   creditDevice,
+  getBillingReservation,
+  getCredits,
   registerDeviceApiToken,
 } from "../src/lib/db.ts";
 import { buildScopedIdempotencyKey } from "../src/lib/request-utils.ts";
 import { normalizeTranslationModel } from "../src/lib/pricing.ts";
 import { clearRelayCapabilitiesCacheForTests } from "../src/lib/relay-capabilities.ts";
+import { estimateTranslationReservationCredits } from "../src/lib/relay-billing.ts";
+import { buildTranslationReservationKey } from "../src/lib/translation-idempotency.ts";
 import { encodeTranslationJobError } from "../src/routes/translate/error-utils.ts";
 import {
   createSqliteD1Database,
@@ -178,6 +183,200 @@ test("same-idempotency retries against failed translation jobs do not reserve cr
       .prepare("SELECT credit_balance FROM credits WHERE device_id = ?")
       .get(deviceId)?.credit_balance ?? 0;
   assert.equal(endingCredits, startingCredits);
+});
+
+test("legacy GPT-5.4 idempotency retries replay pre-upgrade jobs", async () => {
+  const deviceId = "30000000-0000-4000-8000-0000000000a1";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  await creditDevice({ deviceId, packId: "MICRO" });
+
+  const requestIdempotencyKey = "translate-legacy-gpt54-retry";
+  const messages = [
+    {
+      role: "system",
+      content:
+        "You are a subtitle reviewer. Output exactly @@SUB_LINE@@ entries with no commentary.",
+    },
+    { role: "user", content: "@@SUB_LINE@@ 1: Hello world" },
+  ];
+  const payload = {
+    mode: "chat",
+    messages,
+    model: "gpt-5.4",
+    modelFamily: "gpt",
+    reasoning: undefined,
+    translationPhase: "review",
+    qualityMode: true,
+  };
+  const jobId = buildTranslationJobId({
+    deviceId,
+    requestIdempotencyKey,
+    payload,
+  });
+
+  sqlite
+    .prepare(
+      `INSERT INTO translation_jobs (
+         job_id,
+         device_id,
+         status,
+         model,
+         payload,
+         relay_job_id,
+         result,
+         error,
+         prompt_tokens,
+         completion_tokens,
+         credited,
+         created_at,
+         updated_at
+       )
+       VALUES (?, ?, 'failed', ?, ?, NULL, NULL, ?, NULL, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    )
+    .run(
+      jobId,
+      deviceId,
+      payload.model,
+      JSON.stringify(payload),
+      encodeTranslationJobError({
+        message: "Prior legacy translation failure",
+        statusCode: 500,
+      })
+    );
+
+  const response = await apiRequest("/translate", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "content-type": "application/json",
+      "Idempotency-Key": requestIdempotencyKey,
+    },
+    body: JSON.stringify({
+      messages,
+      model: "gpt-5.4",
+      modelFamily: "gpt",
+      translationPhase: "review",
+      qualityMode: true,
+    }),
+  });
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), {
+    error: "Prior legacy translation failure",
+  });
+
+  const jobCount =
+    sqlite
+      .prepare("SELECT COUNT(*) AS count FROM translation_jobs WHERE device_id = ?")
+      .get(deviceId)?.count ?? 0;
+  assert.equal(Number(jobCount), 1);
+
+  const reservationCount =
+    sqlite
+      .prepare(
+        "SELECT COUNT(*) AS count FROM billing_reservations WHERE device_id = ?"
+      )
+      .get(deviceId)?.count ?? 0;
+  assert.equal(Number(reservationCount), 0);
+});
+
+test("legacy GPT-5.4 queued jobs settle at their reserved model", async () => {
+  const deviceId = "30000000-0000-4000-8000-0000000000a2";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  const jobId = "translation-legacy-gpt54-settlement";
+  const relayJobId = "relay-legacy-gpt54-settlement";
+  const legacyModel = "gpt-5.4";
+  const routedModel = "gpt-5.5";
+  const promptTokens = 1_000_000;
+  const completionTokens = 0;
+  const payload = {
+    mode: "chat",
+    messages: [{ role: "user", content: "Legacy review job" }],
+    model: legacyModel,
+  };
+  const legacySpend = estimateTranslationReservationCredits({
+    promptTokens,
+    maxCompletionTokens: completionTokens,
+    model: legacyModel,
+    webSearchCalls: 0,
+  });
+  const routedSpend = estimateTranslationReservationCredits({
+    promptTokens,
+    maxCompletionTokens: completionTokens,
+    model: routedModel,
+    webSearchCalls: 0,
+  });
+
+  assert.ok(routedSpend > legacySpend);
+  await creditDevice({ deviceId, packId: "PRO" });
+  const startingCredits = (await getCredits({ deviceId }))?.credit_balance ?? 0;
+
+  const created = await createTranslationJobWithReservation({
+    jobId,
+    deviceId,
+    model: legacyModel,
+    payload,
+    reservationRequestKey: buildTranslationReservationKey(jobId),
+    reservationSpend: legacySpend,
+    reservationReason: "TEST_TRANSLATE_RESERVE",
+    reservationMeta: { source: "test", reservedModel: legacyModel },
+  });
+  assert.ok(created.ok);
+
+  sqlite
+    .prepare(
+      `UPDATE translation_jobs
+          SET status = 'processing',
+              relay_job_id = ?,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE job_id = ?`
+    )
+    .run(relayJobId, jobId);
+
+  globalThis.fetch = async (input) => {
+    const url = typeof input === "string" ? input : input?.url;
+    if (
+      url ===
+      `https://translator-relay.fly.dev/translate/result/${relayJobId}`
+    ) {
+      return new Response(
+        JSON.stringify({
+          model: routedModel,
+          usage: {
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+          },
+          choices: [{ message: { content: "" } }],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const response = await apiRequest(`/translate/result/${jobId}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+    },
+  });
+
+  assert.equal(response.status, 200);
+
+  const reservation = await getBillingReservation({
+    deviceId,
+    service: "translation",
+    requestKey: buildTranslationReservationKey(jobId),
+  });
+  assert.equal(reservation?.status, "settled");
+  assert.equal(reservation?.settled_spend, legacySpend);
+
+  const endingCredits = (await getCredits({ deviceId }))?.credit_balance ?? 0;
+  assert.equal(endingCredits, startingCredits - legacySpend);
 });
 
 test("queued subtitle review reserves Claude when relay capabilities expose Anthropic review", async () => {
@@ -361,7 +560,7 @@ test("review translations normalize Claude hints when capability probe falls bac
     )
     .get(deviceId);
   const meta = JSON.parse(String(reservation?.meta || "{}"));
-  assert.equal(meta.reservedModel, "gpt-5.4");
+  assert.equal(meta.reservedModel, "gpt-5.5");
   assert.equal(relayTranslatePayload?.modelFamily, "gpt");
   assert.notEqual(relayTranslatePayload?.model, "claude-opus-4-7");
 });

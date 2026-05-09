@@ -3,8 +3,14 @@ import test from "node:test";
 
 import {
   DEFAULT_STAGE5_TRANSLATION_MODEL,
+  STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL,
   STAGE5_REVIEW_TRANSLATION_MODEL,
+  normalizeStage5TranslationModel,
 } from "../src/lib/model-catalog.ts";
+import {
+  normalizeTranslationBillingModel,
+  tokensToCredits,
+} from "../src/lib/pricing.ts";
 import { resolveAuthoritativeTranslationModel } from "../src/lib/translation-model-selection.ts";
 
 const REVIEW_MESSAGES = [
@@ -19,12 +25,12 @@ const REVIEW_MESSAGES = [
   },
 ];
 
-test("subtitle review defaults to GPT-5.4 on the Stage5 credit path", () => {
+test("subtitle review defaults to GPT-5.5 on the Stage5 credit path", () => {
   for (const modelFamily of [undefined, "auto", "gpt"]) {
     for (const canUseAnthropic of [false, true]) {
       assert.equal(
         resolveAuthoritativeTranslationModel({
-          requestedModel: "gpt-5.4",
+          requestedModel: "gpt-5.5",
           modelFamily,
           messages: REVIEW_MESSAGES,
           canUseAnthropic,
@@ -35,6 +41,36 @@ test("subtitle review defaults to GPT-5.4 on the Stage5 credit path", () => {
       );
     }
   }
+});
+
+test("legacy GPT-5.4 requests normalize to GPT-5.5", () => {
+  assert.equal(
+    normalizeStage5TranslationModel("gpt-5.4"),
+    STAGE5_REVIEW_TRANSLATION_MODEL,
+  );
+});
+
+test("legacy GPT-5.4 billing keeps GPT-5.4 pricing", () => {
+  assert.equal(
+    normalizeTranslationBillingModel("gpt-5.4"),
+    STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL,
+  );
+  assert.equal(
+    tokensToCredits({
+      prompt: 1_000_000,
+      completion: 0,
+      model: "gpt-5.4",
+    }),
+    175_000,
+  );
+  assert.equal(
+    tokensToCredits({
+      prompt: 1_000_000,
+      completion: 0,
+      model: STAGE5_REVIEW_TRANSLATION_MODEL,
+    }),
+    350_000,
+  );
 });
 
 test("subtitle review honors the Anthropic family hint when worker-side Anthropic review is available", () => {
@@ -51,7 +87,7 @@ test("subtitle review honors the Anthropic family hint when worker-side Anthropi
   );
 });
 
-test("subtitle review falls back to GPT-5.4 when worker-side Anthropic review is unavailable", () => {
+test("subtitle review falls back to GPT-5.5 when worker-side Anthropic review is unavailable", () => {
   assert.equal(
     resolveAuthoritativeTranslationModel({
       requestedModel: "claude-opus-4-6",

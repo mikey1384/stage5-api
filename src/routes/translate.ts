@@ -2,7 +2,11 @@ import { Hono, Context } from "hono";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { API_ERRORS, getProviderFromModel, isClaudeModel } from "../lib/constants";
-import { isAllowedTranslationModel, normalizeTranslationModel } from "../lib/pricing";
+import {
+  isAllowedTranslationModel,
+  normalizeTranslationBillingModel,
+  normalizeTranslationModel,
+} from "../lib/pricing";
 import {
   createTranslationJobWithReservation,
   claimTranslationJobDispatch,
@@ -21,6 +25,7 @@ import {
   TranslationJobRecord,
 } from "../lib/db";
 import { estimateTranslationReservationCredits } from "../lib/relay-billing";
+import { STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL } from "../lib/model-catalog";
 import {
   submitTranslationRelayJob,
   fetchRelayTranslationStatus,
@@ -260,6 +265,8 @@ router.post("/", async (c) => {
     // Forward caller model for non-subtitle compatibility. Relay remains authoritative
     // for subtitle draft/review phases via translationPhase + modelFamily.
     const normalizedRequestedModel = normalizeTranslationModel(requestedModel);
+    const idempotencyRequestedModel =
+      normalizeTranslationBillingModel(requestedModel);
     const isReviewPhase =
       translationPhase === "review" ||
       (translationPhase !== "draft" &&
@@ -280,13 +287,27 @@ router.post("/", async (c) => {
       idempotencyKey: requestIdempotencyKey ?? null,
       traceId: requestId,
     };
+    const idempotencyPayload = {
+      ...payload,
+      model: idempotencyRequestedModel,
+    };
     const jobId = buildTranslationJobId({
       deviceId: user.deviceId,
       requestIdempotencyKey,
-      payload,
+      payload: idempotencyPayload,
     });
+    const routedJobId =
+      requestIdempotencyKey && idempotencyRequestedModel !== payload.model
+        ? buildTranslationJobId({
+            deviceId: user.deviceId,
+            requestIdempotencyKey,
+            payload,
+          })
+        : null;
 
-    const existingJob = await getTranslationJob({ jobId });
+    const existingJob =
+      (await getTranslationJob({ jobId })) ||
+      (routedJobId ? await getTranslationJob({ jobId: routedJobId }) : null);
     if (existingJob) {
       return await respondWithExistingTranslationJobFromCreate({
         c,
@@ -1372,7 +1393,22 @@ async function persistCompletion({
     const usage = completion?.usage ?? {};
     const rawCompletionModel =
       typeof completion?.model === "string" ? completion.model.trim() : "";
-    const billedModel = normalizeTranslationModel(rawCompletionModel);
+
+    const job = await getTranslationJob({ jobId });
+    if (!job) {
+      incrementCounter("translate.persist_failed_total", {
+        reason: "job-not-found",
+      });
+      return { status: "error", code: 500, message: "Job not found" };
+    }
+
+    const storedJobBillingModel = normalizeTranslationBillingModel(
+      typeof job.model === "string" ? job.model : ""
+    );
+    const billedModel =
+      storedJobBillingModel === STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL
+        ? storedJobBillingModel
+        : normalizeTranslationBillingModel(rawCompletionModel);
     const maxCompletionTokens = resolveTranslationReservationMaxCompletionTokens({
       model: billedModel,
       reasoning: (payload as any)?.reasoning,
@@ -1393,21 +1429,16 @@ async function persistCompletion({
             maxCompletionTokens,
           });
 
-    const job = await getTranslationJob({ jobId });
-    if (!job) {
-      incrementCounter("translate.persist_failed_total", {
-        reason: "job-not-found",
-      });
-      return { status: "error", code: 500, message: "Job not found" };
-    }
-
     const credited =
       typeof job.credited === "number"
         ? job.credited
         : Number.parseInt(String(job.credited ?? 0), 10) || 0;
 
     if (credited <= 0) {
-      if (!rawCompletionModel) {
+      if (
+        !rawCompletionModel &&
+        billedModel !== STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL
+      ) {
         incrementCounter("translate.persist_failed_total", {
           reason: "missing-completion-model",
         });
@@ -1456,6 +1487,8 @@ async function persistCompletion({
           promptTokens,
           completionTokens,
           model: billedModel,
+          completionModel: rawCompletionModel || null,
+          jobModel: job.model || null,
           spend: actualSpend,
         },
       });

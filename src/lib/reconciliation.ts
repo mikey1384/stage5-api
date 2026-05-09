@@ -11,7 +11,11 @@ import {
   type TranslationJobRecord,
 } from "./db";
 import { API_ERRORS } from "./constants";
-import { isAllowedTranslationModel, normalizeTranslationModel } from "./pricing";
+import {
+  isAllowedTranslationModel,
+  normalizeTranslationBillingModel,
+} from "./pricing";
+import { STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL } from "./model-catalog";
 import { estimateTranslationReservationCredits } from "./relay-billing";
 import { cleanupDurableTranscriptionJobs } from "./transcription-job-cleanup";
 import { buildR2TranscriptionReservationKey } from "./transcription-billing";
@@ -105,15 +109,29 @@ function resolveBillingModel(job: TranslationJobRecord): string | null {
   const parsedResult = parseJsonObject(job.result);
   const parsedPayload = parseJsonObject(job.payload);
 
+  const storedModel = typeof job.model === "string" ? job.model.trim() : "";
+  if (
+    normalizeTranslationBillingModel(storedModel) ===
+    STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL
+  ) {
+    return storedModel;
+  }
+
+  const payloadModel =
+    typeof parsedPayload?.model === "string" ? parsedPayload.model.trim() : "";
+  if (
+    normalizeTranslationBillingModel(payloadModel) ===
+    STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL
+  ) {
+    return payloadModel;
+  }
+
   const completionModel =
     typeof parsedResult?.model === "string" ? parsedResult.model.trim() : "";
   if (completionModel) return completionModel;
 
-  const payloadModel =
-    typeof parsedPayload?.model === "string" ? parsedPayload.model.trim() : "";
   if (payloadModel) return payloadModel;
 
-  const storedModel = typeof job.model === "string" ? job.model.trim() : "";
   return storedModel || null;
 }
 
@@ -266,7 +284,7 @@ export async function runReconciliation(
       }
 
       const rawModel = resolveBillingModel(job);
-      const normalizedModel = normalizeTranslationModel(rawModel || "");
+      const normalizedModel = normalizeTranslationBillingModel(rawModel || "");
       if (!rawModel || !isAllowedTranslationModel(normalizedModel)) {
         if (!cfg.dryRun) {
           await failTranslationJobDuringReconciliation({

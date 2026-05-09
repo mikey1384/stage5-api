@@ -150,6 +150,80 @@ test("reconciliation settles an existing translation reservation instead of char
   assert.equal(reservation?.settled_spend, actualSpend);
 });
 
+test("reconciliation settles legacy GPT-5.4 jobs at legacy pricing", async () => {
+  const deviceId = "40000000-0000-4000-8000-0000000000a1";
+  const jobId = "translation-reconcile-legacy-gpt54";
+  const model = "gpt-5.4";
+  const payload = {
+    mode: "chat",
+    messages: [{ role: "user", content: "Legacy review job" }],
+    model,
+  };
+  const promptTokens = 1_000_000;
+  const completionTokens = 0;
+  const routedCompletionModel = "gpt-5.5";
+  const actualSpend = estimateTranslationReservationCredits({
+    promptTokens,
+    maxCompletionTokens: completionTokens,
+    model,
+    webSearchCalls: 0,
+  });
+  assert.equal(actualSpend, 175_000);
+
+  await creditDevice({ deviceId, packId: "PRO" });
+  const startingCredits = (await getCredits({ deviceId }))?.credit_balance ?? 0;
+
+  const created = await createTranslationJobWithReservation({
+    jobId,
+    deviceId,
+    model,
+    payload,
+    reservationRequestKey: buildTranslationReservationKey(jobId),
+    reservationSpend: actualSpend,
+    reservationReason: "TEST_TRANSLATE_RESERVE",
+    reservationMeta: { source: "test", reservedModel: model },
+  });
+
+  assert.ok(created.ok);
+  assert.equal(created.status, "created");
+
+  sqlite
+    .prepare(
+      `UPDATE translation_jobs
+          SET status = 'completed',
+              result = ?,
+              prompt_tokens = ?,
+              completion_tokens = ?,
+              credited = 0,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE job_id = ?`
+    )
+    .run(
+      JSON.stringify({
+        model: routedCompletionModel,
+        usage: { completion_tokens: completionTokens },
+        choices: [{ message: { content: "" } }],
+      }),
+      promptTokens,
+      completionTokens,
+      jobId
+    );
+
+  const report = await runReconciliation({ limit: 20 });
+  assert.equal(report.translation.rebilled, 1);
+
+  const endingCredits = (await getCredits({ deviceId }))?.credit_balance ?? 0;
+  assert.equal(endingCredits, startingCredits - actualSpend);
+
+  const reservation = await getBillingReservation({
+    deviceId,
+    service: "translation",
+    requestKey: buildTranslationReservationKey(jobId),
+  });
+  assert.equal(reservation?.status, "settled");
+  assert.equal(reservation?.settled_spend, actualSpend);
+});
+
 test("reconciliation releases a reserved translation when the completed job has no result", async () => {
   const deviceId = "40000000-0000-4000-8000-000000000002";
   const jobId = "translation-reconcile-failed";

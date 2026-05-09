@@ -2,6 +2,7 @@ import {
   getUserByApiKey,
   confirmExistingBillingReservation,
   findBillingReservationByRelayRetryHint,
+  getBillingReservation,
   increaseBillingReservation,
   mergeBillingReservationMeta,
   reserveBillingCredits,
@@ -11,7 +12,7 @@ import {
 import {
   charactersToCredits,
   isAllowedTranslationModel,
-  normalizeTranslationModel,
+  normalizeTranslationBillingModel,
   secondsToCredits,
   tokensToCredits,
   type TTSModel,
@@ -19,6 +20,7 @@ import {
 } from "./pricing";
 import {
   DEFAULT_STAGE5_TRANSLATION_MODEL,
+  STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL,
   STAGE5_ELEVENLABS_SCRIBE_MODEL,
   STAGE5_TTS_MODEL_STANDARD,
 } from "./model-catalog";
@@ -179,7 +181,21 @@ function getDuplicateReservationDetails(
 }
 
 function normalizedTranslationModel(raw: unknown): string {
-  return normalizeTranslationModel(String(raw || DEFAULT_STAGE5_TRANSLATION_MODEL));
+  return normalizeTranslationBillingModel(
+    String(raw || DEFAULT_STAGE5_TRANSLATION_MODEL)
+  );
+}
+
+function getLegacyReservedTranslationModel(rawMeta: unknown): string | null {
+  const meta = asObject(rawMeta);
+  if (!meta) return null;
+  const reservedModel =
+    asNonEmptyString(meta.reservedModel) || asNonEmptyString(meta.model);
+  if (!reservedModel) return null;
+  const normalizedModel = normalizeTranslationBillingModel(reservedModel);
+  return normalizedModel === STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL
+    ? normalizedModel
+    : null;
 }
 
 function parseTranslationReserveInput(
@@ -573,14 +589,32 @@ export async function finalizeRelayCredits(
     case RELAY_BILLING_SERVICES.TRANSLATION: {
       const parsed = parseTranslationFinalizeInput(body);
       if ("ok" in parsed) return parsed;
-      const spend = translationSpend(parsed);
+      const reservation = await getBillingReservation({
+        deviceId,
+        service,
+        requestKey,
+      });
+      const legacyReservedModel = getLegacyReservedTranslationModel(
+        parseReservationMeta(reservation?.meta)
+      );
+      const billed = legacyReservedModel
+        ? { ...parsed, model: legacyReservedModel }
+        : parsed;
+      const spend = translationSpend(billed);
       const result = await settleBillingReservation({
         deviceId,
         service,
         requestKey,
         actualSpend: spend,
         reason: "TRANSLATE",
-        meta: mergeMeta({ ...parsed, spend }, body.meta),
+        meta: mergeMeta(
+          {
+            ...billed,
+            completionModel: parsed.model,
+            spend,
+          },
+          body.meta
+        ),
       });
       if (!result.ok) {
         return fail(

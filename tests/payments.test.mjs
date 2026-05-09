@@ -430,6 +430,9 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.ok(packCancelUrl.searchParams.get("return_id"));
   assert.equal(packCancelUrl.searchParams.has("session_id"), false);
   assert.equal("payment_method_types" in createdParams[0], false);
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
+  assert.equal(createdParams[0]?.line_items?.[0]?.price, packs.MICRO.priceId);
+  assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
   assert.match(
     createdParams[1]?.success_url,
     /^https:\/\/translator\.tools\/checkout\/success\?mode=byo&return_id=[a-zA-Z0-9_-]+&session_id=\{CHECKOUT_SESSION_ID\}$/
@@ -440,6 +443,12 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.ok(byoCancelUrl.searchParams.get("return_id"));
   assert.equal(byoCancelUrl.searchParams.has("session_id"), false);
   assert.equal("payment_method_types" in createdParams[1], false);
+  assert.deepEqual(createdParams[1]?.adaptive_pricing, { enabled: false });
+  assert.equal(
+    createdParams[1]?.line_items?.[0]?.price,
+    env.STRIPE_BYO_UNLOCK_PRICE_ID
+  );
+  assert.equal("price_data" in createdParams[1]?.line_items?.[0], false);
 
   const settlement = await apiRequest("/payments/session/cs_test_pack", {
     headers: authHeaders(apiToken),
@@ -454,7 +463,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   );
 });
 
-test("Korean credit checkout uses KRW with local payment methods", async () => {
+test("Korean credit checkout keeps USD price IDs and disables adaptive pricing", async () => {
   const deviceId = "44444444-4444-4444-8444-444444444444";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -484,31 +493,19 @@ test("Korean credit checkout uses KRW with local payment methods", async () => {
 
   assert.equal(response.status, 200);
   assert.equal((await response.json()).sessionId, "cs_test_korean_pack");
-  assert.deepEqual(createdParams[0]?.payment_method_types, [
-    "card",
-    "kr_card",
-    "kakao_pay",
-    "naver_pay",
-  ]);
+  assert.equal("payment_method_types" in createdParams[0], false);
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
   assert.equal(createdParams[0]?.locale, "ko");
-  assert.equal(createdParams[0]?.line_items?.[0]?.price, undefined);
   assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.currency,
-    "krw"
+    createdParams[0]?.line_items?.[0]?.price,
+    packs.STANDARD.priceId
   );
-  assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.unit_amount,
-    packs.STANDARD.krw
-  );
-  assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.product_data?.name,
-    "STANDARD - 350,000 AI Credits"
-  );
+  assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
   assert.equal(createdParams[0]?.metadata?.packId, "STANDARD");
   assert.equal(createdParams[0]?.metadata?.deviceId, deviceId);
 });
 
-test("Korean checkout locale overrides non-KR country hints", async () => {
+test("Korean checkout locale does not switch non-KR users to local-currency checkout", async () => {
   const deviceId = "47474747-4747-4747-8747-474747474747";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -543,23 +540,16 @@ test("Korean checkout locale overrides non-KR country hints", async () => {
     (await response.json()).sessionId,
     "cs_test_korean_country_override"
   );
-  assert.deepEqual(createdParams[0]?.payment_method_types, [
-    "card",
-    "kr_card",
-    "kakao_pay",
-    "naver_pay",
-  ]);
+  assert.equal("payment_method_types" in createdParams[0], false);
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
   assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.currency,
-    "krw"
+    createdParams[0]?.line_items?.[0]?.price,
+    packs.MICRO.priceId
   );
-  assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.unit_amount,
-    packs.MICRO.krw
-  );
+  assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
 });
 
-test("request country overrides locale-derived country hint for Korean geo", async () => {
+test("Korean request country keeps USD price IDs", async () => {
   const deviceId = "48484848-4848-4848-8848-484848484848";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -590,24 +580,20 @@ test("request country overrides locale-derived country hint for Korean geo", asy
   });
 
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).sessionId, "cs_test_korean_geo_override");
-  assert.deepEqual(createdParams[0]?.payment_method_types, [
-    "card",
-    "kr_card",
-    "kakao_pay",
-    "naver_pay",
-  ]);
   assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.currency,
-    "krw"
+    (await response.json()).sessionId,
+    "cs_test_korean_geo_override"
   );
+  assert.equal("payment_method_types" in createdParams[0], false);
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
   assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.unit_amount,
-    packs.MICRO.krw
+    createdParams[0]?.line_items?.[0]?.price,
+    packs.MICRO.priceId
   );
+  assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
 });
 
-test("Korean BYO checkout uses KRW with local payment methods", async () => {
+test("Korean BYO checkout uses USD price ID and disables adaptive pricing", async () => {
   const deviceId = "49494949-4949-4949-8949-494949494949";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -636,26 +622,14 @@ test("Korean BYO checkout uses KRW with local payment methods", async () => {
 
   assert.equal(response.status, 200);
   assert.equal((await response.json()).sessionId, "cs_test_korean_byo");
-  assert.deepEqual(createdParams[0]?.payment_method_types, [
-    "card",
-    "kr_card",
-    "kakao_pay",
-    "naver_pay",
-  ]);
+  assert.equal("payment_method_types" in createdParams[0], false);
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
   assert.equal(createdParams[0]?.locale, "ko");
-  assert.equal(createdParams[0]?.line_items?.[0]?.price, undefined);
   assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.currency,
-    "krw"
+    createdParams[0]?.line_items?.[0]?.price,
+    env.STRIPE_BYO_UNLOCK_PRICE_ID
   );
-  assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.unit_amount,
-    15_422
-  );
-  assert.equal(
-    createdParams[0]?.line_items?.[0]?.price_data?.product_data?.name,
-    "BYO API Keys Unlock"
-  );
+  assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
   assert.equal(createdParams[0]?.metadata?.entitlement, "byo_openai");
   assert.equal(createdParams[0]?.metadata?.deviceId, deviceId);
 });
