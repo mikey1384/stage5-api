@@ -7,6 +7,7 @@ function canonicalizeModelId(model?: string): string {
 export const DEFAULT_STAGE5_TRANSLATION_MODEL = "gpt-5.1";
 export const STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL = "gpt-5.4";
 export const STAGE5_REVIEW_TRANSLATION_MODEL = "gpt-5.5";
+export const STAGE5_CLAUDE_OPUS_MODEL = "claude-opus-4-8";
 export const STAGE5_WHISPER_MODEL = "whisper-1";
 export const STAGE5_ELEVENLABS_SCRIBE_MODEL = "elevenlabs-scribe";
 export const STAGE5_TTS_MODEL_STANDARD = "tts-1";
@@ -17,17 +18,21 @@ const STAGE5_TTS_MODEL_ELEVEN_MULTILINGUAL_V2_LEGACY = "eleven_multilingual_v2";
 export const STAGE5_TRANSLATION_MODEL_ALIASES = {
   // Legacy GPT-5.4 requests from older clients route to current GPT review.
   [STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL]: STAGE5_REVIEW_TRANSLATION_MODEL,
-  // Legacy Opus 4.6 values from older clients and in-flight jobs normalize forward.
-  "claude-opus-4-6": "claude-opus-4-7",
-  "claude-opus-4.6": "claude-opus-4-7",
-  "claude-opus-4.7": "claude-opus-4-7",
+  // Legacy Opus values from older clients and in-flight jobs normalize forward.
+  "claude-opus-4-6": STAGE5_CLAUDE_OPUS_MODEL,
+  "claude-opus-4.6": STAGE5_CLAUDE_OPUS_MODEL,
+  "claude-opus-4-7": STAGE5_CLAUDE_OPUS_MODEL,
+  "claude-opus-4.7": STAGE5_CLAUDE_OPUS_MODEL,
+  "claude-opus-4.8": STAGE5_CLAUDE_OPUS_MODEL,
 } as const;
 
 export const STAGE5_TRANSLATION_BILLING_MODEL_ALIASES = {
   // Do not alias GPT-5.4 here: in-flight legacy jobs must settle at GPT-5.4 rates.
-  "claude-opus-4-6": "claude-opus-4-7",
-  "claude-opus-4.6": "claude-opus-4-7",
-  "claude-opus-4.7": "claude-opus-4-7",
+  "claude-opus-4-6": STAGE5_CLAUDE_OPUS_MODEL,
+  "claude-opus-4.6": STAGE5_CLAUDE_OPUS_MODEL,
+  "claude-opus-4-7": STAGE5_CLAUDE_OPUS_MODEL,
+  "claude-opus-4.7": STAGE5_CLAUDE_OPUS_MODEL,
+  "claude-opus-4.8": STAGE5_CLAUDE_OPUS_MODEL,
 } as const;
 
 export const STAGE5_TRANSLATION_MODEL_PRICES = {
@@ -43,7 +48,7 @@ export const STAGE5_TRANSLATION_MODEL_PRICES = {
     in: 5 / 1_000_000, // $5.00 per million tokens
     out: 30 / 1_000_000, // $30.00 per million tokens
   },
-  "claude-opus-4-7": {
+  [STAGE5_CLAUDE_OPUS_MODEL]: {
     in: 5 / 1_000_000, // $5.00 per million tokens
     out: 25 / 1_000_000, // $25.00 per million tokens
   },

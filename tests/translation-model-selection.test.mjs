@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DEFAULT_STAGE5_TRANSLATION_MODEL,
+  STAGE5_CLAUDE_OPUS_MODEL,
   STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL,
   STAGE5_REVIEW_TRANSLATION_MODEL,
   normalizeStage5TranslationModel,
@@ -50,6 +51,25 @@ test("legacy GPT-5.4 requests normalize to GPT-5.5", () => {
   );
 });
 
+test("legacy Claude Opus requests normalize to current Claude Opus", () => {
+  for (const legacyModel of [
+    "claude-opus-4-6",
+    "claude-opus-4.6",
+    "claude-opus-4-7",
+    "claude-opus-4.7",
+    "claude-opus-4.8",
+  ]) {
+    assert.equal(
+      normalizeStage5TranslationModel(legacyModel),
+      STAGE5_CLAUDE_OPUS_MODEL,
+    );
+    assert.equal(
+      normalizeTranslationBillingModel(legacyModel),
+      STAGE5_CLAUDE_OPUS_MODEL,
+    );
+  }
+});
+
 test("legacy GPT-5.4 billing keeps GPT-5.4 pricing", () => {
   assert.equal(
     normalizeTranslationBillingModel("gpt-5.4"),
@@ -76,14 +96,14 @@ test("legacy GPT-5.4 billing keeps GPT-5.4 pricing", () => {
 test("subtitle review honors the Anthropic family hint when worker-side Anthropic review is available", () => {
   assert.equal(
     resolveAuthoritativeTranslationModel({
-      requestedModel: "claude-opus-4-6",
+      requestedModel: "claude-opus-4-7",
       modelFamily: "claude",
       messages: REVIEW_MESSAGES,
       canUseAnthropic: true,
       translationPhase: "review",
       qualityMode: true,
     }),
-    "claude-opus-4-7",
+    STAGE5_CLAUDE_OPUS_MODEL,
   );
 });
 
@@ -124,11 +144,11 @@ test("subtitle draft remains on the default Stage5 translation model", () => {
 test("non-subtitle translation requests still honor explicit allowed models", () => {
   assert.equal(
     resolveAuthoritativeTranslationModel({
-      requestedModel: "claude-opus-4-6",
+      requestedModel: "claude-opus-4-7",
       modelFamily: "claude",
       messages: [{ role: "user", content: "Translate this paragraph." }],
       canUseAnthropic: true,
     }),
-    "claude-opus-4-7",
+    STAGE5_CLAUDE_OPUS_MODEL,
   );
 });

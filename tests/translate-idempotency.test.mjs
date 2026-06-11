@@ -448,7 +448,7 @@ test("queued subtitle review reserves Claude when relay capabilities expose Anth
     )
     .get(deviceId);
   const meta = JSON.parse(String(reservation?.meta || "{}"));
-  assert.equal(meta.reservedModel, "claude-opus-4-7");
+  assert.equal(meta.reservedModel, "claude-opus-4-8");
 });
 
 test("draft translations do not depend on relay capability probe availability", async () => {
@@ -651,5 +651,5 @@ test("review translations use cached relay capabilities when the probe fails", a
     )
     .get(deviceId);
   const meta = JSON.parse(String(reservation?.meta || "{}"));
-  assert.equal(meta.reservedModel, "claude-opus-4-7");
+  assert.equal(meta.reservedModel, "claude-opus-4-8");
 });
