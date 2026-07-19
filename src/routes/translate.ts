@@ -25,6 +25,12 @@ import {
   TranslationJobRecord,
 } from "../lib/db";
 import { estimateTranslationReservationCredits } from "../lib/relay-billing";
+import {
+  WIRE_TOO_MANY_ACTIVE_TRANSLATIONS,
+  WIRE_TRANSLATION_RATE_LIMIT,
+  WIRE_TRANSLATION_QUEUE_OVERLOADED,
+  WIRE_ADMISSION_RETRY_AFTER_DEFAULT_SEC,
+} from "../shared/wire-protocol";
 import { STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL } from "../lib/model-catalog";
 import {
   submitTranslationRelayJob,
@@ -713,7 +719,7 @@ async function enforceTranslationAdmission({
       c.header("Retry-After", "15");
       return c.json(
         {
-          error: "translation-queue-overloaded",
+          error: WIRE_TRANSLATION_QUEUE_OVERLOADED,
           message: "Translation queue is busy. Please retry shortly.",
           reason: "global-pending",
           limits: {
@@ -729,10 +735,10 @@ async function enforceTranslationAdmission({
       incrementCounter("translate.admission_rejected_total", {
         reason: "user-active-jobs",
       });
-      c.header("Retry-After", "10");
+      c.header("Retry-After", String(WIRE_ADMISSION_RETRY_AFTER_DEFAULT_SEC));
       return c.json(
         {
-          error: "too-many-active-translations",
+          error: WIRE_TOO_MANY_ACTIVE_TRANSLATIONS,
           message: "Too many active translation jobs for this device.",
           reason: "user-active-jobs",
           limits: {
@@ -751,7 +757,7 @@ async function enforceTranslationAdmission({
       c.header("Retry-After", String(userRateWindowSec));
       return c.json(
         {
-          error: "translation-rate-limit",
+          error: WIRE_TRANSLATION_RATE_LIMIT,
           message: "Too many translation requests in a short period.",
           reason: "user-rate-limit",
           limits: {

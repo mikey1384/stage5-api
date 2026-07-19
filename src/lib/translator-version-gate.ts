@@ -1,9 +1,13 @@
 import type { Context, Next } from "hono";
 import type { Stage5ApiBindings } from "../types/env";
+import {
+  WIRE_APP_VERSION_HEADER,
+  WIRE_UPDATE_REQUIRED,
+} from "../shared/wire-protocol";
 
-export const TRANSLATOR_VERSION_HEADER = "X-Stage5-App-Version";
+export const TRANSLATOR_VERSION_HEADER = WIRE_APP_VERSION_HEADER;
 const DEFAULT_DOWNLOAD_URL = "https://stage5.tools";
-const UPDATE_REQUIRED_ERROR = "update-required";
+const UPDATE_REQUIRED_ERROR = WIRE_UPDATE_REQUIRED;
 const DEFAULT_UPDATE_REQUIRED_MESSAGE =
   "A newer version of Translator is required to continue. Please update the app.";
 
