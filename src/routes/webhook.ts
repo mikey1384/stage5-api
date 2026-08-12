@@ -4,12 +4,15 @@ import { getStripe } from "../lib/stripe";
 import {
   fulfillByoOpenAiUnlock,
   fulfillCreditPackPurchase,
+  completePilotReservation,
   getCheckoutSessionRecord,
   isEventProcessed,
   markCheckoutSessionFailed,
   markCheckoutSessionFulfilledCredits,
   markCheckoutSessionFulfilledEntitlement,
   markEventProcessed,
+  STAGE5_PILOT_EXPERIMENT_TAG,
+  STAGE5_PILOT_OFFER_CODE,
 } from "../lib/db";
 import {
   checkoutSessionFailureContext,
@@ -20,19 +23,98 @@ import {
   buildCreditPaymentEvent,
   notifyDevicePaymentEvent,
 } from "../lib/payment-events";
-import { isValidPackId, type PackId } from "../types/packs";
+import {
+  enqueueAnalyticsEventSafely,
+  flushAnalyticsOutbox,
+  type AnalyticsItem,
+} from "../lib/product-analytics";
+import { isValidPackId, packs, type PackId } from "../types/packs";
 import type { Stage5ApiBindings } from "../types/env";
 
 const router = new Hono<{ Bindings: Stage5ApiBindings }>();
+const BYO_UNLOCK_USD = 10;
+
+function purchaseItem({
+  mode,
+  packId,
+  value,
+}: {
+  mode: "credits" | "byo";
+  packId?: PackId | null;
+  value: number;
+}): AnalyticsItem {
+  if (mode === "byo") {
+    return {
+      item_id: "byo_ai_unlock",
+      item_name: "Translator BYO AI unlock",
+      item_category: "entitlement",
+      price: value,
+      quantity: 1,
+    };
+  }
+  return {
+    item_id: `credit_pack_${String(packId || "unknown").toLowerCase()}`,
+    item_name: `Translator ${packId || "unknown"} credit pack`,
+    item_category: "credits",
+    price: value,
+    quantity: 1,
+  };
+}
+
+async function recordPurchaseAnalytics({
+  env,
+  deviceId,
+  transactionId,
+  mode,
+  packId,
+  value,
+  currency,
+}: {
+  env: Stage5ApiBindings;
+  deviceId: string;
+  transactionId: string;
+  mode: "credits" | "byo";
+  packId?: PackId | null;
+  value: number;
+  currency?: string | null;
+}): Promise<void> {
+  await enqueueAnalyticsEventSafely(env, {
+    eventId: `purchase:${transactionId}`,
+    eventName: "purchase",
+    subjectKey: `translator-device:${deviceId}`,
+    params: {
+      transaction_id: transactionId,
+      affiliation: "Translator desktop",
+      currency: String(currency || "usd").toUpperCase(),
+      value,
+      checkout_mode: mode,
+      commerce_surface: "translator_desktop",
+      attribution_scope: "server_settlement",
+      items: [purchaseItem({ mode, packId, value })],
+      engagement_time_msec: 1,
+    },
+  });
+}
+
+function flushAnalyticsInBackground(c: any): void {
+  const flush = flushAnalyticsOutbox(c.env).catch((error) => {
+    console.warn("[analytics] Webhook flush failed:", error);
+  });
+  try {
+    c.executionCtx.waitUntil(flush);
+  } catch {
+    void flush;
+  }
+}
 
 const isCheckoutSessionFulfilled = (
-  paymentStatus: Stripe.Checkout.Session.PaymentStatus | null
+  paymentStatus: Stripe.Checkout.Session.PaymentStatus | null,
 ): boolean => {
   return paymentStatus === "paid" || paymentStatus === "no_payment_required";
 };
 
 function getPaymentIntentIdFromCheckoutSession(
-  session: Stripe.Checkout.Session
+  session: Stripe.Checkout.Session,
 ): string | null {
   const paymentIntent = session.payment_intent;
   if (!paymentIntent) {
@@ -44,6 +126,23 @@ function getPaymentIntentIdFromCheckoutSession(
   }
 
   return paymentIntent.id ?? null;
+}
+
+function getCheckoutCustomField(
+  session: Stripe.Checkout.Session,
+  key: string,
+): string {
+  const field = session.custom_fields?.find(
+    (candidate) => candidate.key === key,
+  );
+  if (!field) return "";
+  if (field.type === "text") return String(field.text?.value || "").trim();
+  if (field.type === "dropdown") {
+    return String(field.dropdown?.value || "").trim();
+  }
+  if (field.type === "numeric")
+    return String(field.numeric?.value || "").trim();
+  return "";
 }
 
 type CheckoutPaymentIntentDetails = {
@@ -77,7 +176,7 @@ async function resolveCheckoutDetailsFromPaymentIntent({
   } catch (error) {
     console.warn(
       `Could not resolve Checkout session for ${logContext} payment intent ${paymentIntent.id}:`,
-      error
+      error,
     );
   }
 
@@ -116,7 +215,7 @@ router.post("/", async (c) => {
     const event = await stripe.webhooks.constructEventAsync(
       new Uint8Array(rawBody) as any, // Zero-copy view, TS types need updating
       signature,
-      c.env.STRIPE_WEBHOOK_SECRET
+      c.env.STRIPE_WEBHOOK_SECRET,
     );
 
     console.log(`Received webhook: ${event.type}`);
@@ -191,6 +290,7 @@ router.post("/", async (c) => {
           break;
       }
 
+      flushAnalyticsInBackground(c);
       processed = true;
       return c.json({ received: true });
     } finally {
@@ -220,16 +320,8 @@ const handleCheckoutPaid = async ({
   eventId: string;
   session: Stripe.Checkout.Session;
   eventType:
-    | "checkout.session.completed"
-    | "checkout.session.async_payment_succeeded";
+    "checkout.session.completed" | "checkout.session.async_payment_succeeded";
 }) => {
-  const { deviceId, packId, entitlement } = session.metadata || {};
-
-  if (!deviceId) {
-    console.error("Missing deviceId in checkout session metadata:", session.id);
-    return;
-  }
-
   // Delayed methods (for example some local wallets) may complete Checkout with payment_status=unpaid.
   // Fulfillment must wait for checkout.session.async_payment_succeeded in that case.
   // Fully discounted sessions can report payment_status=no_payment_required and should be fulfilled immediately.
@@ -238,8 +330,44 @@ const handleCheckoutPaid = async ({
     !isCheckoutSessionFulfilled(session.payment_status)
   ) {
     console.log(
-      `Deferring fulfillment for ${session.id}: payment_status=${session.payment_status}`
+      `Deferring fulfillment for ${session.id}: payment_status=${session.payment_status}`,
     );
+    return;
+  }
+
+  const metadata = session.metadata || {};
+  if (
+    metadata.experimentTag === STAGE5_PILOT_EXPERIMENT_TAG &&
+    metadata.offerCode === STAGE5_PILOT_OFFER_CODE
+  ) {
+    const customerEmail = String(session.customer_details?.email || "").trim();
+    const videoUrl = getCheckoutCustomField(session, "video_url");
+    const targetLanguage = getCheckoutCustomField(session, "target_language");
+    const rightsConfirmed =
+      getCheckoutCustomField(session, "rights_confirmed") === "confirmed";
+    if (!customerEmail || !videoUrl || !targetLanguage || !rightsConfirmed) {
+      throw new Error(
+        `Pilot reservation ${session.id} is missing required intake data`,
+      );
+    }
+
+    await completePilotReservation({
+      checkoutSessionId: session.id,
+      customerEmail,
+      videoUrl,
+      targetLanguage,
+      rightsConfirmed,
+      stripeEventId: eventId,
+      stripeEventType: eventType,
+    });
+    console.log(`Completed Stage5 pilot reservation ${session.id}`);
+    return;
+  }
+
+  const { deviceId, packId, entitlement } = metadata;
+
+  if (!deviceId) {
+    console.error("Missing deviceId in checkout session metadata:", session.id);
     return;
   }
 
@@ -257,11 +385,11 @@ const handleCheckoutPaid = async ({
       });
       if (result === "duplicate") {
         console.log(
-          `Skipped duplicate BYO OpenAI fulfillment for device ${deviceId} via ${eventType}`
+          `Skipped duplicate BYO OpenAI fulfillment for device ${deviceId} via ${eventType}`,
         );
       } else {
         console.log(
-          `Granted BYO OpenAI entitlement to device ${deviceId} via ${eventType}`
+          `Granted BYO OpenAI entitlement to device ${deviceId} via ${eventType}`,
         );
       }
       const { entitlements, updatedAt } =
@@ -284,6 +412,17 @@ const handleCheckoutPaid = async ({
         updatedAt,
         stripeEventId: eventId,
         stripeEventType: eventType,
+      });
+      await recordPurchaseAnalytics({
+        env,
+        deviceId,
+        transactionId: paymentIntentId || session.id,
+        mode: "byo",
+        value:
+          typeof session.amount_total === "number"
+            ? session.amount_total / 100
+            : BYO_UNLOCK_USD,
+        currency: session.currency,
       });
     } catch (error) {
       console.error("Error granting BYO entitlement:", error);
@@ -314,11 +453,11 @@ const handleCheckoutPaid = async ({
     });
     if (result === "duplicate") {
       console.log(
-        `Skipped duplicate credit fulfillment for ${packId} to device ${deviceId} via ${eventType}`
+        `Skipped duplicate credit fulfillment for ${packId} to device ${deviceId} via ${eventType}`,
       );
     } else {
       console.log(
-        `Successfully credited ${packId} to device ${deviceId} via ${eventType}`
+        `Successfully credited ${packId} to device ${deviceId} via ${eventType}`,
       );
     }
     const { balanceAfter, updatedAt } =
@@ -341,8 +480,20 @@ const handleCheckoutPaid = async ({
         updatedAt,
         stripeEventId: eventId,
         stripeEventType: eventType,
-      })
+      }),
     );
+    await recordPurchaseAnalytics({
+      env,
+      deviceId,
+      transactionId: paymentIntentId || session.id,
+      mode: "credits",
+      packId,
+      value:
+        typeof session.amount_total === "number"
+          ? session.amount_total / 100
+          : packs[packId].usd,
+      currency: session.currency,
+    });
   } catch (error) {
     console.error("Error crediting device:", error);
     throw error;
@@ -365,7 +516,7 @@ const handleCheckoutAsyncPaymentFailed = async ({
   const message =
     "Stripe reported checkout.session.async_payment_failed for this session";
   console.warn(
-    `Async checkout payment failed for session ${session.id} (deviceId=${deviceId ?? "unknown"}, packId=${packId ?? "none"}, entitlement=${entitlement ?? "none"})`
+    `Async checkout payment failed for session ${session.id} (deviceId=${deviceId ?? "unknown"}, packId=${packId ?? "none"}, entitlement=${entitlement ?? "none"})`,
   );
   await markCheckoutSessionFailed({
     checkoutSessionId: session.id,
@@ -414,12 +565,7 @@ const handlePaymentSucceeded = async ({
     paymentIntent,
     logContext: "succeeded",
   });
-  const {
-    checkoutSessionId,
-    entitlement,
-    deviceId,
-    packId,
-  } = checkoutDetails;
+  const { checkoutSessionId, entitlement, deviceId, packId } = checkoutDetails;
   if (entitlement === "byo_openai" && deviceId) {
     try {
       const result = await fulfillByoOpenAiUnlock({
@@ -432,11 +578,11 @@ const handlePaymentSucceeded = async ({
       });
       if (result === "duplicate") {
         console.log(
-          `Skipped duplicate BYO OpenAI entitlement (payment_intent) for device ${deviceId}`
+          `Skipped duplicate BYO OpenAI entitlement (payment_intent) for device ${deviceId}`,
         );
       } else {
         console.log(
-          `Granted BYO OpenAI entitlement (payment_intent) to device ${deviceId}`
+          `Granted BYO OpenAI entitlement (payment_intent) to device ${deviceId}`,
         );
       }
       const { entitlements, updatedAt } =
@@ -460,8 +606,23 @@ const handlePaymentSucceeded = async ({
         stripeEventId: eventId,
         stripeEventType: "payment_intent.succeeded",
       });
+      await recordPurchaseAnalytics({
+        env,
+        deviceId,
+        transactionId: paymentIntent.id,
+        mode: "byo",
+        value:
+          typeof paymentIntent.amount_received === "number" &&
+          paymentIntent.amount_received > 0
+            ? paymentIntent.amount_received / 100
+            : BYO_UNLOCK_USD,
+        currency: paymentIntent.currency,
+      });
     } catch (error) {
-      console.error("Error granting BYO entitlement from payment intent:", error);
+      console.error(
+        "Error granting BYO entitlement from payment intent:",
+        error,
+      );
       throw error;
     }
     return;
@@ -480,11 +641,11 @@ const handlePaymentSucceeded = async ({
       });
       if (result === "duplicate") {
         console.log(
-          `Skipped duplicate credit fulfillment (payment_intent) for ${packId} to device ${deviceId}`
+          `Skipped duplicate credit fulfillment (payment_intent) for ${packId} to device ${deviceId}`,
         );
       } else {
         console.log(
-          `Credited ${packId} to device ${deviceId} via payment_intent.succeeded`
+          `Credited ${packId} to device ${deviceId} via payment_intent.succeeded`,
         );
       }
       const { balanceAfter, updatedAt } =
@@ -507,8 +668,21 @@ const handlePaymentSucceeded = async ({
           updatedAt,
           stripeEventId: eventId,
           stripeEventType: "payment_intent.succeeded",
-        })
+        }),
       );
+      await recordPurchaseAnalytics({
+        env,
+        deviceId,
+        transactionId: paymentIntent.id,
+        mode: "credits",
+        packId,
+        value:
+          typeof paymentIntent.amount_received === "number" &&
+          paymentIntent.amount_received > 0
+            ? paymentIntent.amount_received / 100
+            : packs[packId].usd,
+        currency: paymentIntent.currency,
+      });
     } catch (error) {
       console.error("Error crediting device from payment intent:", error);
       throw error;
@@ -539,7 +713,7 @@ const handlePaymentFailed = async ({
 
   if (failureDetails.checkoutSessionStatus === "open") {
     console.info(
-      `Payment attempt failed for open Checkout session ${failureDetails.checkoutSessionId}; leaving checkout recoverable.`
+      `Payment attempt failed for open Checkout session ${failureDetails.checkoutSessionId}; leaving checkout recoverable.`,
     );
     return;
   }
@@ -549,7 +723,7 @@ const handlePaymentFailed = async ({
     !failureDetails.checkoutSessionStatus
   ) {
     console.info(
-      `Payment intent ${paymentIntent.id} failed, but no terminal Checkout session could be resolved; leaving checkout state recoverable.`
+      `Payment intent ${paymentIntent.id} failed, but no terminal Checkout session could be resolved; leaving checkout state recoverable.`,
     );
     await sendPaymentAlert(env, {
       title: "Stripe payment intent failed without resolved Checkout session",
@@ -563,11 +737,9 @@ const handlePaymentFailed = async ({
     return;
   }
 
-  if (
-    isCheckoutSessionFulfilled(failureDetails.checkoutSessionPaymentStatus)
-  ) {
+  if (isCheckoutSessionFulfilled(failureDetails.checkoutSessionPaymentStatus)) {
     console.info(
-      `Payment attempt failed for already-paid Checkout session ${failureDetails.checkoutSessionId}; ignoring stale failure.`
+      `Payment attempt failed for already-paid Checkout session ${failureDetails.checkoutSessionId}; ignoring stale failure.`,
     );
     return;
   }
@@ -578,7 +750,7 @@ const handlePaymentFailed = async ({
   });
   if (checkoutRecord?.status === "fulfilled") {
     console.info(
-      `Payment attempt failed for already-fulfilled tracked checkout ${failureDetails.checkoutSessionId}; ignoring stale failure.`
+      `Payment attempt failed for already-fulfilled tracked checkout ${failureDetails.checkoutSessionId}; ignoring stale failure.`,
     );
     return;
   }

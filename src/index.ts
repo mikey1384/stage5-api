@@ -12,8 +12,10 @@ import adminRouter from "./routes/admin";
 import dubRouter from "./routes/dub";
 import entitlementsRouter from "./routes/entitlements";
 import authRouter from "./routes/auth";
+import analyticsRouter from "./routes/analytics";
 import { ensureDatabase } from "./lib/db";
 import { runReconciliation } from "./lib/reconciliation";
+import { flushAnalyticsOutbox } from "./lib/product-analytics";
 import { minimumTranslatorVersionGate } from "./lib/translator-version-gate";
 import type { Stage5ApiBindings } from "./types/env";
 
@@ -48,7 +50,7 @@ app.use(
     allowMethods: ["GET", "POST", "OPTIONS"],
     exposeHeaders: ["X-Request-Id"],
     credentials: true,
-  })
+  }),
 );
 
 // Health check endpoint
@@ -67,6 +69,7 @@ app.use("/payments/create-byo-unlock", translatorVersionGate);
 app.use("/payments/checkout-event", translatorVersionGate);
 app.use("/payments/events/*", translatorVersionGate);
 app.use("/payments/session/*", translatorVersionGate);
+app.use("/analytics/*", translatorVersionGate);
 app.use("/credits/*", translatorVersionGate);
 app.use("/entitlements/*", translatorVersionGate);
 app.use("/transcribe", translatorVersionGate);
@@ -86,6 +89,7 @@ app.route("/entitlements", entitlementsRouter);
 app.route("/transcribe", transcribeRouter);
 app.route("/translate", translateRouter);
 app.route("/dub", dubRouter);
+app.route("/analytics", analyticsRouter);
 app.route("/admin", adminRouter);
 
 // Pretty printing only AFTER routes so it never eats request bodies
@@ -98,7 +102,7 @@ app.notFound((c) => {
       error: "Not Found",
       message: "The requested endpoint does not exist",
     },
-    404
+    404,
   );
 });
 
@@ -110,7 +114,7 @@ app.onError((err, c) => {
       error: "Internal Server Error",
       message: "An unexpected error occurred",
     },
-    500
+    500,
   );
 });
 
@@ -123,27 +127,41 @@ export default {
   async scheduled(
     _event: ScheduledController,
     env: Stage5ApiBindings,
-    ctx: ExecutionContext
+    ctx: ExecutionContext,
   ) {
-    if (env.RECONCILE_CRON_ENABLED !== "1") {
-      return;
-    }
-
     await ensureDatabase(env);
     ctx.waitUntil(
       (async () => {
+        try {
+          const analytics = await flushAnalyticsOutbox(env);
+          if (
+            analytics.configured &&
+            (analytics.selected > 0 || analytics.failed > 0)
+          ) {
+            console.log(
+              `[cron/analytics] selected=${analytics.selected} sent=${analytics.sent} failed=${analytics.failed}`,
+            );
+          }
+        } catch (error: any) {
+          console.error("[cron/analytics] Failed:", error?.message || error);
+        }
+
+        if (env.RECONCILE_CRON_ENABLED !== "1") {
+          return;
+        }
+
         try {
           const report = await runReconciliation({
             dryRun: env.RECONCILE_CRON_DRY_RUN === "1",
             transcriptionBucket: env.TRANSCRIPTION_BUCKET,
           });
           console.log(
-            `[cron/reconcile] dryRun=${report.dryRun} durationMs=${report.durationMs} translation(scanned=${report.translation.scanned}, rebilled=${report.translation.rebilled}, reset=${report.translation.staleRelayReset}) transcription(scanned=${report.transcription.scanned}, failed=${report.transcription.markedFailed})`
+            `[cron/reconcile] dryRun=${report.dryRun} durationMs=${report.durationMs} translation(scanned=${report.translation.scanned}, rebilled=${report.translation.rebilled}, reset=${report.translation.staleRelayReset}) transcription(scanned=${report.transcription.scanned}, failed=${report.transcription.markedFailed})`,
           );
         } catch (error: any) {
           console.error("[cron/reconcile] Failed:", error?.message || error);
         }
-      })()
+      })(),
     );
   },
 };

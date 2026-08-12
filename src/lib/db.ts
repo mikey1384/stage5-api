@@ -7,3 +7,5 @@ export * from "./db/billing-reservations";
 export * from "./db/users";
 export * from "./db/translation-jobs";
 export * from "./db/transcription-jobs";
+export * from "./db/pilot-reservations";
+export * from "./db/internal-devices";

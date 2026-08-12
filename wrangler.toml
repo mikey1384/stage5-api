@@ -10,7 +10,7 @@ routes = [
 
 # Environment variables (runtime-accessed ENV)
 [vars]
-ALLOWED_ORIGINS = "https://stage5.tools,http://localhost:3000"
+ALLOWED_ORIGINS = "https://stage5.tools,https://www.stage5.tools,https://translator.tools,https://www.translator.tools,http://localhost:3000"
 AUDIO_CREDIT_CALIBRATION = "1.0"
 TOKEN_CREDIT_CALIBRATION = "1.0"
 RELAY_TRANSLATION_MAX_INFLIGHT = "24"
@@ -25,6 +25,10 @@ RELAY_TRANSLATION_ALERT_COOLDOWN_MS = "60000"
 PAYMENT_ALERTS_ENABLED = "1"
 PAYMENT_ALERT_EMAIL_FROM = "noreply@stage5.tools"
 PAYMENT_ALERT_EMAIL_TO = "mikey@stage5.tools"
+GA4_TRANSLATOR_MEASUREMENT_ID = "G-P85K20ZXE0"
+
+[triggers]
+crons = ["*/15 * * * *"]
 
 
 # D1 Database binding

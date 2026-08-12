@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type Stripe from "stripe";
 import { getStripe } from "../lib/stripe";
-import { packs, PACK_IDS, type PackId } from "../types/packs";
+import { isValidPackId, packs, PACK_IDS, type PackId } from "../types/packs";
 import {
   getCheckoutSessionRecord,
   getCheckoutSessionRecordByReturnId,
@@ -16,6 +16,11 @@ import {
   sendPaymentAlert,
 } from "../lib/payment-alerts";
 import type { Stage5ApiBindings } from "../types/env";
+import {
+  enqueueAnalyticsEventSafely,
+  flushAnalyticsOutbox,
+  type AnalyticsItem,
+} from "../lib/product-analytics";
 
 const router = new Hono<{ Bindings: Stage5ApiBindings }>();
 
@@ -69,6 +74,78 @@ const STRIPE_CHECKOUT_LOCALE_MAP = new Map<string, StripeCheckoutLocale>(
   STRIPE_CHECKOUT_LOCALES.map((locale) => [locale.toLowerCase(), locale]),
 );
 const DEFAULT_CHECKOUT_UI_ORIGIN = "https://translator.tools";
+const BYO_UNLOCK_USD = 10;
+
+function checkoutItem({
+  mode,
+  packId,
+  value,
+}: {
+  mode: "credits" | "byo";
+  packId?: PackId;
+  value: number;
+}): AnalyticsItem {
+  if (mode === "byo") {
+    return {
+      item_id: "byo_ai_unlock",
+      item_name: "Translator BYO AI unlock",
+      item_category: "entitlement",
+      price: value,
+      quantity: 1,
+    };
+  }
+  return {
+    item_id: `credit_pack_${String(packId || "unknown").toLowerCase()}`,
+    item_name: `Translator ${packId || "unknown"} credit pack`,
+    item_category: "credits",
+    price: value,
+    quantity: 1,
+  };
+}
+
+function flushAnalyticsInBackground(c: any): void {
+  const flush = flushAnalyticsOutbox(c.env).catch((error) => {
+    console.warn("[analytics] Checkout flush failed:", error);
+  });
+  try {
+    c.executionCtx.waitUntil(flush);
+  } catch {
+    void flush;
+  }
+}
+
+async function recordCheckoutStarted(
+  c: any,
+  {
+    sessionId,
+    deviceId,
+    mode,
+    packId,
+    value,
+  }: {
+    sessionId: string;
+    deviceId: string;
+    mode: "credits" | "byo";
+    packId?: PackId;
+    value: number;
+  },
+): Promise<void> {
+  const result = await enqueueAnalyticsEventSafely(c.env, {
+    eventId: `begin_checkout:${sessionId}`,
+    eventName: "begin_checkout",
+    subjectKey: `translator-device:${deviceId}`,
+    params: {
+      currency: "USD",
+      value,
+      checkout_mode: mode,
+      commerce_surface: "translator_desktop",
+      attribution_scope: "server_checkout",
+      items: [checkoutItem({ mode, packId, value })],
+      engagement_time_msec: 1,
+    },
+  });
+  if (result === "queued") flushAnalyticsInBackground(c);
+}
 
 function buildCreditLineItem(
   packId: PackId,
@@ -332,6 +409,17 @@ function isJsonParseError(error: unknown): boolean {
   );
 }
 
+router.post("/create-pilot-reservation", (c) => {
+  return c.json(
+    {
+      error:
+        "This pilot has ended. Download Translator to use the complete video localization workflow.",
+      translatorUrl: "https://translator.tools",
+    },
+    410,
+  );
+});
+
 router.post("/create-session", async (c) => {
   let alertContext: Record<string, unknown> = {
     route: "/payments/create-session",
@@ -409,6 +497,13 @@ router.post("/create-session", async (c) => {
       kind: "credits",
       packId,
       creditsDelta: pack.credits,
+    });
+    await recordCheckoutStarted(c, {
+      sessionId: session.id,
+      deviceId,
+      mode: "credits",
+      packId,
+      value: pack.usd,
     });
 
     return c.json({
@@ -551,6 +646,12 @@ router.post("/create-byo-unlock", async (c) => {
       kind: "entitlement",
       entitlement: "byo_openai",
     });
+    await recordCheckoutStarted(c, {
+      sessionId: session.id,
+      deviceId,
+      mode: "byo",
+      value: BYO_UNLOCK_USD,
+    });
 
     return c.json({
       url: session.url,
@@ -647,6 +748,39 @@ router.post("/checkout-event", async (c) => {
         stripeEventType: `checkout_client.${event.eventType}`,
         errorMessage: event.message || `Translator reported ${event.eventType}`,
       });
+    }
+
+    if (isTerminalCheckoutClientCancellation(event.eventType)) {
+      const mode =
+        session.metadata?.entitlement === "byo_openai" ? "byo" : "credits";
+      const sessionPackId: PackId | undefined =
+        session.metadata?.packId && isValidPackId(session.metadata.packId)
+          ? session.metadata.packId
+          : undefined;
+      const value =
+        typeof session.amount_total === "number"
+          ? session.amount_total / 100
+          : mode === "byo"
+            ? BYO_UNLOCK_USD
+            : sessionPackId
+              ? packs[sessionPackId].usd
+              : 0;
+      const analyticsResult = await enqueueAnalyticsEventSafely(c.env, {
+        eventId: `checkout_cancelled:${event.sessionId}`,
+        eventName: "checkout_cancelled",
+        subjectKey: `translator-device:${authDeviceId}`,
+        params: {
+          currency: String(session.currency || "usd").toUpperCase(),
+          value,
+          checkout_mode: mode,
+          commerce_surface: "translator_desktop",
+          attribution_scope: "server_checkout",
+          reason_code: event.eventType,
+          items: [checkoutItem({ mode, packId: sessionPackId, value })],
+          engagement_time_msec: 1,
+        },
+      });
+      if (analyticsResult === "queued") flushAnalyticsInBackground(c);
     }
 
     const isNewAlertEvent = await markEventProcessedIfNew({

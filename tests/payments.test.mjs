@@ -225,25 +225,131 @@ test("credit pack fulfillment stays exact-once across mixed Stripe event types",
     sqlite
       .prepare("SELECT credit_balance FROM credits WHERE device_id = ?")
       .get(deviceId)?.credit_balance,
-    packs.MICRO.credits
+    packs.MICRO.credits,
   );
   assert.equal(
     count("SELECT COUNT(*) AS count FROM credit_ledger WHERE device_id = ?", [
       deviceId,
     ]),
-    1
+    1,
   );
   assert.equal(
     count(
       "SELECT COUNT(*) AS count FROM stripe_fulfillments WHERE device_id = ? AND fulfillment_kind = 'credits'",
-      [deviceId]
+      [deviceId],
     ),
-    1
+    1,
   );
-  assert.equal(
-    count("SELECT COUNT(*) AS count FROM processed_events"),
-    2
+  assert.equal(count("SELECT COUNT(*) AS count FROM processed_events"), 2);
+});
+
+test("retired pilot reservation no longer creates Stripe sessions", async () => {
+  const response = await apiRequest("/payments/create-pilot-reservation", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Origin: "https://translator.tools",
+    },
+    body: JSON.stringify({ locale: "ja", source: "translate", website: "" }),
+  });
+
+  assert.equal(response.status, 410);
+  const payload = await response.json();
+  assert.equal(payload.translatorUrl, "https://translator.tools");
+});
+
+test("retired pilot reservation remains closed for every origin", async () => {
+  const response = await apiRequest("/payments/create-pilot-reservation", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Origin: "https://example.com",
+    },
+    body: JSON.stringify({ locale: "en", source: "direct" }),
+  });
+  assert.equal(response.status, 410);
+});
+
+test("historical pilot checkout completion remains reconcilable after retirement", async () => {
+  sqlite
+    .prepare(
+      `INSERT INTO stage5_pilot_reservations (
+         checkout_session_id, reservation_id, experiment_tag, offer_code, status, source, locale
+       ) VALUES (?, ?, ?, ?, 'created', ?, ?)`,
+    )
+    .run(
+      "cs_test_default",
+      "reservation_test_historical",
+      "phantom_fund_experiment",
+      "creator_localization_25",
+      "pilot",
+      "en",
+    );
+
+  configureStripeStubs({
+    constructEvent: async () => ({
+      id: "evt_test_pilot_completed",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_test_default",
+          payment_status: "no_payment_required",
+          payment_intent: null,
+          metadata: {
+            experimentTag: "phantom_fund_experiment",
+            offerCode: "creator_localization_25",
+          },
+          customer_details: { email: "creator@example.com" },
+          custom_fields: [
+            {
+              key: "video_url",
+              type: "text",
+              text: { value: "https://example.com/video" },
+            },
+            {
+              key: "target_language",
+              type: "text",
+              text: { value: "Japanese" },
+            },
+            {
+              key: "rights_confirmed",
+              type: "dropdown",
+              dropdown: { value: "confirmed" },
+            },
+          ],
+        },
+      },
+    }),
+  });
+
+  const response = await apiRequest("/stripe/webhook", {
+    method: "POST",
+    headers: {
+      "stripe-signature": "sig_test_pilot",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ ok: true }),
+  });
+  assert.equal(response.status, 200);
+
+  const row = sqlite
+    .prepare(
+      `SELECT status, customer_email, video_url, target_language, rights_confirmed
+       FROM stage5_pilot_reservations
+       WHERE checkout_session_id = ?`,
+    )
+    .get("cs_test_default");
+  assert.deepEqual(
+    { ...row },
+    {
+      status: "completed",
+      customer_email: "creator@example.com",
+      video_url: "https://example.com/video",
+      target_language: "Japanese",
+      rights_confirmed: 1,
+    },
   );
+  assert.equal(count("SELECT COUNT(*) AS count FROM credit_ledger"), 0);
 });
 
 test("BYO unlock fulfillment stays exact-once across mixed Stripe event types", async () => {
@@ -308,7 +414,7 @@ test("BYO unlock fulfillment stays exact-once across mixed Stripe event types", 
   assert.equal(second.status, 200);
   const entitlementRow = sqlite
     .prepare(
-      "SELECT byo_openai, byo_anthropic FROM entitlements WHERE device_id = ?"
+      "SELECT byo_openai, byo_anthropic FROM entitlements WHERE device_id = ?",
     )
     .get(deviceId);
   assert.equal(entitlementRow?.byo_openai, 1);
@@ -316,9 +422,9 @@ test("BYO unlock fulfillment stays exact-once across mixed Stripe event types", 
   assert.equal(
     count(
       "SELECT COUNT(*) AS count FROM stripe_fulfillments WHERE device_id = ? AND fulfillment_kind = 'entitlement'",
-      [deviceId]
+      [deviceId],
     ),
-    1
+    1,
   );
 });
 
@@ -370,22 +476,25 @@ test("fresh device with opaque token can create payment sessions and poll settle
     .prepare(
       `SELECT kind, status, pack_id, credits_delta, checkout_return_id
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get("cs_test_pack");
-  assert.deepEqual({ ...packCheckoutRow }, {
-    kind: "credits",
-    status: "created",
-    pack_id: "MICRO",
-    credits_delta: packs.MICRO.credits,
-    checkout_return_id: createPackJson.returnId,
-  });
+  assert.deepEqual(
+    { ...packCheckoutRow },
+    {
+      kind: "credits",
+      status: "created",
+      pack_id: "MICRO",
+      credits_delta: packs.MICRO.credits,
+      checkout_return_id: createPackJson.returnId,
+    },
+  );
 
   const packReturn = await apiRequest(
     `/payments/checkout-return/${encodeURIComponent(createPackJson.returnId)}`,
     {
       headers: authHeaders(apiToken),
-    }
+    },
   );
   assert.equal(packReturn.status, 200);
   assert.deepEqual(await packReturn.json(), {
@@ -414,15 +523,18 @@ test("fresh device with opaque token can create payment sessions and poll settle
     .prepare(
       `SELECT kind, status, entitlement, checkout_return_id
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get("cs_test_byo_create");
-  assert.deepEqual({ ...byoCheckoutRow }, {
-    kind: "entitlement",
-    status: "created",
-    entitlement: "byo_openai",
-    checkout_return_id: createByoJson.returnId,
-  });
+  assert.deepEqual(
+    { ...byoCheckoutRow },
+    {
+      kind: "entitlement",
+      status: "created",
+      entitlement: "byo_openai",
+      checkout_return_id: createByoJson.returnId,
+    },
+  );
   assert.equal(createdParams[0]?.metadata?.deviceId, deviceId);
   assert.equal(createdParams[0]?.metadata?.packId, "MICRO");
   const packCancelUrl = new URL(createdParams[0]?.cancel_url);
@@ -435,7 +547,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
   assert.match(
     createdParams[1]?.success_url,
-    /^https:\/\/translator\.tools\/checkout\/success\?mode=byo&return_id=[a-zA-Z0-9_-]+&session_id=\{CHECKOUT_SESSION_ID\}$/
+    /^https:\/\/translator\.tools\/checkout\/success\?mode=byo&return_id=[a-zA-Z0-9_-]+&session_id=\{CHECKOUT_SESSION_ID\}$/,
   );
   const byoCancelUrl = new URL(createdParams[1]?.cancel_url);
   assert.equal(byoCancelUrl.pathname, "/checkout/cancelled");
@@ -446,7 +558,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.deepEqual(createdParams[1]?.adaptive_pricing, { enabled: false });
   assert.equal(
     createdParams[1]?.line_items?.[0]?.price,
-    env.STRIPE_BYO_UNLOCK_PRICE_ID
+    env.STRIPE_BYO_UNLOCK_PRICE_ID,
   );
   assert.equal("price_data" in createdParams[1]?.line_items?.[0], false);
 
@@ -458,8 +570,10 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.equal(settlementJson.sessionId, "cs_test_pack");
   assert.equal(settlementJson.packId, "MICRO");
   assert.equal(
-    count("SELECT COUNT(*) AS count FROM credits WHERE device_id = ?", [deviceId]),
-    0
+    count("SELECT COUNT(*) AS count FROM credits WHERE device_id = ?", [
+      deviceId,
+    ]),
+    0,
   );
 });
 
@@ -498,7 +612,7 @@ test("Korean credit checkout keeps USD price IDs and disables adaptive pricing",
   assert.equal(createdParams[0]?.locale, "ko");
   assert.equal(
     createdParams[0]?.line_items?.[0]?.price,
-    packs.STANDARD.priceId
+    packs.STANDARD.priceId,
   );
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
   assert.equal(createdParams[0]?.metadata?.packId, "STANDARD");
@@ -538,14 +652,11 @@ test("Korean checkout locale does not switch non-KR users to local-currency chec
   assert.equal(response.status, 200);
   assert.equal(
     (await response.json()).sessionId,
-    "cs_test_korean_country_override"
+    "cs_test_korean_country_override",
   );
   assert.equal("payment_method_types" in createdParams[0], false);
   assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
-  assert.equal(
-    createdParams[0]?.line_items?.[0]?.price,
-    packs.MICRO.priceId
-  );
+  assert.equal(createdParams[0]?.line_items?.[0]?.price, packs.MICRO.priceId);
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
 });
 
@@ -582,14 +693,11 @@ test("Korean request country keeps USD price IDs", async () => {
   assert.equal(response.status, 200);
   assert.equal(
     (await response.json()).sessionId,
-    "cs_test_korean_geo_override"
+    "cs_test_korean_geo_override",
   );
   assert.equal("payment_method_types" in createdParams[0], false);
   assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
-  assert.equal(
-    createdParams[0]?.line_items?.[0]?.price,
-    packs.MICRO.priceId
-  );
+  assert.equal(createdParams[0]?.line_items?.[0]?.price, packs.MICRO.priceId);
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
 });
 
@@ -627,7 +735,7 @@ test("Korean BYO checkout uses USD price ID and disables adaptive pricing", asyn
   assert.equal(createdParams[0]?.locale, "ko");
   assert.equal(
     createdParams[0]?.line_items?.[0]?.price,
-    env.STRIPE_BYO_UNLOCK_PRICE_ID
+    env.STRIPE_BYO_UNLOCK_PRICE_ID,
   );
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
   assert.equal(createdParams[0]?.metadata?.entitlement, "byo_openai");
@@ -641,7 +749,7 @@ test("checkout webhook writes authoritative fulfilled balance to checkout sessio
   const paymentIntentId = "pi_test_authoritative_balance";
 
   configureStripeStubs({
-    createSession: async params => ({
+    createSession: async (params) => ({
       id: sessionId,
       url: `https://checkout.stripe.com/c/pay/${sessionId}`,
       metadata: params.metadata,
@@ -690,16 +798,19 @@ test("checkout webhook writes authoritative fulfilled balance to checkout sessio
     .prepare(
       `SELECT status, payment_intent_id, stripe_event_id, stripe_event_type, credit_balance_after
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get(sessionId);
-  assert.deepEqual({ ...checkoutRow }, {
-    status: "fulfilled",
-    payment_intent_id: paymentIntentId,
-    stripe_event_id: "evt_authoritative_checkout",
-    stripe_event_type: "checkout.session.completed",
-    credit_balance_after: packs.STARTER.credits,
-  });
+  assert.deepEqual(
+    { ...checkoutRow },
+    {
+      status: "fulfilled",
+      payment_intent_id: paymentIntentId,
+      stripe_event_id: "evt_authoritative_checkout",
+      stripe_event_type: "checkout.session.completed",
+      credit_balance_after: packs.STARTER.credits,
+    },
+  );
 });
 
 test("payment intent success marks the resolved checkout session fulfilled", async () => {
@@ -709,12 +820,12 @@ test("payment intent success marks the resolved checkout session fulfilled", asy
   const paymentIntentId = "pi_test_payment_intent_checkout_link";
 
   configureStripeStubs({
-    createSession: async params => ({
+    createSession: async (params) => ({
       id: sessionId,
       url: `https://checkout.stripe.com/c/pay/${sessionId}`,
       metadata: params.metadata,
     }),
-    listSessions: async params => {
+    listSessions: async (params) => {
       assert.deepEqual(params, {
         payment_intent: paymentIntentId,
         limit: 1,
@@ -762,7 +873,7 @@ test("payment intent success marks the resolved checkout session fulfilled", asy
   });
   assert.equal(createResponse.status, 200);
 
-  await withPaymentEventsStub(async broadcasts => {
+  await withPaymentEventsStub(async (broadcasts) => {
     const webhookResponse = await apiRequest("/stripe/webhook", {
       method: "POST",
       headers: {
@@ -781,16 +892,19 @@ test("payment intent success marks the resolved checkout session fulfilled", asy
     .prepare(
       `SELECT status, payment_intent_id, stripe_event_id, stripe_event_type, credit_balance_after
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get(sessionId);
-  assert.deepEqual({ ...checkoutRow }, {
-    status: "fulfilled",
-    payment_intent_id: paymentIntentId,
-    stripe_event_id: "evt_payment_intent_checkout_link",
-    stripe_event_type: "payment_intent.succeeded",
-    credit_balance_after: packs.STARTER.credits,
-  });
+  assert.deepEqual(
+    { ...checkoutRow },
+    {
+      status: "fulfilled",
+      payment_intent_id: paymentIntentId,
+      stripe_event_id: "evt_payment_intent_checkout_link",
+      stripe_event_type: "payment_intent.succeeded",
+      credit_balance_after: packs.STARTER.credits,
+    },
+  );
 });
 
 test("late payment intent failures do not downgrade fulfilled checkout sessions", async () => {
@@ -802,16 +916,16 @@ test("late payment intent failures do not downgrade fulfilled checkout sessions"
   let webhookCall = 0;
 
   configureStripeStubs({
-    createSession: async params => ({
+    createSession: async (params) => ({
       id: sessionId,
       url: `https://checkout.stripe.com/c/pay/${sessionId}`,
       metadata: params.metadata,
     }),
-    listSessions: async params => {
+    listSessions: async (params) => {
       assert.equal(params.limit, 1);
       assert.ok(
         params.payment_intent === successPaymentIntentId ||
-          params.payment_intent === failedPaymentIntentId
+          params.payment_intent === failedPaymentIntentId,
       );
       return {
         data: [
@@ -880,7 +994,7 @@ test("late payment intent failures do not downgrade fulfilled checkout sessions"
   });
   assert.equal(createResponse.status, 200);
 
-  await withPaymentEventsStub(async broadcasts => {
+  await withPaymentEventsStub(async (broadcasts) => {
     const successWebhookResponse = await apiRequest("/stripe/webhook", {
       method: "POST",
       headers: {
@@ -910,16 +1024,19 @@ test("late payment intent failures do not downgrade fulfilled checkout sessions"
     .prepare(
       `SELECT status, payment_intent_id, stripe_event_id, stripe_event_type, credit_balance_after
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get(sessionId);
-  assert.deepEqual({ ...checkoutRow }, {
-    status: "fulfilled",
-    payment_intent_id: successPaymentIntentId,
-    stripe_event_id: "evt_late_failure_success",
-    stripe_event_type: "payment_intent.succeeded",
-    credit_balance_after: packs.STARTER.credits,
-  });
+  assert.deepEqual(
+    { ...checkoutRow },
+    {
+      status: "fulfilled",
+      payment_intent_id: successPaymentIntentId,
+      stripe_event_id: "evt_late_failure_success",
+      stripe_event_type: "payment_intent.succeeded",
+      credit_balance_after: packs.STARTER.credits,
+    },
+  );
 });
 
 test("malformed checkout creation JSON does not send payment alert email", async () => {
@@ -950,7 +1067,7 @@ test("client checkout failure events send payment alert email", async () => {
   const sessionId = "cs_client_cancel";
 
   configureStripeStubs({
-    createSession: async params => ({
+    createSession: async (params) => ({
       id: sessionId,
       url: `https://checkout.stripe.com/c/pay/${sessionId}`,
       metadata: params.metadata,
@@ -1015,7 +1132,7 @@ test("client checkout failure events send payment alert email", async () => {
     assert.equal(sent.length, 1);
     assert.match(
       sent[0].body.personalizations[0].subject,
-      /embedded_cancel_redirect/
+      /embedded_cancel_redirect/,
     );
     assert.match(sent[0].body.content[0].value, /cs_client_cancel/);
     assert.match(sent[0].body.content[0].value, /1\.13\.22/);
@@ -1025,16 +1142,19 @@ test("client checkout failure events send payment alert email", async () => {
     .prepare(
       `SELECT status, stripe_event_id, stripe_event_type, error_message
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get(sessionId);
-  assert.deepEqual({ ...checkoutRow }, {
-    status: "cancelled",
-    stripe_event_id:
-      "checkout-client-event:cs_client_cancel:embedded_cancel_redirect",
-    stripe_event_type: "checkout_client.embedded_cancel_redirect",
-    error_message: "Translator reported embedded_cancel_redirect",
-  });
+  assert.deepEqual(
+    { ...checkoutRow },
+    {
+      status: "cancelled",
+      stripe_event_id:
+        "checkout-client-event:cs_client_cancel:embedded_cancel_redirect",
+      stripe_event_type: "checkout_client.embedded_cancel_redirect",
+      error_message: "Translator reported embedded_cancel_redirect",
+    },
+  );
 
   const pollResponse = await apiRequest(`/payments/session/${sessionId}`, {
     method: "GET",
@@ -1089,7 +1209,7 @@ test("Stripe payment failures send payment alert email", async () => {
     assert.equal(sent.length, 1);
     assert.match(
       sent[0].body.personalizations[0].subject,
-      /payment intent failed/
+      /payment intent failed/,
     );
     assert.match(sent[0].body.content[0].value, /pi_payment_failed_alert/);
     assert.match(sent[0].body.content[0].value, /authentication_required/);
@@ -1103,12 +1223,12 @@ test("Stripe payment failures broadcast checkout failure to the device", async (
   const paymentIntentId = "pi_payment_failed_broadcast";
 
   configureStripeStubs({
-    createSession: async params => ({
+    createSession: async (params) => ({
       id: sessionId,
       url: `https://checkout.stripe.com/c/pay/${sessionId}`,
       metadata: params.metadata,
     }),
-    listSessions: async params => {
+    listSessions: async (params) => {
       assert.deepEqual(params, {
         payment_intent: paymentIntentId,
         limit: 1,
@@ -1160,7 +1280,7 @@ test("Stripe payment failures broadcast checkout failure to the device", async (
   assert.equal(createResponse.status, 200);
 
   await withPaymentAlertEmailStub(async () => {
-    await withPaymentEventsStub(async broadcasts => {
+    await withPaymentEventsStub(async (broadcasts) => {
       const response = await apiRequest("/stripe/webhook", {
         method: "POST",
         headers: {
@@ -1193,16 +1313,19 @@ test("Stripe payment failures broadcast checkout failure to the device", async (
     .prepare(
       `SELECT status, payment_intent_id, stripe_event_id, stripe_event_type, error_message
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get(sessionId);
-  assert.deepEqual({ ...checkoutRow }, {
-    status: "failed",
-    payment_intent_id: paymentIntentId,
-    stripe_event_id: "evt_payment_failed_broadcast",
-    stripe_event_type: "payment_intent.payment_failed",
-    error_message: "Your card was declined.",
-  });
+  assert.deepEqual(
+    { ...checkoutRow },
+    {
+      status: "failed",
+      payment_intent_id: paymentIntentId,
+      stripe_event_id: "evt_payment_failed_broadcast",
+      stripe_event_type: "payment_intent.payment_failed",
+      error_message: "Your card was declined.",
+    },
+  );
 });
 
 test("Stripe payment failures keep open checkout sessions recoverable", async () => {
@@ -1212,12 +1335,12 @@ test("Stripe payment failures keep open checkout sessions recoverable", async ()
   const paymentIntentId = "pi_payment_failed_open";
 
   configureStripeStubs({
-    createSession: async params => ({
+    createSession: async (params) => ({
       id: sessionId,
       url: `https://checkout.stripe.com/c/pay/${sessionId}`,
       metadata: params.metadata,
     }),
-    listSessions: async params => {
+    listSessions: async (params) => {
       assert.deepEqual(params, {
         payment_intent: paymentIntentId,
         limit: 1,
@@ -1268,8 +1391,8 @@ test("Stripe payment failures keep open checkout sessions recoverable", async ()
   });
   assert.equal(createResponse.status, 200);
 
-  await withPaymentAlertEmailStub(async sent => {
-    await withPaymentEventsStub(async broadcasts => {
+  await withPaymentAlertEmailStub(async (sent) => {
+    await withPaymentEventsStub(async (broadcasts) => {
       const response = await apiRequest("/stripe/webhook", {
         method: "POST",
         headers: {
@@ -1289,16 +1412,19 @@ test("Stripe payment failures keep open checkout sessions recoverable", async ()
     .prepare(
       `SELECT status, payment_intent_id, stripe_event_id, stripe_event_type, error_message
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get(sessionId);
-  assert.deepEqual({ ...checkoutRow }, {
-    status: "created",
-    payment_intent_id: null,
-    stripe_event_id: null,
-    stripe_event_type: null,
-    error_message: null,
-  });
+  assert.deepEqual(
+    { ...checkoutRow },
+    {
+      status: "created",
+      payment_intent_id: null,
+      stripe_event_id: null,
+      stripe_event_type: null,
+      error_message: null,
+    },
+  );
 });
 
 test("Stripe payment failures with inconclusive session lookup do not cancel checkout", async () => {
@@ -1308,12 +1434,12 @@ test("Stripe payment failures with inconclusive session lookup do not cancel che
   const paymentIntentId = "pi_payment_failed_lookup_error";
 
   configureStripeStubs({
-    createSession: async params => ({
+    createSession: async (params) => ({
       id: sessionId,
       url: `https://checkout.stripe.com/c/pay/${sessionId}`,
       metadata: params.metadata,
     }),
-    listSessions: async params => {
+    listSessions: async (params) => {
       assert.deepEqual(params, {
         payment_intent: paymentIntentId,
         limit: 1,
@@ -1352,8 +1478,8 @@ test("Stripe payment failures with inconclusive session lookup do not cancel che
   });
   assert.equal(createResponse.status, 200);
 
-  await withPaymentAlertEmailStub(async sent => {
-    await withPaymentEventsStub(async broadcasts => {
+  await withPaymentAlertEmailStub(async (sent) => {
+    await withPaymentEventsStub(async (broadcasts) => {
       const response = await apiRequest("/stripe/webhook", {
         method: "POST",
         headers: {
@@ -1373,16 +1499,19 @@ test("Stripe payment failures with inconclusive session lookup do not cancel che
     .prepare(
       `SELECT status, payment_intent_id, stripe_event_id, stripe_event_type, error_message
        FROM checkout_sessions
-       WHERE checkout_session_id = ?`
+       WHERE checkout_session_id = ?`,
     )
     .get(sessionId);
-  assert.deepEqual({ ...checkoutRow }, {
-    status: "created",
-    payment_intent_id: null,
-    stripe_event_id: null,
-    stripe_event_type: null,
-    error_message: null,
-  });
+  assert.deepEqual(
+    { ...checkoutRow },
+    {
+      status: "created",
+      payment_intent_id: null,
+      stripe_event_id: null,
+      stripe_event_type: null,
+      error_message: null,
+    },
+  );
 });
 
 test("checkout creation is bound to the authenticated device", async () => {
@@ -1434,6 +1563,149 @@ test("checkout polling refuses sessions owned by another device", async () => {
   assert.equal(body.error, "Forbidden");
 });
 
+test("checkout and signed fulfillment produce one authoritative analytics purchase", async () => {
+  const deviceId = "99999999-0000-4000-8000-000000000010";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  const sessionId = "cs_measurement_exact_once";
+  const paymentIntentId = "pi_measurement_exact_once";
+  const originalFetch = globalThis.fetch;
+  const originalAnalytics = {
+    GA4_TRANSLATOR_MEASUREMENT_ID: env.GA4_TRANSLATOR_MEASUREMENT_ID,
+    GA4_API_SECRET: env.GA4_API_SECRET,
+    ANALYTICS_PSEUDONYM_SECRET: env.ANALYTICS_PSEUDONYM_SECRET,
+  };
+  const sentEvents = [];
+  let webhookIndex = 0;
+
+  env.GA4_TRANSLATOR_MEASUREMENT_ID = "G-PAYMENTTEST";
+  env.GA4_API_SECRET = "payment-test-secret";
+  env.ANALYTICS_PSEUDONYM_SECRET = "payment-pseudonym-secret";
+  globalThis.fetch = async (_url, init) => {
+    sentEvents.push(JSON.parse(String(init.body)).events[0]);
+    return new Response(null, { status: 204 });
+  };
+
+  configureStripeStubs({
+    createSession: async (params) => ({
+      id: sessionId,
+      url: `https://checkout.stripe.com/c/pay/${sessionId}`,
+      metadata: params.metadata,
+    }),
+    listSessions: async () => ({
+      data: [
+        {
+          id: sessionId,
+          status: "complete",
+          payment_status: "paid",
+          payment_intent: paymentIntentId,
+          metadata: { deviceId, packId: "STANDARD" },
+        },
+      ],
+    }),
+    constructEvent: async () => {
+      const events = [
+        {
+          id: "evt_measurement_intent",
+          type: "payment_intent.succeeded",
+          data: {
+            object: {
+              id: paymentIntentId,
+              status: "succeeded",
+              amount_received: 1000,
+              currency: "usd",
+              metadata: { deviceId, packId: "STANDARD" },
+            },
+          },
+        },
+        {
+          id: "evt_measurement_checkout",
+          type: "checkout.session.completed",
+          data: {
+            object: {
+              id: sessionId,
+              payment_status: "paid",
+              payment_intent: paymentIntentId,
+              amount_total: 1000,
+              currency: "usd",
+              metadata: { deviceId, packId: "STANDARD" },
+            },
+          },
+        },
+      ];
+      return events[webhookIndex++];
+    },
+  });
+
+  try {
+    const createResponse = await apiRequest("/payments/create-session", {
+      method: "POST",
+      headers: authHeaders(apiToken, { "content-type": "application/json" }),
+      body: JSON.stringify({ deviceId, packId: "STANDARD", locale: "en" }),
+    });
+    assert.equal(createResponse.status, 200);
+
+    for (const signature of ["sig_measurement_1", "sig_measurement_2"]) {
+      const webhookResponse = await apiRequest("/stripe/webhook", {
+        method: "POST",
+        headers: {
+          "stripe-signature": signature,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ok: true }),
+      });
+      assert.equal(webhookResponse.status, 200);
+    }
+
+    assert.equal(
+      count(
+        "SELECT COUNT(*) AS count FROM analytics_outbox WHERE event_name = 'begin_checkout'",
+      ),
+      1,
+    );
+    assert.equal(
+      count(
+        "SELECT COUNT(*) AS count FROM analytics_outbox WHERE event_name = 'purchase'",
+      ),
+      1,
+    );
+    const purchase = sqlite
+      .prepare(
+        "SELECT event_id, params_json FROM analytics_outbox WHERE event_name = 'purchase'",
+      )
+      .get();
+    assert.equal(purchase.event_id, `purchase:${paymentIntentId}`);
+    assert.deepEqual(JSON.parse(purchase.params_json), {
+      transaction_id: paymentIntentId,
+      affiliation: "Translator desktop",
+      currency: "USD",
+      value: 10,
+      checkout_mode: "credits",
+      commerce_surface: "translator_desktop",
+      attribution_scope: "server_settlement",
+      items: [
+        {
+          item_id: "credit_pack_standard",
+          item_name: "Translator STANDARD credit pack",
+          price: 10,
+          quantity: 1,
+          item_category: "credits",
+        },
+      ],
+      engagement_time_msec: 1,
+    });
+    assert.equal(
+      sentEvents.filter((event) => event.name === "purchase").length,
+      1,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries(originalAnalytics)) {
+      if (value === undefined) delete env[key];
+      else env[key] = value;
+    }
+  }
+});
+
 test("fresh-device BYO unlock is readable through entitlements without a credits row", async () => {
   const deviceId = "44444444-4444-4444-8444-444444444444";
   const apiToken = await registerDeviceApiToken({ deviceId });
@@ -1457,7 +1729,9 @@ test("fresh-device BYO unlock is readable through entitlements without a credits
     byoElevenLabs: true,
   });
   assert.equal(
-    count("SELECT COUNT(*) AS count FROM credits WHERE device_id = ?", [deviceId]),
-    0
+    count("SELECT COUNT(*) AS count FROM credits WHERE device_id = ?", [
+      deviceId,
+    ]),
+    0,
   );
 });

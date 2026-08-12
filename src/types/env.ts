@@ -23,6 +23,9 @@ export type Stage5ApiBindings = {
   PAYMENT_ALERT_EMAIL_FROM?: string;
   RECONCILE_CRON_ENABLED?: string;
   RECONCILE_CRON_DRY_RUN?: string;
+  GA4_TRANSLATOR_MEASUREMENT_ID?: string;
+  GA4_API_SECRET?: string;
+  ANALYTICS_PSEUDONYM_SECRET?: string;
   TRANSCRIPTION_BUCKET: R2Bucket;
   R2_ACCOUNT_ID: string;
   R2_ACCESS_KEY_ID: string;
