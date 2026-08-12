@@ -21,6 +21,15 @@ const productEventSchema = z
       "translation_credit_blocked",
       "translation_cancelled",
       "translation_failed",
+      "url_download_started",
+      "url_download_completed",
+      "url_download_cookie_required",
+      "url_download_cancelled",
+      "url_download_failed",
+      "url_cookie_connect_started",
+      "url_cookie_connect_completed",
+      "url_cookie_connect_cancelled",
+      "url_cookie_connect_failed",
     ]),
     appVersion: z.string().trim().min(1).max(32),
     platform: z.enum(["darwin", "win32", "linux"]),
@@ -70,6 +79,22 @@ const productEventSchema = z
         "unknown",
       ])
       .optional(),
+    sourceType: z.enum(["youtube", "other"]).optional(),
+    cookieCause: z
+      .enum(["rate_limited", "login_required", "human_verification", "other"])
+      .optional(),
+    downloadFailure: z
+      .enum([
+        "validation",
+        "runtime_setup",
+        "network",
+        "site_rejected",
+        "storage",
+        "postprocessing",
+        "unknown",
+      ])
+      .optional(),
+    connectionContext: z.enum(["download_recovery", "settings"]).optional(),
   })
   .strict();
 
@@ -188,6 +213,45 @@ router.post("/events", async (c) => {
         400,
       );
     }
+    const isUrlDownloadEvent = input.event.startsWith("url_download_");
+    const isUrlConnectionEvent = input.event.startsWith("url_cookie_connect_");
+    const isUrlEvent = isUrlDownloadEvent || isUrlConnectionEvent;
+    const hasUrlFields = Boolean(
+      input.sourceType ||
+      input.cookieCause ||
+      input.downloadFailure ||
+      input.connectionContext,
+    );
+    const hasInvalidUrlEventShape =
+      isUrlEvent &&
+      (!input.sourceType ||
+        input.feature ||
+        input.workflow ||
+        hasFailureFields ||
+        (input.event === "url_download_cookie_required") !==
+          Boolean(input.cookieCause) ||
+        (input.event === "url_download_failed") !==
+          Boolean(input.downloadFailure) ||
+        isUrlConnectionEvent !== Boolean(input.connectionContext));
+    if (hasInvalidUrlEventShape) {
+      return c.json(
+        {
+          error: "Invalid request data",
+          message:
+            "URL funnel events require only their allowlisted coarse dimensions",
+        },
+        400,
+      );
+    }
+    if (!isUrlEvent && hasUrlFields) {
+      return c.json(
+        {
+          error: "Invalid request data",
+          message: "URL funnel dimensions are accepted only for URL events",
+        },
+        400,
+      );
+    }
 
     if (await isInternalDevice({ deviceId })) {
       return c.json({ ok: true, duplicate: false, excluded: true }, 202);
@@ -216,6 +280,14 @@ router.post("/events", async (c) => {
           ? { failed_architecture: input.failedArchitecture }
           : {}),
         ...(input.processReason ? { process_reason: input.processReason } : {}),
+        ...(input.sourceType ? { source_type: input.sourceType } : {}),
+        ...(input.cookieCause ? { cookie_cause: input.cookieCause } : {}),
+        ...(input.downloadFailure
+          ? { download_failure: input.downloadFailure }
+          : {}),
+        ...(input.connectionContext
+          ? { connection_context: input.connectionContext }
+          : {}),
         engagement_time_msec: 1,
       },
     });

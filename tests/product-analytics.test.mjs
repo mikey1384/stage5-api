@@ -407,6 +407,95 @@ test("critical desktop failures accept only minimized allowlisted diagnostics", 
   assert.equal(missingProcessReason.status, 400);
 });
 
+test("URL download recovery events expose coarse outcomes but reject browsing data", async () => {
+  const deviceId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const token = await registerDeviceApiToken({ deviceId });
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+
+  const required = await worker.fetch(
+    new Request("http://localhost/analytics/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        event: "url_download_cookie_required",
+        appVersion: "1.16.10",
+        platform: "darwin",
+        architecture: "arm64",
+        locale: "en-US",
+        sourceType: "youtube",
+        cookieCause: "human_verification",
+      }),
+    }),
+    env,
+    ctx,
+  );
+  assert.equal(required.status, 202);
+  const requiredRow = sqlite
+    .prepare("SELECT params_json FROM analytics_outbox WHERE event_id = ?")
+    .get(
+      "translator:url_download_cookie_required:ffffffff-ffff-4fff-8fff-ffffffffffff",
+    );
+  assert.deepEqual(JSON.parse(requiredRow.params_json), {
+    app_version: "1.16.10",
+    operating_system: "darwin",
+    architecture: "arm64",
+    app_locale: "en-US",
+    source_type: "youtube",
+    cookie_cause: "human_verification",
+    engagement_time_msec: 1,
+  });
+
+  const connected = await worker.fetch(
+    new Request("http://localhost/analytics/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "12121212-1212-4212-8212-121212121212",
+        event: "url_cookie_connect_completed",
+        appVersion: "1.16.10",
+        platform: "darwin",
+        architecture: "arm64",
+        locale: "en-US",
+        sourceType: "youtube",
+        connectionContext: "download_recovery",
+      }),
+    }),
+    env,
+    ctx,
+  );
+  assert.equal(connected.status, 202);
+
+  const rejectedUrl = await worker.fetch(
+    new Request("http://localhost/analytics/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "34343434-3434-4434-8434-343434343434",
+        event: "url_download_started",
+        appVersion: "1.16.10",
+        platform: "darwin",
+        architecture: "arm64",
+        locale: "en-US",
+        sourceType: "youtube",
+        url: "https://youtube.com/watch?v=private-id",
+      }),
+    }),
+    env,
+    ctx,
+  );
+  assert.equal(rejectedUrl.status, 400);
+});
+
 test("internal desktop devices are acknowledged without entering customer analytics", async () => {
   const deviceId = "44444444-4444-4444-8444-444444444444";
   const token = await registerDeviceApiToken({ deviceId });
