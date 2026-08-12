@@ -304,6 +304,109 @@ test("authenticated translation funnel events accept only the full-SRT workflow"
   assert.equal(blocked.status, 202);
 });
 
+test("critical desktop failures accept only minimized allowlisted diagnostics", async () => {
+  const deviceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const token = await registerDeviceApiToken({ deviceId });
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+
+  const response = await worker.fetch(
+    new Request("http://localhost/analytics/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        event: "app_critical_failure",
+        appVersion: "1.16.9",
+        platform: "darwin",
+        architecture: "x64",
+        locale: "en-US",
+        failureClass: "startup_incomplete",
+        startupPhase: "module_load",
+        failedAppVersion: "1.16.8",
+        failedPlatform: "darwin",
+        failedArchitecture: "x64",
+      }),
+    }),
+    env,
+    ctx,
+  );
+
+  assert.equal(response.status, 202);
+  const row = sqlite
+    .prepare("SELECT params_json FROM analytics_outbox WHERE event_id = ?")
+    .get(
+      "translator:app_critical_failure:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    );
+  assert.deepEqual(JSON.parse(row.params_json), {
+    app_version: "1.16.9",
+    operating_system: "darwin",
+    architecture: "x64",
+    app_locale: "en-US",
+    failure_class: "startup_incomplete",
+    startup_phase: "module_load",
+    failed_app_version: "1.16.8",
+    failed_operating_system: "darwin",
+    failed_architecture: "x64",
+    engagement_time_msec: 1,
+  });
+
+  const rejectedContent = await worker.fetch(
+    new Request("http://localhost/analytics/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        event: "app_critical_failure",
+        appVersion: "1.16.9",
+        platform: "darwin",
+        architecture: "x64",
+        locale: "en-US",
+        failureClass: "startup_incomplete",
+        startupPhase: "module_load",
+        failedAppVersion: "1.16.8",
+        failedPlatform: "darwin",
+        failedArchitecture: "x64",
+        stack: "/Users/customer/private/file.srt",
+      }),
+    }),
+    env,
+    ctx,
+  );
+  assert.equal(rejectedContent.status, 400);
+
+  const missingProcessReason = await worker.fetch(
+    new Request("http://localhost/analytics/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        eventId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        event: "app_critical_failure",
+        appVersion: "1.16.9",
+        platform: "darwin",
+        architecture: "x64",
+        locale: "en-US",
+        failureClass: "renderer_process_gone",
+        startupPhase: "runtime",
+        failedAppVersion: "1.16.9",
+        failedPlatform: "darwin",
+        failedArchitecture: "x64",
+      }),
+    }),
+    env,
+    ctx,
+  );
+  assert.equal(missingProcessReason.status, 400);
+});
+
 test("internal desktop devices are acknowledged without entering customer analytics", async () => {
   const deviceId = "44444444-4444-4444-8444-444444444444";
   const token = await registerDeviceApiToken({ deviceId });

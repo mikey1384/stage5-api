@@ -9,29 +9,69 @@ import type { Stage5ApiBindings } from "../types/env";
 
 const router = new Hono<{ Bindings: Stage5ApiBindings }>();
 
-const productEventSchema = z.object({
-  eventId: z.string().uuid(),
-  event: z.enum([
-    "app_open",
-    "app_meaningful_use",
-    "translation_started",
-    "translation_completed",
-    "translation_credit_blocked",
-    "translation_cancelled",
-    "translation_failed",
-  ]),
-  appVersion: z.string().trim().min(1).max(32),
-  platform: z.enum(["darwin", "win32", "linux"]),
-  architecture: z.enum(["arm64", "x64", "ia32"]),
-  locale: z
-    .string()
-    .trim()
-    .min(2)
-    .max(24)
-    .regex(/^[a-zA-Z]{2,3}(?:[-_][a-zA-Z0-9]{2,8})*$/),
-  feature: z.enum(["video_open", "video_download"]).optional(),
-  workflow: z.enum(["full_srt"]).optional(),
-});
+const productEventSchema = z
+  .object({
+    eventId: z.string().uuid(),
+    event: z.enum([
+      "app_open",
+      "app_meaningful_use",
+      "app_critical_failure",
+      "translation_started",
+      "translation_completed",
+      "translation_credit_blocked",
+      "translation_cancelled",
+      "translation_failed",
+    ]),
+    appVersion: z.string().trim().min(1).max(32),
+    platform: z.enum(["darwin", "win32", "linux"]),
+    architecture: z.enum(["arm64", "x64", "ia32"]),
+    locale: z
+      .string()
+      .trim()
+      .min(2)
+      .max(24)
+      .regex(/^[a-zA-Z]{2,3}(?:[-_][a-zA-Z0-9]{2,8})*$/),
+    feature: z.enum(["video_open", "video_download"]).optional(),
+    workflow: z.enum(["full_srt"]).optional(),
+    failureClass: z
+      .enum([
+        "startup_incomplete",
+        "main_module_load_failed",
+        "startup_initialization_failed",
+        "main_process_exception",
+        "main_process_rejection",
+        "renderer_process_gone",
+        "child_process_gone",
+      ])
+      .optional(),
+    startupPhase: z
+      .enum([
+        "module_load",
+        "services_initialization",
+        "app_ready",
+        "startup_cleanup",
+        "window_creation",
+        "renderer_ready",
+        "runtime",
+      ])
+      .optional(),
+    failedAppVersion: z.string().trim().min(1).max(32).optional(),
+    failedPlatform: z.enum(["darwin", "win32", "linux"]).optional(),
+    failedArchitecture: z.enum(["arm64", "x64", "ia32"]).optional(),
+    processReason: z
+      .enum([
+        "clean-exit",
+        "abnormal-exit",
+        "killed",
+        "crashed",
+        "oom",
+        "launch-failed",
+        "integrity-failure",
+        "unknown",
+      ])
+      .optional(),
+  })
+  .strict();
 
 async function authenticatedDeviceId(c: any): Promise<string | null> {
   const authorization = c.req.header("Authorization");
@@ -107,6 +147,47 @@ router.post("/events", async (c) => {
         400,
       );
     }
+    const hasFailureFields = Boolean(
+      input.failureClass ||
+      input.startupPhase ||
+      input.failedAppVersion ||
+      input.failedPlatform ||
+      input.failedArchitecture ||
+      input.processReason,
+    );
+    const isProcessFailure =
+      input.failureClass === "renderer_process_gone" ||
+      input.failureClass === "child_process_gone";
+    if (
+      input.event === "app_critical_failure" &&
+      (!input.failureClass ||
+        !input.startupPhase ||
+        !input.failedAppVersion ||
+        !input.failedPlatform ||
+        !input.failedArchitecture ||
+        input.feature ||
+        input.workflow ||
+        isProcessFailure !== Boolean(input.processReason))
+    ) {
+      return c.json(
+        {
+          error: "Invalid request data",
+          message:
+            "Critical-failure events require minimized failure dimensions and cannot contain feature or workflow data",
+        },
+        400,
+      );
+    }
+    if (input.event !== "app_critical_failure" && hasFailureFields) {
+      return c.json(
+        {
+          error: "Invalid request data",
+          message:
+            "Failure dimensions are accepted only for critical-failure events",
+        },
+        400,
+      );
+    }
 
     if (await isInternalDevice({ deviceId })) {
       return c.json({ ok: true, duplicate: false, excluded: true }, 202);
@@ -123,6 +204,18 @@ router.post("/events", async (c) => {
         app_locale: input.locale.replace(/_/g, "-"),
         ...(input.feature ? { feature: input.feature } : {}),
         ...(input.workflow ? { workflow: input.workflow } : {}),
+        ...(input.failureClass ? { failure_class: input.failureClass } : {}),
+        ...(input.startupPhase ? { startup_phase: input.startupPhase } : {}),
+        ...(input.failedAppVersion
+          ? { failed_app_version: input.failedAppVersion }
+          : {}),
+        ...(input.failedPlatform
+          ? { failed_operating_system: input.failedPlatform }
+          : {}),
+        ...(input.failedArchitecture
+          ? { failed_architecture: input.failedArchitecture }
+          : {}),
+        ...(input.processReason ? { process_reason: input.processReason } : {}),
         engagement_time_msec: 1,
       },
     });
