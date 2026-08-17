@@ -40,7 +40,7 @@ const productEventSchema = z
       .min(2)
       .max(24)
       .regex(/^[a-zA-Z]{2,3}(?:[-_][a-zA-Z0-9]{2,8})*$/),
-    feature: z.enum(["video_open", "video_download"]).optional(),
+    feature: z.enum(["video_open", "video_download", "translation"]).optional(),
     workflow: z.enum(["full_srt"]).optional(),
     failureClass: z
       .enum([

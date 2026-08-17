@@ -191,7 +191,7 @@ test("authenticated desktop product events accept only minimized allowlisted dat
         platform: "darwin",
         architecture: "arm64",
         locale: "ko-KR",
-        feature: "video_open",
+        feature: "translation",
       }),
     }),
     env,
@@ -211,7 +211,7 @@ test("authenticated desktop product events accept only minimized allowlisted dat
     operating_system: "darwin",
     architecture: "arm64",
     app_locale: "ko-KR",
-    feature: "video_open",
+    feature: "translation",
     engagement_time_msec: 1,
   });
   assert.equal(String(row.client_id).includes(deviceId), false);
