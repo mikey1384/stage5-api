@@ -1196,7 +1196,7 @@ router.post("/webhook/:jobId", async (c) => {
         console.log(
           `[transcribe/webhook] Cleaned up R2 file (${context}): ${job.file_key}`
         );
-      } catch (cleanupErr) {
+      } catch {
         console.warn(
           `[transcribe/webhook] Failed to cleanup R2 file (${context}) ${job.file_key}`
         );
@@ -1822,7 +1822,6 @@ router.post("/", async (c) => {
     });
   } finally {
     stopDirectRequestLeaseHeartbeat?.();
-    stopDirectRequestLeaseHeartbeat = null;
   }
 });
 

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import { getDatabase } from "./core";
 import type { CreditRecord } from "./credits";
@@ -6,9 +7,7 @@ const API_TOKEN_PREFIX = "s5_";
 const API_TOKEN_BYTES = 32;
 const RECOVERY_TOKEN_PREFIX = "s5r_";
 const RECOVERY_TOKEN_BYTES = 32;
-const DEVICE_API_ISSUE_KINDS = ["legacy", "recovery"] as const;
-
-export type DeviceApiIssueKind = (typeof DEVICE_API_ISSUE_KINDS)[number];
+export type DeviceApiIssueKind = "legacy" | "recovery";
 
 export interface DeviceApiTokenRecord {
   device_id: string;
@@ -51,15 +50,15 @@ function hashApiToken(apiToken: string): string {
 }
 
 function generateApiToken(): string {
-  return `${API_TOKEN_PREFIX}${crypto.randomBytes(API_TOKEN_BYTES).toString("base64url")}`;
+  return `${API_TOKEN_PREFIX}${Buffer.from(crypto.randomBytes(API_TOKEN_BYTES)).toString("base64url")}`;
 }
 
 function generateRecoveryToken(): string {
-  return `${RECOVERY_TOKEN_PREFIX}${crypto.randomBytes(RECOVERY_TOKEN_BYTES).toString("base64url")}`;
+  return `${RECOVERY_TOKEN_PREFIX}${Buffer.from(crypto.randomBytes(RECOVERY_TOKEN_BYTES)).toString("base64url")}`;
 }
 
 function generateIssueNonce(): string {
-  return crypto.randomBytes(16).toString("hex");
+  return Buffer.from(crypto.randomBytes(16)).toString("hex");
 }
 
 function buildDerivedToken({

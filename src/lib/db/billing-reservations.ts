@@ -617,7 +617,9 @@ export async function reserveBillingCredits({
           if (raceResult) {
             return raceResult;
           }
-          throw new Error("Failed to reactivate billing reservation");
+          throw new Error("Failed to reactivate billing reservation", {
+            cause: error,
+          });
         }
         throw error;
       }
@@ -688,7 +690,9 @@ export async function reserveBillingCredits({
         if (raceResult) {
           return raceResult;
         }
-        throw new Error("Failed to create billing reservation");
+        throw new Error("Failed to create billing reservation", {
+          cause: error,
+        });
       }
       const duplicate = await getReplayableDuplicateReservation({
         deviceId,

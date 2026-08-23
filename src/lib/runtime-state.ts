@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import { getDatabase } from "./db/core";
 
@@ -61,7 +62,7 @@ export async function getOrCreateRuntimeSecret({
   const initialValue =
     typeof preferredInitialValue === "string" && preferredInitialValue.trim()
       ? preferredInitialValue.trim()
-      : crypto.randomBytes(bytes).toString("base64url");
+      : Buffer.from(crypto.randomBytes(bytes)).toString("base64url");
 
   const db = getDatabase();
   await db

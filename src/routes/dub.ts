@@ -919,7 +919,6 @@ router.post("/", async (c) => {
         reason: "DUB",
         meta: { reason: "route-error" },
       }).catch(() => {});
-      reservationActive = false;
     }
 
     return respondReplay({
@@ -932,7 +931,6 @@ router.post("/", async (c) => {
     });
   } finally {
     stopDirectRequestLeaseHeartbeat?.();
-    stopDirectRequestLeaseHeartbeat = null;
   }
 });
 
