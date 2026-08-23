@@ -179,14 +179,24 @@ export async function resolveStoredJsonReplay({
   }
 
   if (storedReplay.kind === "success" && "artifact" in storedReplay) {
-    return {
-      kind: "success",
-      status: storedReplay.status,
-      body: await loadReplayArtifact({
-        bucket,
-        artifact: storedReplay.artifact,
-      }),
-    };
+    try {
+      return {
+        kind: "success",
+        status: storedReplay.status,
+        body: await loadReplayArtifact({
+          bucket,
+          artifact: storedReplay.artifact,
+        }),
+      };
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "Replay artifact not found"
+      ) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   return storedReplay;

@@ -171,19 +171,46 @@ export const getTranscriptionJobStatusCounts = async (): Promise<
 
 export const setTranscriptionJobProcessing = async ({
   jobId,
+  expectedUpdatedAt,
 }: {
   jobId: string;
-}): Promise<void> => {
+  expectedUpdatedAt?: string | null;
+}): Promise<boolean> => {
   const db = getDatabase();
+  const expectedUpdatedAtClause =
+    typeof expectedUpdatedAt === "undefined" ? "" : "AND updated_at IS ?";
+  const expectedUpdatedAtBindings =
+    typeof expectedUpdatedAt === "undefined" ? [] : [expectedUpdatedAt];
 
   const stmt = db.prepare(`
     UPDATE transcription_jobs
        SET status = 'processing',
            updated_at = CURRENT_TIMESTAMP
      WHERE job_id = ?
+       AND status = 'pending_upload'
+       ${expectedUpdatedAtClause}
   `);
 
-  await stmt.bind(jobId).run();
+  const result = await stmt.bind(jobId, ...expectedUpdatedAtBindings).run();
+  return (result.meta?.changes ?? 0) === 1;
+};
+
+export const resetTranscriptionJobPendingUpload = async ({
+  jobId,
+}: {
+  jobId: string;
+}): Promise<boolean> => {
+  const result = await getDatabase()
+    .prepare(
+      `UPDATE transcription_jobs
+          SET status = 'pending_upload',
+              updated_at = CURRENT_TIMESTAMP
+        WHERE job_id = ?
+          AND status = 'processing'`,
+    )
+    .bind(jobId)
+    .run();
+  return (result.meta?.changes ?? 0) === 1;
 };
 
 export const storeTranscriptionJobResult = async ({
@@ -289,7 +316,11 @@ export const listOldTranscriptionJobs = async ({
   excludeJobIds?: string[];
 } = {}): Promise<TranscriptionJobRecord[]> => {
   const db = getDatabase();
-  const safeMaxAgeHours = Math.max(1, Math.floor(maxAgeHours));
+  const parsedMaxAgeHours = Math.floor(maxAgeHours);
+  const safeMaxAgeHours =
+    Number.isFinite(parsedMaxAgeHours) && parsedMaxAgeHours > 0
+      ? parsedMaxAgeHours
+      : 24;
   const safeLimit = Math.max(1, Math.floor(limit));
   const normalizedStatuses = (statuses || [])
     .map(status => String(status || "").trim())
@@ -310,10 +341,10 @@ export const listOldTranscriptionJobs = async ({
   const stmt = db.prepare(`
     SELECT *
       FROM transcription_jobs
-     WHERE created_at < datetime('now', '-' || ? || ' hours')
+     WHERE updated_at < datetime('now', '-' || ? || ' hours')
            ${statusClause}
            ${excludedIdClause}
-     ORDER BY created_at ASC
+     ORDER BY updated_at ASC
      LIMIT ?
   `);
   const result = await stmt
@@ -325,6 +356,127 @@ export const listOldTranscriptionJobs = async ({
     )
     .all();
   return (result.results as TranscriptionJobRecord[]) || [];
+};
+
+export const listAbandonedPendingUploadTranscriptionJobs = async ({
+  maxAgeHours = 24,
+  limit = 200,
+  reservationRequestKeyPrefix,
+}: {
+  maxAgeHours?: number;
+  limit?: number;
+  reservationRequestKeyPrefix: string;
+}): Promise<TranscriptionJobRecord[]> => {
+  const db = getDatabase();
+  const parsedMaxAgeHours = Math.floor(maxAgeHours);
+  const safeMaxAgeHours =
+    Number.isFinite(parsedMaxAgeHours) && parsedMaxAgeHours > 0
+      ? parsedMaxAgeHours
+      : 24;
+  const safeLimit = Math.max(1, Math.floor(limit));
+  const result = await db
+    .prepare(
+      `SELECT jobs.*
+         FROM transcription_jobs AS jobs
+        WHERE jobs.status = 'pending_upload'
+          AND jobs.updated_at < datetime('now', '-' || ? || ' hours')
+          AND NOT EXISTS (
+            SELECT 1
+              FROM billing_reservations AS reservations
+             WHERE reservations.device_id = jobs.device_id
+               AND reservations.service = 'transcription'
+               AND reservations.request_key = ? || jobs.job_id
+               AND reservations.status = 'reserved'
+          )
+        ORDER BY jobs.updated_at ASC
+        LIMIT ?`,
+    )
+    .bind(safeMaxAgeHours, reservationRequestKeyPrefix, safeLimit)
+    .all();
+  return (result.results as TranscriptionJobRecord[]) || [];
+};
+
+export const deleteTerminalTranscriptionJobIfUnchanged = async ({
+  jobId,
+  status,
+  expectedUpdatedAt,
+}: {
+  jobId: string;
+  status: "completed" | "failed";
+  expectedUpdatedAt: string | null;
+}): Promise<boolean> => {
+  const result = await getDatabase()
+    .prepare(
+      `DELETE FROM transcription_jobs
+        WHERE job_id = ?
+          AND status = ?
+          AND updated_at IS ?`,
+    )
+    .bind(jobId, status, expectedUpdatedAt)
+    .run();
+  return (result.meta?.changes ?? 0) === 1;
+};
+
+export const failProcessingTranscriptionJobIfUnchanged = async ({
+  jobId,
+  expectedUpdatedAt,
+  error,
+}: {
+  jobId: string;
+  expectedUpdatedAt: string | null;
+  error: string;
+}): Promise<boolean> => {
+  const result = await getDatabase()
+    .prepare(
+      `UPDATE transcription_jobs
+          SET status = 'failed',
+              error = ?,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE job_id = ?
+          AND status = 'processing'
+          AND updated_at IS ?`,
+    )
+    .bind(error, jobId, expectedUpdatedAt)
+    .run();
+  return (result.meta?.changes ?? 0) === 1;
+};
+
+export const deleteAbandonedPendingUploadTranscriptionJobIfUnchanged = async ({
+  jobId,
+  deviceId,
+  expectedUpdatedAt,
+  reservationRequestKey,
+}: {
+  jobId: string;
+  deviceId: string;
+  expectedUpdatedAt: string | null;
+  reservationRequestKey: string;
+}): Promise<boolean> => {
+  const result = await getDatabase()
+    .prepare(
+      `DELETE FROM transcription_jobs
+        WHERE job_id = ?
+          AND device_id = ?
+          AND status = 'pending_upload'
+          AND updated_at IS ?
+          AND NOT EXISTS (
+            SELECT 1
+              FROM billing_reservations
+             WHERE device_id = ?
+               AND service = 'transcription'
+               AND request_key = ?
+               AND status = 'reserved'
+          )`,
+    )
+    .bind(
+      jobId,
+      deviceId,
+      expectedUpdatedAt,
+      deviceId,
+      reservationRequestKey,
+    )
+    .run();
+  return (result.meta?.changes ?? 0) === 1;
 };
 
 export const deleteTranscriptionJobsByIds = async ({

@@ -1,0 +1,41 @@
+{
+  "rules": [
+    {
+      "id": "Default Multipart Abort Rule",
+      "enabled": true,
+      "conditions": {},
+      "abortMultipartUploadsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 604800
+        }
+      }
+    },
+    {
+      "id": "Expire bounded direct replays",
+      "enabled": true,
+      "conditions": {
+        "prefix": "direct-replay/"
+      },
+      "deleteObjectsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 172800
+        }
+      }
+    },
+    {
+      "id": "Expire orphaned transcription uploads",
+      "enabled": true,
+      "conditions": {
+        "prefix": "transcriptions/"
+      },
+      "deleteObjectsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 691200
+        }
+      }
+    }
+  ]
+}

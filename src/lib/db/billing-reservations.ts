@@ -997,12 +997,14 @@ export async function releaseBillingReservation({
   requestKey,
   reason,
   meta,
+  expectedUpdatedAt,
 }: {
   deviceId: string;
   service: string;
   requestKey: string;
   reason: string;
   meta?: unknown;
+  expectedUpdatedAt?: string | null;
 }): Promise<
   | { ok: true; status: "released"; refundedSpend: number }
   | { ok: true; status: "duplicate"; reservation: BillingReservationRecord | null }
@@ -1022,6 +1024,10 @@ export async function releaseBillingReservation({
   const db = getDatabase();
   const refund = reservation.reserved_spend;
   const metaJson = buildReleasedReservationMeta(meta);
+  const expectedUpdatedAtClause =
+    typeof expectedUpdatedAt === "undefined" ? "" : "AND updated_at IS ?";
+  const expectedUpdatedAtBindings =
+    typeof expectedUpdatedAt === "undefined" ? [] : [expectedUpdatedAt];
 
   if (hasAtomicBatch(db)) {
     try {
@@ -1036,9 +1042,17 @@ export async function releaseBillingReservation({
                 AND service = ?
                 AND request_key = ?
                 AND status = 'reserved'
-                AND reserved_spend = ?`
+                AND reserved_spend = ?
+                ${expectedUpdatedAtClause}`
           )
-          .bind(metaJson, deviceId, service, requestKey, reservation.reserved_spend),
+          .bind(
+            metaJson,
+            deviceId,
+            service,
+            requestKey,
+            reservation.reserved_spend,
+            ...expectedUpdatedAtBindings
+          ),
         buildRollbackIfNoChangesStatement(
           `release-billing-reservation:${service}:${requestKey}`
         ),
@@ -1084,9 +1098,16 @@ export async function releaseBillingReservation({
           WHERE device_id = ?
             AND service = ?
             AND request_key = ?
-            AND status = 'reserved'`
+            AND status = 'reserved'
+            ${expectedUpdatedAtClause}`
       )
-      .bind(metaJson, deviceId, service, requestKey)
+      .bind(
+        metaJson,
+        deviceId,
+        service,
+        requestKey,
+        ...expectedUpdatedAtBindings
+      )
       .run();
 
     if ((updateRes.meta?.changes ?? 0) <= 0) {

@@ -85,4 +85,34 @@ test("success replay artifacts round-trip through R2-backed references", async (
     storedReplay,
   });
   assert.equal(bucket.has(storedReplay.artifact.key), false);
+
+  const expiredReplay = await resolveStoredJsonReplay({
+    bucket,
+    storedReplay,
+  });
+  assert.equal(expiredReplay, null);
+});
+
+test("replay resolution does not hide non-missing R2 failures", async () => {
+  await assert.rejects(
+    resolveStoredJsonReplay({
+      bucket: {
+        async get() {
+          throw new Error("R2 transport unavailable");
+        },
+      },
+      storedReplay: {
+        kind: "success",
+        status: 200,
+        artifact: {
+          version: 1,
+          storage: "r2",
+          key: "direct-replay/v1/transcription/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+          contentType: "application/json",
+          sizeBytes: 10,
+        },
+      },
+    }),
+    /R2 transport unavailable/,
+  );
 });

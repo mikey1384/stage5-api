@@ -5,10 +5,15 @@ import { ensureDatabase } from "../src/lib/db/core.ts";
 import {
   cleanupAbandonedPendingUploadTranscriptionJobs,
   cleanupDurableTranscriptionJobs,
+  cleanupStaleProcessingTranscriptionJobs,
 } from "../src/lib/transcription-job-cleanup.ts";
 import {
+  getBillingReservation,
   getTranscriptionJob,
+  setTranscriptionJobProcessing,
 } from "../src/lib/db.ts";
+import { buildReplayArtifactKey } from "../src/lib/replay-artifacts.ts";
+import { generateFileKey } from "../src/lib/r2-config.ts";
 import { buildR2TranscriptionReservationKey } from "../src/lib/transcription-billing.ts";
 import {
   createSqliteD1Database,
@@ -28,6 +33,7 @@ beforeEach(async () => {
 });
 
 test("cleanupAbandonedPendingUploadTranscriptionJobs deletes stale pending uploads without touching processing jobs", async () => {
+  const deviceId = "70000000-0000-4000-8000-000000000001";
   sqlite
     .prepare(
       `INSERT INTO transcription_jobs (
@@ -45,10 +51,10 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs deletes stale pending uploa
     )
     .run(
       "pending-upload-old",
-      "70000000-0000-4000-8000-000000000001",
+      deviceId,
       "pending-key",
       "pending_upload",
-      "transcriptions/pending-upload-old.webm",
+      generateFileKey(deviceId, "pending-upload-old"),
       "en",
       120
     );
@@ -70,10 +76,10 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs deletes stale pending uploa
     )
     .run(
       "processing-old",
-      "70000000-0000-4000-8000-000000000001",
+      deviceId,
       "processing-key",
       "processing",
-      "transcriptions/processing-old.webm",
+      generateFileKey(deviceId, "processing-old"),
       "en",
       120
     );
@@ -91,7 +97,7 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs deletes stale pending uploa
   });
 
   assert.equal(deletedCount, 1);
-  assert.deepEqual(deletedKeys, ["transcriptions/pending-upload-old.webm"]);
+  assert.deepEqual(deletedKeys, [generateFileKey(deviceId, "pending-upload-old")]);
   assert.equal(
     await getTranscriptionJob({ jobId: "pending-upload-old" }),
     null,
@@ -103,6 +109,7 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs deletes stale pending uploa
 });
 
 test("cleanupAbandonedPendingUploadTranscriptionJobs skips reserved pending uploads and still deletes later abandoned ones", async () => {
+  const deviceId = "70000000-0000-4000-8000-000000000003";
   sqlite
     .prepare(
       `INSERT INTO transcription_jobs (
@@ -120,10 +127,10 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs skips reserved pending uplo
     )
     .run(
       "pending-upload-reserved",
-      "70000000-0000-4000-8000-000000000003",
+      deviceId,
       "pending-reserved-key",
       "pending_upload",
-      "transcriptions/pending-upload-reserved.webm",
+      generateFileKey(deviceId, "pending-upload-reserved"),
       "en",
       120
     );
@@ -145,10 +152,10 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs skips reserved pending uplo
     )
     .run(
       "pending-upload-abandoned",
-      "70000000-0000-4000-8000-000000000003",
+      deviceId,
       "pending-abandoned-key",
       "pending_upload",
-      "transcriptions/pending-upload-abandoned.webm",
+      generateFileKey(deviceId, "pending-upload-abandoned"),
       "en",
       120
     );
@@ -169,7 +176,7 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs skips reserved pending uplo
        VALUES (?, 'transcription', ?, ?, NULL, 'reserved', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
     )
     .run(
-      "70000000-0000-4000-8000-000000000003",
+      deviceId,
       buildR2TranscriptionReservationKey("pending-upload-reserved"),
       42
     );
@@ -188,7 +195,9 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs skips reserved pending uplo
   });
 
   assert.equal(deletedCount, 1);
-  assert.deepEqual(deletedKeys, ["transcriptions/pending-upload-abandoned.webm"]);
+  assert.deepEqual(deletedKeys, [
+    generateFileKey(deviceId, "pending-upload-abandoned"),
+  ]);
   assert.equal(
     (await getTranscriptionJob({ jobId: "pending-upload-reserved" }))?.status,
     "pending_upload",
@@ -200,6 +209,12 @@ test("cleanupAbandonedPendingUploadTranscriptionJobs skips reserved pending uplo
 });
 
 test("cleanupDurableTranscriptionJobs removes job rows before deleting stored artifacts", async () => {
+  const deviceId = "70000000-0000-4000-8000-000000000002";
+  const resultKey = buildReplayArtifactKey({
+    service: "transcription-job-result",
+    deviceId,
+    requestKey: "completed-old",
+  });
   sqlite
     .prepare(
       `INSERT INTO transcription_jobs (
@@ -218,15 +233,15 @@ test("cleanupDurableTranscriptionJobs removes job rows before deleting stored ar
     )
     .run(
       "completed-old",
-      "70000000-0000-4000-8000-000000000002",
+      deviceId,
       "completed-key",
       "completed",
-      "transcriptions/completed-old.webm",
+      generateFileKey(deviceId, "completed-old"),
       "en",
       JSON.stringify({
         version: 1,
         storage: "r2",
-        key: "direct-replay/v1/transcription-job-result/completed-old.json",
+        key: resultKey,
         contentType: "application/json",
         sizeBytes: 128,
       }),
@@ -256,12 +271,194 @@ test("cleanupDurableTranscriptionJobs removes job rows before deleting stored ar
   );
   assert.deepEqual(rowExistsAtDelete, [
     {
-      key: "transcriptions/completed-old.webm",
+      key: generateFileKey(deviceId, "completed-old"),
       rowStillPresent: false,
     },
     {
-      key: "direct-replay/v1/transcription-job-result/completed-old.json",
+      key: resultKey,
       rowStillPresent: false,
     },
   ]);
+});
+
+test("durable cleanup treats batchSize as a hard per-run deletion cap", async () => {
+  const deviceId = "70000000-0000-4000-8000-000000000004";
+  for (let index = 0; index < 3; index += 1) {
+    sqlite
+      .prepare(
+        `INSERT INTO transcription_jobs (
+           job_id,
+           device_id,
+           status,
+           file_key,
+           created_at,
+           updated_at
+         )
+         VALUES (?, ?, 'completed', ?, datetime('now', '-30 hours'), datetime('now', '-25 hours'))`,
+      )
+      .run(
+        `bounded-${index}`,
+        deviceId,
+        generateFileKey(deviceId, `bounded-${index}`),
+      );
+  }
+
+  const deletedKeys = [];
+  const deletedCount = await cleanupDurableTranscriptionJobs({
+    bucket: {
+      async delete(key) {
+        deletedKeys.push(key);
+      },
+    },
+    maxAgeHours: 24,
+    batchSize: 2,
+  });
+
+  assert.equal(deletedCount, 2);
+  assert.equal(deletedKeys.length, 2);
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS count FROM transcription_jobs").get()
+      .count,
+    1,
+  );
+});
+
+test("a processing claim wins atomically over abandoned pending-upload cleanup", async () => {
+  const jobId = "pending-claimed-before-cleanup";
+  const deviceId = "70000000-0000-4000-8000-000000000005";
+  sqlite
+    .prepare(
+      `INSERT INTO transcription_jobs (
+         job_id,
+         device_id,
+         status,
+         file_key,
+         created_at,
+         updated_at
+       )
+       VALUES (?, ?, 'pending_upload', ?, datetime('now', '-25 hours'), datetime('now', '-25 hours'))`,
+    )
+    .run(
+      jobId,
+      deviceId,
+      generateFileKey(deviceId, jobId),
+    );
+  const selected = await getTranscriptionJob({ jobId });
+  assert.equal(
+    await setTranscriptionJobProcessing({
+      jobId,
+      expectedUpdatedAt: selected.updated_at,
+    }),
+    true,
+  );
+
+  const deletedCount = await cleanupAbandonedPendingUploadTranscriptionJobs({
+    bucket: {
+      async delete() {
+        assert.fail("a processing job must not have its upload deleted");
+      },
+    },
+    maxAgeHours: 24,
+  });
+
+  assert.equal(deletedCount, 0);
+  assert.equal((await getTranscriptionJob({ jobId })).status, "processing");
+});
+
+test("terminal retention is measured from the last state update, not job creation", async () => {
+  const jobId = "recently-completed-old-job";
+  const deviceId = "70000000-0000-4000-8000-000000000006";
+  sqlite
+    .prepare(
+      `INSERT INTO transcription_jobs (
+         job_id,
+         device_id,
+         status,
+         file_key,
+         created_at,
+         updated_at
+       )
+       VALUES (?, ?, 'completed', ?, datetime('now', '-30 hours'), datetime('now', '-1 hour'))`,
+    )
+    .run(
+      jobId,
+      deviceId,
+      generateFileKey(deviceId, jobId),
+    );
+
+  const deletedCount = await cleanupDurableTranscriptionJobs({
+    bucket: {
+      async delete() {
+        assert.fail("a recently completed job must remain available");
+      },
+    },
+    maxAgeHours: 24,
+  });
+
+  assert.equal(deletedCount, 0);
+  assert.equal((await getTranscriptionJob({ jobId })).status, "completed");
+});
+
+test("stale processing cleanup fails the job and refunds its active reservation", async () => {
+  const jobId = "processing-timeout";
+  const deviceId = "70000000-0000-4000-8000-000000000007";
+  sqlite
+    .prepare("INSERT INTO credits (device_id, credit_balance) VALUES (?, ?)")
+    .run(deviceId, 50);
+  sqlite
+    .prepare(
+      `INSERT INTO transcription_jobs (
+         job_id,
+         device_id,
+         status,
+         file_key,
+         created_at,
+         updated_at
+       )
+       VALUES (?, ?, 'processing', ?, datetime('now', '-26 hours'), datetime('now', '-25 hours'))`,
+    )
+    .run(jobId, deviceId, generateFileKey(deviceId, jobId));
+  sqlite
+    .prepare(
+      `INSERT INTO billing_reservations (
+         device_id,
+         service,
+         request_key,
+         reserved_spend,
+         status,
+         created_at,
+         updated_at
+       )
+       VALUES (?, 'transcription', ?, 50, 'reserved', datetime('now', '-26 hours'), datetime('now', '-25 hours'))`,
+    )
+    .run(deviceId, buildR2TranscriptionReservationKey(jobId));
+
+  const deletedKeys = [];
+  const failedCount = await cleanupStaleProcessingTranscriptionJobs({
+    bucket: {
+      async delete(key) {
+        deletedKeys.push(key);
+      },
+    },
+    maxAgeHours: 24,
+    now: new Date("2026-08-24T00:00:00.000Z"),
+  });
+
+  assert.equal(failedCount, 1);
+  const job = await getTranscriptionJob({ jobId });
+  assert.equal(job.status, "failed");
+  assert.equal(job.error, "storage-cleanup:processing-timeout");
+  assert.deepEqual(deletedKeys, [generateFileKey(deviceId, jobId)]);
+  const reservation = await getBillingReservation({
+    deviceId,
+    service: "transcription",
+    requestKey: buildR2TranscriptionReservationKey(jobId),
+  });
+  assert.equal(reservation.status, "released");
+  assert.equal(
+    sqlite
+      .prepare("SELECT credit_balance FROM credits WHERE device_id = ?")
+      .get(deviceId).credit_balance,
+    100,
+  );
 });

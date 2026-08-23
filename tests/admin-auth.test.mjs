@@ -63,3 +63,56 @@ test("admin routes accept the legacy ADMIN_DEVICE_ID secret when ADMIN_API_SECRE
   assert.equal(body.success, true);
   assert.equal(body.creditsAdded, 15000);
 });
+
+test("storage cleanup rejects missing and incorrect admin credentials before doing work", async () => {
+  let deleteCalls = 0;
+  const envOverride = {
+    ADMIN_API_SECRET: "cleanup-secret",
+    TRANSCRIPTION_BUCKET: {
+      async delete() {
+        deleteCalls += 1;
+      },
+    },
+  };
+
+  const missing = await apiRequest(
+    "/admin/cleanup-storage",
+    { method: "POST" },
+    envOverride,
+  );
+  assert.equal(missing.status, 403);
+
+  const incorrect = await apiRequest(
+    "/admin/cleanup-storage",
+    {
+      method: "POST",
+      headers: { "X-Admin-Secret": "wrong-secret" },
+    },
+    envOverride,
+  );
+  assert.equal(incorrect.status, 403);
+  assert.equal(deleteCalls, 0);
+});
+
+test("authorized storage cleanup accepts an empty body and returns its bounded report", async () => {
+  const response = await apiRequest(
+    "/admin/cleanup-storage",
+    {
+      method: "POST",
+      headers: { "X-Admin-Secret": "cleanup-secret" },
+    },
+    {
+      ADMIN_API_SECRET: "cleanup-secret",
+      TRANSCRIPTION_BUCKET: {
+        async delete() {},
+      },
+    },
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.success, true);
+  assert.equal(body.report.replay.selected, 0);
+  assert.equal(body.report.staleReservations.selected, 0);
+  assert.deepEqual(body.report.errors, []);
+});

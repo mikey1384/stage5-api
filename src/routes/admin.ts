@@ -9,6 +9,7 @@ import {
 } from "../lib/db";
 import { getObservabilitySnapshot } from "../lib/observability";
 import { runReconciliation } from "../lib/reconciliation";
+import { runBillingStorageCleanup } from "../lib/billing-storage-cleanup";
 import { packs } from "../types/packs";
 import type { Stage5ApiBindings } from "../types/env";
 
@@ -147,6 +148,45 @@ router.post("/reconcile", async (c) => {
         message: error instanceof Error ? error.message : "Unknown error",
       },
       500
+    );
+  }
+});
+
+router.post("/cleanup-storage", async (c) => {
+  try {
+    const adminSecret = c.req.header("X-Admin-Secret");
+    const notAuthorized = authorizeAdminDevice(c, adminSecret);
+    if (notAuthorized) return notAuthorized;
+
+    type StorageCleanupBody = {
+      directReplayMaxAgeHours?: number;
+      staleReservationMaxAgeHours?: number;
+      transcriptionJobMaxAgeHours?: number;
+      batchSize?: number;
+    };
+    const body: StorageCleanupBody = await c.req
+      .json<StorageCleanupBody>()
+      .catch(() => ({}));
+    const report = await runBillingStorageCleanup({
+      bucket: c.env.TRANSCRIPTION_BUCKET,
+      directReplayMaxAgeHours: body?.directReplayMaxAgeHours,
+      staleReservationMaxAgeHours: body?.staleReservationMaxAgeHours,
+      transcriptionJobMaxAgeHours: body?.transcriptionJobMaxAgeHours,
+      batchSize: body?.batchSize,
+    });
+
+    console.log(
+      `[admin/cleanup-storage] replay=${report.replay.metadataCleared} staleReservations=${report.staleReservations.released} staleProcessingJobs=${report.staleProcessingJobsFailed} transcriptionJobs=${report.transcriptionJobsDeleted} abandonedUploads=${report.abandonedUploadsDeleted} errors=${report.errors.length}`,
+    );
+    return c.json({ success: report.errors.length === 0, report });
+  } catch (error) {
+    console.error("Admin storage cleanup error:", error);
+    return c.json(
+      {
+        error: "storage-cleanup-failed",
+        message: error instanceof Error ? error.message : "Unknown error",
+      },
+      500,
     );
   }
 });

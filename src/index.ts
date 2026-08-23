@@ -17,10 +17,19 @@ import { ensureDatabase } from "./lib/db";
 import { runReconciliation } from "./lib/reconciliation";
 import { flushAnalyticsOutbox } from "./lib/product-analytics";
 import { minimumTranslatorVersionGate } from "./lib/translator-version-gate";
+import { runBillingStorageCleanup } from "./lib/billing-storage-cleanup";
 import type { Stage5ApiBindings } from "./types/env";
 
 const app = new Hono<{ Bindings: Stage5ApiBindings }>();
 const translatorVersionGate = minimumTranslatorVersionGate();
+
+function positiveIntegerSetting(
+  value: string | undefined,
+  fallback: number,
+): number {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 // Middleware that does NOT consume the body
 app.use("*", logger());
@@ -142,6 +151,44 @@ export default {
           }
         } catch (error: any) {
           console.error("[cron/analytics] Failed:", error?.message || error);
+        }
+
+        try {
+          const storage = await runBillingStorageCleanup({
+            bucket: env.TRANSCRIPTION_BUCKET,
+            directReplayMaxAgeHours: positiveIntegerSetting(
+              env.DIRECT_REPLAY_RETENTION_HOURS,
+              24,
+            ),
+            staleReservationMaxAgeHours: positiveIntegerSetting(
+              env.STALE_BILLING_RESERVATION_MAX_AGE_HOURS,
+              24,
+            ),
+            transcriptionJobMaxAgeHours: positiveIntegerSetting(
+              env.TRANSCRIPTION_JOB_RETENTION_HOURS,
+              24,
+            ),
+            batchSize: positiveIntegerSetting(
+              env.BILLING_STORAGE_CLEANUP_BATCH_SIZE,
+              200,
+            ),
+          });
+          const changed =
+            storage.replay.metadataCleared +
+            storage.staleReservations.released +
+            storage.transcriptionJobsDeleted +
+            storage.abandonedUploadsDeleted +
+            storage.staleProcessingJobsFailed;
+          if (changed > 0 || storage.errors.length > 0) {
+            console.log(
+              `[cron/storage] replay=${storage.replay.metadataCleared} staleReservations=${storage.staleReservations.released} staleProcessingJobs=${storage.staleProcessingJobsFailed} transcriptionJobs=${storage.transcriptionJobsDeleted} abandonedUploads=${storage.abandonedUploadsDeleted} errors=${storage.errors.length}`,
+            );
+          }
+          for (const error of storage.errors) {
+            console.error(`[cron/storage] ${error}`);
+          }
+        } catch (error: any) {
+          console.error("[cron/storage] Failed:", error?.message || error);
         }
 
         if (env.RECONCILE_CRON_ENABLED !== "1") {

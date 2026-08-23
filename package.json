@@ -12,6 +12,7 @@
     "migrations:status": "node scripts/d1-migration-status.mjs",
     "migrations:verify": "node scripts/d1-migration-status.mjs --fail-if-pending",
     "migrations:apply": "npx wrangler d1 migrations apply stage5_db --remote && npm run migrations:status",
+    "r2:lifecycle:apply": "wrangler r2 bucket lifecycle set stage5-transcription-uploads --file config/r2-transcription-lifecycle.json --force",
     "type-check": "tsc --noEmit",
     "lint": "eslint src",
     "test": "npm run build && node --import ../translator/node_modules/tsx/dist/loader.mjs --test tests/*.test.mjs"

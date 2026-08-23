@@ -7,6 +7,7 @@ import {
   getBillingReservation,
   getTranscriptionJob,
   getTranscriptionJobByClientRequestKey,
+  resetTranscriptionJobPendingUpload,
   setTranscriptionJobProcessing,
   storeTranscriptionJobError,
   reserveBillingCredits,
@@ -2088,6 +2089,20 @@ router.post("/process/:jobId", async (c) => {
   const jobId = c.req.param("jobId");
   const requestKey = buildR2TranscriptionReservationKey(jobId);
   let relayStarted = false;
+  let processingClaimed = false;
+
+  const resetProcessingClaim = async () => {
+    if (!processingClaimed) {
+      return;
+    }
+    const reset = await resetTranscriptionJobPendingUpload({ jobId });
+    processingClaimed = false;
+    if (!reset) {
+      console.warn(
+        `[transcribe/process] Processing claim for job ${jobId} could not be reset because its state changed`,
+      );
+    }
+  };
 
   try {
     const job = await getTranscriptionJob({ jobId });
@@ -2124,6 +2139,24 @@ router.post("/process/:jobId", async (c) => {
       return c.json(
         { error: "File not found in storage. Please upload first." },
         400
+      );
+    }
+
+    processingClaimed = await setTranscriptionJobProcessing({
+      jobId,
+      expectedUpdatedAt: job.updated_at,
+    });
+    if (!processingClaimed) {
+      const currentJob = await getTranscriptionJob({ jobId });
+      if (!currentJob) {
+        return c.json({ error: "Job not found" }, 404);
+      }
+      return c.json(
+        {
+          error: "Job already processing or completed",
+          status: currentJob.status,
+        },
+        409,
       );
     }
 
@@ -2168,9 +2201,11 @@ router.post("/process/:jobId", async (c) => {
       },
     });
     if (!reserved.ok) {
+      await resetProcessingClaim();
       return c.json({ error: API_ERRORS.INSUFFICIENT_CREDITS }, 402);
     }
     if (reserved.status === "duplicate") {
+      processingClaimed = false;
       return c.json(
         {
           error: "Job already processing or completed",
@@ -2197,6 +2232,7 @@ router.post("/process/:jobId", async (c) => {
         requestKey,
       });
       relayStarted = true;
+      processingClaimed = false;
     } catch (relayError) {
       await releaseTranscriptionReservation({
         deviceId: user.deviceId,
@@ -2204,16 +2240,6 @@ router.post("/process/:jobId", async (c) => {
         meta: { reason: "r2-relay-start-failed", jobId },
       });
       throw relayError;
-    }
-
-    try {
-      await setTranscriptionJobProcessing({ jobId });
-    } catch (statusError) {
-      console.warn(
-        `[transcribe/process] Relay started for job ${jobId}, but failed to persist processing status: ${
-          statusError instanceof Error ? statusError.message : String(statusError)
-        }`
-      );
     }
 
     return c.json({
@@ -2229,6 +2255,12 @@ router.post("/process/:jobId", async (c) => {
         requestKey,
         meta: { reason: "process-route-error" },
       }).catch(() => {});
+      await resetProcessingClaim().catch((resetError) => {
+        console.warn(
+          `[transcribe/process] Failed to reset processing claim for job ${jobId}:`,
+          resetError,
+        );
+      });
     }
     return c.json(
       {
