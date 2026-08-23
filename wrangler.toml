@@ -37,13 +37,13 @@ binding = "DB"
 database_name = "stage5_db"
 database_id = "84286ce2-3c1f-45ba-8183-a8540bd5b32b"
 
-[[durable_objects.bindings]]
-name = "PAYMENT_EVENTS"
-class_name = "PaymentEventsDurableObject"
-
 [[migrations]]
 tag = "payment-events-v1"
 new_sqlite_classes = ["PaymentEventsDurableObject"]
+
+[[migrations]]
+tag = "payment-events-v2"
+deleted_classes = ["PaymentEventsDurableObject"]
 
 # R2 Storage for large file uploads (transcription)
 [[r2_buckets]]

@@ -1,6 +1,5 @@
 export type Stage5ApiBindings = {
   DB: D1Database;
-  PAYMENT_EVENTS?: DurableObjectNamespace;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   STRIPE_BYO_UNLOCK_PRICE_ID?: string;

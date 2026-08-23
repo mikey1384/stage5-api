@@ -19,8 +19,6 @@ import { flushAnalyticsOutbox } from "./lib/product-analytics";
 import { minimumTranslatorVersionGate } from "./lib/translator-version-gate";
 import type { Stage5ApiBindings } from "./types/env";
 
-export { PaymentEventsDurableObject } from "./lib/payment-events-do";
-
 const app = new Hono<{ Bindings: Stage5ApiBindings }>();
 const translatorVersionGate = minimumTranslatorVersionGate();
 

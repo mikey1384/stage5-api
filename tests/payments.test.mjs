@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test, { before, beforeEach } from "node:test";
 
 import worker from "../src/index.ts";
@@ -13,6 +14,14 @@ import {
 } from "./helpers/sqlite-d1.mjs";
 
 const { sqlite, db } = createSqliteD1Database();
+const wranglerConfig = readFileSync(
+  new URL("../wrangler.toml", import.meta.url),
+  "utf8",
+);
+const workerEntrySource = readFileSync(
+  new URL("../src/index.ts", import.meta.url),
+  "utf8",
+);
 
 const env = {
   DB: db,
@@ -84,39 +93,6 @@ function configureStripeStubs({
     });
 }
 
-async function withPaymentEventsStub(run) {
-  const originalPaymentEvents = env.PAYMENT_EVENTS;
-  const broadcasts = [];
-
-  env.PAYMENT_EVENTS = {
-    idFromName(name) {
-      return name;
-    },
-    get(id) {
-      return {
-        async fetch(url, init = {}) {
-          broadcasts.push({
-            id,
-            url: String(url),
-            body: JSON.parse(String(init.body || "{}")),
-          });
-          return new Response("", { status: 200 });
-        },
-      };
-    },
-  };
-
-  try {
-    await run(broadcasts);
-  } finally {
-    if (originalPaymentEvents === undefined) {
-      delete env.PAYMENT_EVENTS;
-    } else {
-      env.PAYMENT_EVENTS = originalPaymentEvents;
-    }
-  }
-}
-
 async function withPaymentAlertEmailStub(run) {
   const originalFetch = globalThis.fetch;
   const originalEnv = {
@@ -159,6 +135,40 @@ before(async () => {
 beforeEach(() => {
   resetSqliteD1Database(sqlite);
   configureStripeStubs();
+});
+
+test("legacy payment streams return a polling fallback without invoking Durable Objects", async () => {
+  let bindingTouched = false;
+  env.PAYMENT_EVENTS = {
+    idFromName() {
+      bindingTouched = true;
+      throw new Error("retired Durable Object binding was invoked");
+    },
+  };
+
+  try {
+    const response = await apiRequest(
+      "/payments/events/11111111-1111-4111-8111-111111111111",
+    );
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await response.json(), {
+      error: "Payment event stream unavailable",
+      message: "Server push is not configured for this environment",
+    });
+    assert.equal(bindingTouched, false);
+  } finally {
+    delete env.PAYMENT_EVENTS;
+  }
+});
+
+test("the retired payment event namespace cannot be instantiated again", () => {
+  assert.doesNotMatch(wranglerConfig, /name\s*=\s*"PAYMENT_EVENTS"/);
+  assert.match(
+    wranglerConfig,
+    /tag\s*=\s*"payment-events-v2"\s*deleted_classes\s*=\s*\["PaymentEventsDurableObject"\]/,
+  );
+  assert.doesNotMatch(workerEntrySource, /PaymentEventsDurableObject/);
 });
 
 test("credit pack fulfillment stays exact-once across mixed Stripe event types", async () => {
@@ -873,20 +883,15 @@ test("payment intent success marks the resolved checkout session fulfilled", asy
   });
   assert.equal(createResponse.status, 200);
 
-  await withPaymentEventsStub(async (broadcasts) => {
-    const webhookResponse = await apiRequest("/stripe/webhook", {
-      method: "POST",
-      headers: {
-        "stripe-signature": "sig_payment_intent_checkout_link",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ ok: true }),
-    });
-    assert.equal(webhookResponse.status, 200);
-    assert.equal(broadcasts.length, 1);
-    assert.equal(broadcasts[0].body.type, "credits.updated");
-    assert.equal(broadcasts[0].body.checkoutSessionId, sessionId);
+  const webhookResponse = await apiRequest("/stripe/webhook", {
+    method: "POST",
+    headers: {
+      "stripe-signature": "sig_payment_intent_checkout_link",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ ok: true }),
   });
+  assert.equal(webhookResponse.status, 200);
 
   const checkoutRow = sqlite
     .prepare(
@@ -994,31 +999,25 @@ test("late payment intent failures do not downgrade fulfilled checkout sessions"
   });
   assert.equal(createResponse.status, 200);
 
-  await withPaymentEventsStub(async (broadcasts) => {
-    const successWebhookResponse = await apiRequest("/stripe/webhook", {
-      method: "POST",
-      headers: {
-        "stripe-signature": "sig_late_failure_success",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ ok: true }),
-    });
-    assert.equal(successWebhookResponse.status, 200);
-
-    const failureWebhookResponse = await apiRequest("/stripe/webhook", {
-      method: "POST",
-      headers: {
-        "stripe-signature": "sig_late_failure_old_attempt",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ ok: true }),
-    });
-    assert.equal(failureWebhookResponse.status, 200);
-
-    assert.equal(broadcasts.length, 1);
-    assert.equal(broadcasts[0].body.type, "credits.updated");
-    assert.equal(broadcasts[0].body.checkoutSessionId, sessionId);
+  const successWebhookResponse = await apiRequest("/stripe/webhook", {
+    method: "POST",
+    headers: {
+      "stripe-signature": "sig_late_failure_success",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ ok: true }),
   });
+  assert.equal(successWebhookResponse.status, 200);
+
+  const failureWebhookResponse = await apiRequest("/stripe/webhook", {
+    method: "POST",
+    headers: {
+      "stripe-signature": "sig_late_failure_old_attempt",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ ok: true }),
+  });
+  assert.equal(failureWebhookResponse.status, 200);
 
   const checkoutRow = sqlite
     .prepare(
@@ -1216,7 +1215,7 @@ test("Stripe payment failures send payment alert email", async () => {
   });
 });
 
-test("Stripe payment failures broadcast checkout failure to the device", async () => {
+test("Stripe payment failures persist a terminal state for checkout polling", async () => {
   const deviceId = "aaaaaaaa-0000-4000-8000-000000000002";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const sessionId = "cs_test_payment_failed_broadcast";
@@ -1227,6 +1226,17 @@ test("Stripe payment failures broadcast checkout failure to the device", async (
       id: sessionId,
       url: `https://checkout.stripe.com/c/pay/${sessionId}`,
       metadata: params.metadata,
+    }),
+    retrieveSession: async () => ({
+      id: sessionId,
+      status: "expired",
+      payment_status: "unpaid",
+      mode: "payment",
+      metadata: {
+        deviceId,
+        packId: "MICRO",
+      },
+      created: 1_700_000_000,
     }),
     listSessions: async (params) => {
       assert.deepEqual(params, {
@@ -1280,33 +1290,15 @@ test("Stripe payment failures broadcast checkout failure to the device", async (
   assert.equal(createResponse.status, 200);
 
   await withPaymentAlertEmailStub(async () => {
-    await withPaymentEventsStub(async (broadcasts) => {
-      const response = await apiRequest("/stripe/webhook", {
-        method: "POST",
-        headers: {
-          "stripe-signature": "sig_payment_failed_broadcast",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ ok: true }),
-      });
-
-      assert.equal(response.status, 200);
-      assert.equal(broadcasts.length, 1);
-      assert.equal(broadcasts[0].id, deviceId);
-      assert.deepEqual(broadcasts[0].body, {
-        type: "checkout.failed",
-        source: "stripe_webhook",
-        deviceId,
-        checkoutSessionId: sessionId,
-        paymentIntentId,
-        mode: "credits",
-        packId: "MICRO",
-        entitlement: null,
-        message: "Your card was declined.",
-        stripeEventId: "evt_payment_failed_broadcast",
-        stripeEventType: "payment_intent.payment_failed",
-      });
+    const response = await apiRequest("/stripe/webhook", {
+      method: "POST",
+      headers: {
+        "stripe-signature": "sig_payment_failed_broadcast",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ ok: true }),
     });
+    assert.equal(response.status, 200);
   });
 
   const checkoutRow = sqlite
@@ -1326,6 +1318,12 @@ test("Stripe payment failures broadcast checkout failure to the device", async (
       error_message: "Your card was declined.",
     },
   );
+
+  const pollResponse = await apiRequest(`/payments/session/${sessionId}`, {
+    headers: authHeaders(apiToken),
+  });
+  assert.equal(pollResponse.status, 200);
+  assert.equal((await pollResponse.json()).fulfillmentStatus, "failed");
 });
 
 test("Stripe payment failures keep open checkout sessions recoverable", async () => {
@@ -1392,20 +1390,16 @@ test("Stripe payment failures keep open checkout sessions recoverable", async ()
   assert.equal(createResponse.status, 200);
 
   await withPaymentAlertEmailStub(async (sent) => {
-    await withPaymentEventsStub(async (broadcasts) => {
-      const response = await apiRequest("/stripe/webhook", {
-        method: "POST",
-        headers: {
-          "stripe-signature": "sig_payment_failed_open",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ ok: true }),
-      });
-
-      assert.equal(response.status, 200);
-      assert.equal(sent.length, 0);
-      assert.equal(broadcasts.length, 0);
+    const response = await apiRequest("/stripe/webhook", {
+      method: "POST",
+      headers: {
+        "stripe-signature": "sig_payment_failed_open",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ ok: true }),
     });
+    assert.equal(response.status, 200);
+    assert.equal(sent.length, 0);
   });
 
   const checkoutRow = sqlite
@@ -1479,20 +1473,16 @@ test("Stripe payment failures with inconclusive session lookup do not cancel che
   assert.equal(createResponse.status, 200);
 
   await withPaymentAlertEmailStub(async (sent) => {
-    await withPaymentEventsStub(async (broadcasts) => {
-      const response = await apiRequest("/stripe/webhook", {
-        method: "POST",
-        headers: {
-          "stripe-signature": "sig_payment_failed_lookup_error",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ ok: true }),
-      });
-
-      assert.equal(response.status, 200);
-      assert.equal(sent.length, 1);
-      assert.equal(broadcasts.length, 0);
+    const response = await apiRequest("/stripe/webhook", {
+      method: "POST",
+      headers: {
+        "stripe-signature": "sig_payment_failed_lookup_error",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ ok: true }),
     });
+    assert.equal(response.status, 200);
+    assert.equal(sent.length, 1);
   });
 
   const checkoutRow = sqlite

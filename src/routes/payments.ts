@@ -296,7 +296,6 @@ const checkoutReturnIdSchema = z
   .min(16)
   .max(128)
   .regex(/^[a-zA-Z0-9_-]+$/, "Invalid checkout return ID");
-const deviceIdParamSchema = z.string().uuid("Device ID must be a valid UUID");
 
 const checkoutClientEventTypes = [
   "embedded_cancel_redirect",
@@ -905,39 +904,16 @@ router.get("/checkout-return/:returnId", async (c) => {
 });
 
 router.get("/events/:deviceId", async (c) => {
-  const parsedDeviceId = deviceIdParamSchema.safeParse(c.req.param("deviceId"));
-  if (!parsedDeviceId.success) {
-    return c.json(
-      {
-        error: "Invalid device ID",
-        details: parsedDeviceId.error.errors,
-      },
-      400,
-    );
-  }
-
-  const notAuthorized = await requireAuthorizedDeviceId(c, parsedDeviceId.data);
-  if (notAuthorized) {
-    return notAuthorized;
-  }
-
-  if (!c.env.PAYMENT_EVENTS) {
-    return c.json(
-      {
-        error: "Payment event stream unavailable",
-        message: "Server push is not configured for this environment",
-      },
-      503,
-    );
-  }
-
-  const id = c.env.PAYMENT_EVENTS.idFromName(parsedDeviceId.data);
-  const stub = c.env.PAYMENT_EVENTS.get(id);
-  return stub.fetch("https://payment-events/stream", {
-    headers: {
-      accept: "text/event-stream",
+  c.header("cache-control", "no-store");
+  return c.json(
+    {
+      // Released Translator clients recognize this response and permanently
+      // fall back to their existing bounded checkout polling path.
+      error: "Payment event stream unavailable",
+      message: "Server push is not configured for this environment",
     },
-  });
+    503,
+  );
 });
 
 router.get("/session/:sessionId", async (c) => {

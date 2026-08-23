@@ -20,10 +20,6 @@ import {
   sendPaymentAlert,
 } from "../lib/payment-alerts";
 import {
-  buildCreditPaymentEvent,
-  notifyDevicePaymentEvent,
-} from "../lib/payment-events";
-import {
   enqueueAnalyticsEventSafely,
   flushAnalyticsOutbox,
   type AnalyticsItem,
@@ -392,24 +388,11 @@ const handleCheckoutPaid = async ({
           `Granted BYO OpenAI entitlement to device ${deviceId} via ${eventType}`,
         );
       }
-      const { entitlements, updatedAt } =
-        await markCheckoutSessionFulfilledEntitlement({
-          deviceId,
-          entitlement: "byo_openai",
-          checkoutSessionId: session.id,
-          paymentIntentId,
-          stripeEventId: eventId,
-          stripeEventType: eventType,
-        });
-      await notifyDevicePaymentEvent(env, {
-        type: "entitlements.updated",
-        source: "stripe_webhook",
+      await markCheckoutSessionFulfilledEntitlement({
         deviceId,
+        entitlement: "byo_openai",
         checkoutSessionId: session.id,
         paymentIntentId,
-        entitlement: "byo_openai",
-        entitlements,
-        updatedAt,
         stripeEventId: eventId,
         stripeEventType: eventType,
       });
@@ -460,28 +443,14 @@ const handleCheckoutPaid = async ({
         `Successfully credited ${packId} to device ${deviceId} via ${eventType}`,
       );
     }
-    const { balanceAfter, updatedAt } =
-      await markCheckoutSessionFulfilledCredits({
-        deviceId,
-        packId,
-        checkoutSessionId: session.id,
-        paymentIntentId,
-        stripeEventId: eventId,
-        stripeEventType: eventType,
-      });
-    await notifyDevicePaymentEvent(
-      env,
-      buildCreditPaymentEvent({
-        deviceId,
-        checkoutSessionId: session.id,
-        paymentIntentId,
-        packId,
-        balanceAfter,
-        updatedAt,
-        stripeEventId: eventId,
-        stripeEventType: eventType,
-      }),
-    );
+    await markCheckoutSessionFulfilledCredits({
+      deviceId,
+      packId,
+      checkoutSessionId: session.id,
+      paymentIntentId,
+      stripeEventId: eventId,
+      stripeEventType: eventType,
+    });
     await recordPurchaseAnalytics({
       env,
       deviceId,
@@ -525,19 +494,6 @@ const handleCheckoutAsyncPaymentFailed = async ({
     stripeEventId: eventId,
     stripeEventType: eventType,
     errorMessage: message,
-  });
-  await notifyDevicePaymentEvent(env, {
-    type: "checkout.failed",
-    source: "stripe_webhook",
-    deviceId: deviceId || null,
-    checkoutSessionId: session.id,
-    paymentIntentId,
-    mode: entitlement === "byo_openai" ? "byo" : "credits",
-    packId: packId || null,
-    entitlement: entitlement || null,
-    message,
-    stripeEventId: eventId,
-    stripeEventType: eventType,
   });
   await sendPaymentAlert(env, {
     title: "Stripe async checkout payment failed",
@@ -585,24 +541,11 @@ const handlePaymentSucceeded = async ({
           `Granted BYO OpenAI entitlement (payment_intent) to device ${deviceId}`,
         );
       }
-      const { entitlements, updatedAt } =
-        await markCheckoutSessionFulfilledEntitlement({
-          deviceId,
-          entitlement: "byo_openai",
-          checkoutSessionId,
-          paymentIntentId: paymentIntent.id,
-          stripeEventId: eventId,
-          stripeEventType: "payment_intent.succeeded",
-        });
-      await notifyDevicePaymentEvent(env, {
-        type: "entitlements.updated",
-        source: "stripe_webhook",
+      await markCheckoutSessionFulfilledEntitlement({
         deviceId,
+        entitlement: "byo_openai",
         checkoutSessionId,
         paymentIntentId: paymentIntent.id,
-        entitlement: "byo_openai",
-        entitlements,
-        updatedAt,
         stripeEventId: eventId,
         stripeEventType: "payment_intent.succeeded",
       });
@@ -648,28 +591,14 @@ const handlePaymentSucceeded = async ({
           `Credited ${packId} to device ${deviceId} via payment_intent.succeeded`,
         );
       }
-      const { balanceAfter, updatedAt } =
-        await markCheckoutSessionFulfilledCredits({
-          deviceId,
-          packId,
-          checkoutSessionId,
-          paymentIntentId: paymentIntent.id,
-          stripeEventId: eventId,
-          stripeEventType: "payment_intent.succeeded",
-        });
-      await notifyDevicePaymentEvent(
-        env,
-        buildCreditPaymentEvent({
-          deviceId,
-          checkoutSessionId,
-          paymentIntentId: paymentIntent.id,
-          packId,
-          balanceAfter,
-          updatedAt,
-          stripeEventId: eventId,
-          stripeEventType: "payment_intent.succeeded",
-        }),
-      );
+      await markCheckoutSessionFulfilledCredits({
+        deviceId,
+        packId,
+        checkoutSessionId,
+        paymentIntentId: paymentIntent.id,
+        stripeEventId: eventId,
+        stripeEventType: "payment_intent.succeeded",
+      });
       await recordPurchaseAnalytics({
         env,
         deviceId,
@@ -762,19 +691,6 @@ const handlePaymentFailed = async ({
     stripeEventId: eventId,
     stripeEventType: eventType,
     errorMessage: message,
-  });
-  await notifyDevicePaymentEvent(env, {
-    type: "checkout.failed",
-    source: "stripe_webhook",
-    deviceId: failureDetails.deviceId,
-    checkoutSessionId: failureDetails.checkoutSessionId,
-    paymentIntentId: paymentIntent.id,
-    mode: failureDetails.mode,
-    packId: failureDetails.packId,
-    entitlement: failureDetails.entitlement,
-    message,
-    stripeEventId: eventId,
-    stripeEventType: eventType,
   });
   await sendPaymentAlert(env, {
     title: "Stripe payment intent failed",
