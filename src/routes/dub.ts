@@ -22,7 +22,7 @@ import {
   callSpeechDirect,
   callElevenLabsDubRelay,
 } from "../lib/openai-config";
-import { STAGE5_TTS_MODEL_ELEVEN_V3 } from "../lib/model-catalog";
+import { STAGE5_TTS_MODEL_ELEVEN_V3, STAGE5_TTS_MODEL_ELEVEN_V4 } from "../lib/model-catalog";
 import { type TTSModel, estimateDubbingCredits } from "../lib/pricing";
 import {
   createJsonReplayEntry,
@@ -364,7 +364,7 @@ router.post("/estimate", async (c) => {
     });
     const elevenLabsEstimate = estimateDubbingCredits({
       characters,
-      model: STAGE5_TTS_MODEL_ELEVEN_V3,
+      model: STAGE5_TTS_MODEL_ELEVEN_V4,
     });
 
     return c.json({
@@ -383,10 +383,10 @@ router.post("/estimate", async (c) => {
           description: "OpenAI TTS HD - Higher quality audio",
         },
         elevenlabs: {
-          model: STAGE5_TTS_MODEL_ELEVEN_V3,
+          model: STAGE5_TTS_MODEL_ELEVEN_V4,
           credits: elevenLabsEstimate.credits,
           usdCost: elevenLabsEstimate.usdEstimate,
-          description: "ElevenLabs v3 - Premium quality, most expressive",
+          description: "ElevenLabs v4 - Premium quality, most expressive",
         },
       },
     });
@@ -507,7 +507,7 @@ router.post("/", async (c) => {
         return c.json(
           {
             error: API_ERRORS.INVALID_REQUEST,
-            message: `Segment ${oversizedSegment.index} has ${oversizedSegment.text.length} characters. ElevenLabs v3 accepts at most ${ELEVENLABS_TTS_MAX_TEXT_CHARACTERS} characters per segment.`,
+            message: `Segment ${oversizedSegment.index} has ${oversizedSegment.text.length} characters. ElevenLabs accepts at most ${ELEVENLABS_TTS_MAX_TEXT_CHARACTERS} characters per segment.`,
           },
           413,
         );
@@ -584,7 +584,7 @@ router.post("/", async (c) => {
         : DEFAULT_SPEECH_FORMAT;
     const reserveModel: TTSModel =
       chosenTtsProvider === "elevenlabs"
-        ? STAGE5_TTS_MODEL_ELEVEN_V3
+        ? STAGE5_TTS_MODEL_ELEVEN_V4
         : chosenModel === HIGH_QUALITY_SPEECH_MODEL
           ? HIGH_QUALITY_SPEECH_MODEL
           : DEFAULT_SPEECH_MODEL;
@@ -783,7 +783,8 @@ router.post("/", async (c) => {
     // Determine TTS model for pricing based on provider and what was actually used
     let ttsModelForPricing: TTSModel;
     if (relayResult.usedElevenLabs) {
-      ttsModelForPricing = STAGE5_TTS_MODEL_ELEVEN_V3;
+      ttsModelForPricing = relayResult.model === STAGE5_TTS_MODEL_ELEVEN_V4
+        ? STAGE5_TTS_MODEL_ELEVEN_V4 : STAGE5_TTS_MODEL_ELEVEN_V3;
     } else if (chosenModel === HIGH_QUALITY_SPEECH_MODEL) {
       ttsModelForPricing = HIGH_QUALITY_SPEECH_MODEL;
     } else {
@@ -801,7 +802,7 @@ router.post("/", async (c) => {
       segments: relayResult.segments,
       voice: relayResult.voice ?? chosenVoice,
       model: relayResult.usedElevenLabs
-        ? STAGE5_TTS_MODEL_ELEVEN_V3
+        ? ttsModelForPricing
         : (relayResult.model ?? chosenModel),
       format: relayResult.format ?? chosenFormat,
       totalCharacters,
