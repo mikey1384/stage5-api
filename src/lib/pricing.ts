@@ -3,7 +3,7 @@ import {
   normalizeStage5TranslationBillingModel,
   normalizeStage5TranslationModel,
   STAGE5_TRANSCRIPTION_MODEL_PRICES,
-  STAGE5_TTS_MODEL_STANDARD,
+  STAGE5_TTS_MODEL_ELEVEN_V4,
   STAGE5_TRANSLATION_MODEL_PRICES,
   STAGE5_TTS_MODEL_PRICES,
 } from "./model-catalog";
@@ -118,14 +118,9 @@ export function charactersToCredits({
   characters: number;
   model: TTSModel;
 }): number {
-  const pricing = TTS_PRICES[model];
-  if (!pricing) {
-    // Fallback to tts-1 pricing for unknown models
-    const usd = characters * TTS_PRICES[STAGE5_TTS_MODEL_STANDARD].perChar;
-    const credits = (usd * MARGIN) / USD_PER_CREDIT;
-    return Math.ceil(credits * TTS_CREDIT_CALIBRATION);
-  }
-
+  // Unknown/missing models price as ElevenLabs v4, the only managed TTS
+  // model (never the retired, cheaper OpenAI tts-1 rate).
+  const pricing = TTS_PRICES[model] ?? TTS_PRICES[STAGE5_TTS_MODEL_ELEVEN_V4];
   const usd = characters * pricing.perChar;
   const credits = (usd * MARGIN) / USD_PER_CREDIT;
   return Math.ceil(credits * TTS_CREDIT_CALIBRATION);
@@ -141,7 +136,7 @@ export function estimateDubbingCredits({
   characters: number;
   model: TTSModel;
 }): { credits: number; usdEstimate: number } {
-  const pricing = TTS_PRICES[model] ?? TTS_PRICES[STAGE5_TTS_MODEL_STANDARD];
+  const pricing = TTS_PRICES[model] ?? TTS_PRICES[STAGE5_TTS_MODEL_ELEVEN_V4];
   const usd = characters * pricing.perChar;
   const credits = Math.ceil((usd * MARGIN) / USD_PER_CREDIT * TTS_CREDIT_CALIBRATION);
   return { credits, usdEstimate: usd };

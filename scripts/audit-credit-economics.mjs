@@ -21,9 +21,10 @@ const transcriptionPrices = {
   "elevenlabs-scribe": { perSecond: 0.4 / 3600 },
 };
 
+// OpenAI tts-1 / tts-1-hd are retired (shut down 2027-01-06); managed dubbing
+// is ElevenLabs v4 only, so they are no longer part of the schedule.
 const ttsPrices = {
-  "tts-1": { perChar: 15 / 1_000_000 },
-  "tts-1-hd": { perChar: 30 / 1_000_000 },
+  eleven_v4: { perChar: 80 / 1_000_000 },
   eleven_v3: { perChar: 180 / 1_000_000 },
   eleven_turbo_v2_5: { perChar: 90 / 1_000_000 },
 };
@@ -99,15 +100,11 @@ const rows = [
     vendorCostUsd: 3600 * transcriptionPrices["elevenlabs-scribe"].perSecond,
   },
   {
-    label: "tts-1 / 1M chars",
-    vendorCostUsd: 1_000_000 * ttsPrices["tts-1"].perChar,
+    label: "ElevenLabs v4 / 1M chars",
+    vendorCostUsd: 1_000_000 * ttsPrices.eleven_v4.perChar,
   },
   {
-    label: "tts-1-hd / 1M chars",
-    vendorCostUsd: 1_000_000 * ttsPrices["tts-1-hd"].perChar,
-  },
-  {
-    label: "ElevenLabs v3 / 1M chars",
+    label: "ElevenLabs v3 (legacy) / 1M chars",
     vendorCostUsd: 1_000_000 * ttsPrices.eleven_v3.perChar,
   },
   {

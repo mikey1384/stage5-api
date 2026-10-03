@@ -2,27 +2,20 @@ import { Hono, Context } from "hono";
 import crypto from "node:crypto";
 import { z } from "zod";
 import {
-  ALLOWED_SPEECH_MODELS,
-  ALLOWED_SPEECH_VOICES,
   ALLOWED_SPEECH_FORMATS,
   API_ERRORS,
   DEFAULT_SPEECH_MODEL,
-  HIGH_QUALITY_SPEECH_MODEL,
-  DEFAULT_SPEECH_VOICE,
   DEFAULT_SPEECH_FORMAT,
   SpeechFormat,
+  resolveDubVoice,
 } from "../lib/constants";
 import {
   reserveBillingCredits,
   releaseBillingReservation,
   settleBillingReservation,
 } from "../lib/db";
-import {
-  callDubRelay,
-  callSpeechDirect,
-  callElevenLabsDubRelay,
-} from "../lib/openai-config";
-import { STAGE5_TTS_MODEL_ELEVEN_V3, STAGE5_TTS_MODEL_ELEVEN_V4 } from "../lib/model-catalog";
+import { callElevenLabsDubRelay } from "../lib/openai-config";
+import { STAGE5_TTS_MODEL_ELEVEN_V4 } from "../lib/model-catalog";
 import { type TTSModel, estimateDubbingCredits } from "../lib/pricing";
 import {
   createJsonReplayEntry,
@@ -54,8 +47,6 @@ const MAX_SCRIPT_CHARACTERS = 200_000;
 const MAX_TOTAL_SEGMENT_CHARACTERS = 80_000;
 const MAX_SEGMENTS_PER_REQUEST = 240;
 const ELEVENLABS_TTS_MAX_TEXT_CHARACTERS = 5_000;
-const FALLBACK_SEGMENT_CONCURRENCY = 4;
-const HD_ONLY_VOICES = new Set<string>();
 const DUB_RESERVATION_SCOPE = "dub-billing-v2";
 const DUB_REPLAY_TTL_MS = Math.max(
   1_000,
@@ -327,7 +318,8 @@ const requestSchema = z.object({
   model: z.string().optional(),
   format: z.string().optional(),
   quality: z.enum(["standard", "high"]).optional(),
-  // TTS provider selection: "openai" (cheaper) or "elevenlabs" (higher quality, more expensive)
+  // Still accepted from older Translator versions, but ignored: managed
+  // dubbing is ElevenLabs v4 only (OpenAI TTS shuts down 2027-01-06).
   ttsProvider: z.enum(["openai", "elevenlabs"]).optional(),
 });
 
@@ -353,41 +345,27 @@ router.post("/estimate", async (c) => {
       return c.json({ error: "Invalid character count" }, 400);
     }
 
-    // Calculate estimates for both providers
-    const openaiEstimate = estimateDubbingCredits({
+    // Every managed dub is synthesized and billed with ElevenLabs v4.
+    const estimate = estimateDubbingCredits({
       characters,
       model: DEFAULT_SPEECH_MODEL,
     });
-    const openaiHdEstimate = estimateDubbingCredits({
-      characters,
-      model: HIGH_QUALITY_SPEECH_MODEL,
-    });
-    const elevenLabsEstimate = estimateDubbingCredits({
-      characters,
-      model: STAGE5_TTS_MODEL_ELEVEN_V4,
-    });
+    const elevenLabs = {
+      model: DEFAULT_SPEECH_MODEL,
+      credits: estimate.credits,
+      usdCost: estimate.usdEstimate,
+      description: "ElevenLabs v4 - Premium quality, most expressive",
+    };
 
     return c.json({
       characters,
       estimates: {
-        openai: {
-          model: DEFAULT_SPEECH_MODEL,
-          credits: openaiEstimate.credits,
-          usdCost: openaiEstimate.usdEstimate,
-          description: "OpenAI TTS - Good quality, most affordable",
-        },
-        openaiHd: {
-          model: HIGH_QUALITY_SPEECH_MODEL,
-          credits: openaiHdEstimate.credits,
-          usdCost: openaiHdEstimate.usdEstimate,
-          description: "OpenAI TTS HD - Higher quality audio",
-        },
-        elevenlabs: {
-          model: STAGE5_TTS_MODEL_ELEVEN_V4,
-          credits: elevenLabsEstimate.credits,
-          usdCost: elevenLabsEstimate.usdEstimate,
-          description: "ElevenLabs v4 - Premium quality, most expressive",
-        },
+        // Older Translator versions still read the OpenAI keys. Those requests
+        // are now synthesized and billed with ElevenLabs v4, so the keys carry
+        // the v4 price to keep old apps from under-estimating the cost.
+        openai: elevenLabs,
+        openaiHd: elevenLabs,
+        elevenlabs: elevenLabs,
       },
     });
   } catch (error: any) {
@@ -444,9 +422,6 @@ router.post("/", async (c) => {
     const { segments, voice, model, format, quality, ttsProvider } =
       parsed.data;
 
-    // Default to OpenAI (cheaper) if not specified
-    const chosenTtsProvider = ttsProvider ?? "openai";
-
     type RelaySegment = {
       index: number;
       text: string;
@@ -499,19 +474,17 @@ router.post("/", async (c) => {
       });
     });
 
-    if (chosenTtsProvider === "elevenlabs") {
-      const oversizedSegment = sanitizedSegments.find(
-        (segment) => segment.text.length > ELEVENLABS_TTS_MAX_TEXT_CHARACTERS,
+    const oversizedSegment = sanitizedSegments.find(
+      (segment) => segment.text.length > ELEVENLABS_TTS_MAX_TEXT_CHARACTERS,
+    );
+    if (oversizedSegment) {
+      return c.json(
+        {
+          error: API_ERRORS.INVALID_REQUEST,
+          message: `Segment ${oversizedSegment.index} has ${oversizedSegment.text.length} characters. ElevenLabs accepts at most ${ELEVENLABS_TTS_MAX_TEXT_CHARACTERS} characters per segment.`,
+        },
+        413,
       );
-      if (oversizedSegment) {
-        return c.json(
-          {
-            error: API_ERRORS.INVALID_REQUEST,
-            message: `Segment ${oversizedSegment.index} has ${oversizedSegment.text.length} characters. ElevenLabs accepts at most ${ELEVENLABS_TTS_MAX_TEXT_CHARACTERS} characters per segment.`,
-          },
-          413,
-        );
-      }
     }
 
     const totalCharacters = sanitizedSegments.reduce(
@@ -561,41 +534,25 @@ router.post("/", async (c) => {
       );
     }
 
-    const chosenVoice =
-      voice && ALLOWED_SPEECH_VOICES.includes(voice)
-        ? voice
-        : DEFAULT_SPEECH_VOICE;
-    const prefersHd = HD_ONLY_VOICES.has(chosenVoice);
-
-    let chosenModel =
-      model && ALLOWED_SPEECH_MODELS.includes(model)
-        ? model
-        : quality === "high" || prefersHd
-          ? HIGH_QUALITY_SPEECH_MODEL
-          : DEFAULT_SPEECH_MODEL;
-
-    if (prefersHd && chosenModel !== HIGH_QUALITY_SPEECH_MODEL) {
-      chosenModel = HIGH_QUALITY_SPEECH_MODEL;
-    }
+    // Older Translator versions send ttsProvider "openai", an OpenAI model
+    // and/or an OpenAI voice name. All of them are synthesized with
+    // ElevenLabs v4 (OpenAI voice names map via OPENAI_TO_ELEVENLABS_VOICE)
+    // and reserved/settled at the v4 price.
+    const chosenVoice = resolveDubVoice(voice);
     const normalizedFormat = format?.toLowerCase() as SpeechFormat | undefined;
     const chosenFormat: SpeechFormat =
       normalizedFormat && ALLOWED_SPEECH_FORMATS.includes(normalizedFormat)
         ? normalizedFormat
         : DEFAULT_SPEECH_FORMAT;
-    const reserveModel: TTSModel =
-      chosenTtsProvider === "elevenlabs"
-        ? STAGE5_TTS_MODEL_ELEVEN_V4
-        : chosenModel === HIGH_QUALITY_SPEECH_MODEL
-          ? HIGH_QUALITY_SPEECH_MODEL
-          : DEFAULT_SPEECH_MODEL;
+    const reserveModel: TTSModel = STAGE5_TTS_MODEL_ELEVEN_V4;
     const reservationPayload = {
       deviceId: user.deviceId,
       voice: chosenVoice,
-      model: chosenModel,
+      model: reserveModel,
       reserveModel,
       format: chosenFormat,
       quality: quality ?? "standard",
-      ttsProvider: chosenTtsProvider,
+      ttsProvider: "elevenlabs",
       segments: sanitizedSegments.map((segment) => ({
         index: segment.index,
         text: segment.text,
@@ -702,19 +659,16 @@ router.post("/", async (c) => {
       abortController.abort();
     });
 
-    type SynthResult = Awaited<ReturnType<typeof synthesizeDubWithFallback>>;
+    type SynthResult = Awaited<ReturnType<typeof synthesizeDub>>;
     let relayResult: SynthResult | null = null;
 
     try {
-      relayResult = await synthesizeDubWithFallback({
+      relayResult = await synthesizeDub({
         c,
         sanitizedSegments,
-        lines: textLines,
         voice: chosenVoice,
-        model: chosenModel,
         format: chosenFormat,
         signal: abortController.signal,
-        ttsProvider: chosenTtsProvider,
         deviceId: user.deviceId,
         requestKey,
       });
@@ -780,16 +734,11 @@ router.post("/", async (c) => {
 
     const usedRelay = relayResult.usedRelay;
 
-    // Determine TTS model for pricing based on provider and what was actually used
-    let ttsModelForPricing: TTSModel;
-    if (relayResult.usedElevenLabs) {
-      ttsModelForPricing = relayResult.model === STAGE5_TTS_MODEL_ELEVEN_V4
-        ? STAGE5_TTS_MODEL_ELEVEN_V4 : STAGE5_TTS_MODEL_ELEVEN_V3;
-    } else if (chosenModel === HIGH_QUALITY_SPEECH_MODEL) {
-      ttsModelForPricing = HIGH_QUALITY_SPEECH_MODEL;
-    } else {
-      ttsModelForPricing = DEFAULT_SPEECH_MODEL;
-    }
+    // Reserve and settle at the same ElevenLabs v4 price: the relay's
+    // /dub-elevenlabs always synthesizes with eleven_v4. (Settling at a
+    // pricier model than reserved would fail with actual-spend-exceeds-reserve
+    // after the audio was already generated.)
+    const ttsModelForPricing: TTSModel = reserveModel;
 
     const actualSpend = estimateDubbingCredits({
       characters: totalCharacters,
@@ -801,14 +750,12 @@ router.post("/", async (c) => {
       audioBase64: relayResult.audioBase64,
       segments: relayResult.segments,
       voice: relayResult.voice ?? chosenVoice,
-      model: relayResult.usedElevenLabs
-        ? ttsModelForPricing
-        : (relayResult.model ?? chosenModel),
+      model: ttsModelForPricing,
       format: relayResult.format ?? chosenFormat,
       totalCharacters,
       approxSeconds,
       usedRelay,
-      usedElevenLabs: relayResult.usedElevenLabs ?? false,
+      usedElevenLabs: true,
       chunkCount: relayResult.chunkCount ?? (segmentCount || undefined),
       segmentCount,
     };
@@ -820,8 +767,12 @@ router.post("/", async (c) => {
     const settlementMeta = {
       approxSeconds,
       usedRelay,
-      ttsProvider: chosenTtsProvider,
-      openaiModel: chosenModel,
+      ttsProvider: "elevenlabs",
+      // What the client asked for (older Translator versions send OpenAI
+      // values); recorded for support/audit only, never used for billing.
+      requestedTtsProvider: ttsProvider ?? null,
+      requestedModel: model ?? null,
+      requestedVoice: voice ?? null,
       quality: quality ?? "standard",
       totalCharacters,
       billedModel: ttsModelForPricing,
@@ -888,9 +839,7 @@ router.post("/", async (c) => {
     }
 
     console.log(
-      `[dub] success for ${user.deviceId} provider=${
-        relayResult.usedElevenLabs ? "elevenlabs" : "openai"
-      } chars=${totalCharacters} segments=${segmentCount}`,
+      `[dub] success for ${user.deviceId} provider=elevenlabs model=${ttsModelForPricing} chars=${totalCharacters} segments=${segmentCount}`,
     );
 
     return respondReplay({
@@ -937,54 +886,6 @@ router.post("/", async (c) => {
 
 export default router;
 
-const RETRYABLE_RELAY_STATUS = new Set([
-  408, 409, 425, 429, 500, 502, 503, 504, 522, 524,
-]);
-const RETRYABLE_MESSAGE_PATTERN =
-  /(timeout|timed out|temporarily unavailable|connection reset|gateway|rate limit|fetch failed)/i;
-
-function extractRelayStatus(error: unknown): number | null {
-  const message =
-    typeof error === "string" ? error : String((error as any)?.message ?? "");
-  const match = message.match(/Dub relay server error:\s*(\d{3})/i);
-  if (match) {
-    return Number(match[1]);
-  }
-  const status = (error as any)?.status ?? (error as any)?.response?.status;
-  return typeof status === "number" ? status : null;
-}
-
-function isRetryableRelayError(error: unknown): boolean {
-  const status = extractRelayStatus(error);
-  if (status != null && status >= 200 && status < 400) {
-    return false;
-  }
-  if (status != null && RETRYABLE_RELAY_STATUS.has(status)) {
-    return true;
-  }
-  const message =
-    typeof error === "string" ? error : String((error as any)?.message ?? "");
-  if (RETRYABLE_MESSAGE_PATTERN.test(message)) {
-    return true;
-  }
-  const code = (error as any)?.code;
-  if (typeof code === "string") {
-    const normalized = code.toUpperCase();
-    if (
-      [
-        "ETIMEDOUT",
-        "ECONNRESET",
-        "ECONNREFUSED",
-        "EHOSTUNREACH",
-        "ENETUNREACH",
-      ].includes(normalized)
-    ) {
-      return true;
-    }
-  }
-  return status == null; // network / unknown errors - treat as retryable
-}
-
 interface SynthRequest {
   c: Context;
   sanitizedSegments: Array<{
@@ -994,12 +895,9 @@ interface SynthRequest {
     end?: number;
     targetDuration?: number;
   }>;
-  lines: string[];
   voice: string;
-  model: string;
   format: SpeechFormat;
   signal: AbortSignal;
-  ttsProvider: "openai" | "elevenlabs";
   deviceId: string;
   requestKey: string;
 }
@@ -1017,226 +915,37 @@ interface SynthResult {
     targetDuration?: number;
   }>;
   usedRelay: boolean;
-  usedElevenLabs: boolean;
 }
 
-async function synthesizeDubWithFallback({
+/**
+ * Synthesize through the relay's ElevenLabs endpoint. There is deliberately
+ * no OpenAI fallback (OpenAI TTS shuts down 2027-01-06): a failure propagates
+ * so the route releases the reservation and returns an error.
+ */
+async function synthesizeDub({
   c,
   sanitizedSegments,
-  lines,
   voice,
-  model,
-  format,
-  signal,
-  ttsProvider,
-  deviceId,
-  requestKey,
-}: SynthRequest): Promise<SynthResult> {
-  // Route based on user's provider preference
-  if (ttsProvider === "elevenlabs") {
-    // Try ElevenLabs first, fall back to OpenAI
-    try {
-      const elevenLabsResponse = await callElevenLabsDubRelay({
-        c,
-        segments: sanitizedSegments,
-        voice,
-        format,
-        signal,
-        deviceId,
-        requestKey,
-      });
-      console.log(
-        `[dub] ElevenLabs TTS succeeded, segments=${sanitizedSegments.length}`,
-      );
-      return {
-        ...elevenLabsResponse,
-        format: (elevenLabsResponse.format as SpeechFormat) || "mp3",
-        usedRelay: true,
-        usedElevenLabs: true,
-      };
-    } catch (elevenLabsError: any) {
-      if (signal.aborted) {
-        throw elevenLabsError;
-      }
-
-      console.warn(
-        `[dub] ElevenLabs failed (${
-          elevenLabsError?.message || elevenLabsError
-        }); trying OpenAI relay...`,
-      );
-
-      // Fall back to OpenAI relay
-      return synthesizeWithOpenAI({
-        c,
-        sanitizedSegments,
-        lines,
-        voice,
-        model,
-        format,
-        signal,
-        deviceId,
-        requestKey,
-      });
-    }
-  } else {
-    // OpenAI provider - use OpenAI directly, no ElevenLabs fallback
-    return synthesizeWithOpenAI({
-      c,
-      sanitizedSegments,
-      lines,
-      voice,
-      model,
-      format,
-      signal,
-      deviceId,
-      requestKey,
-    });
-  }
-}
-
-async function synthesizeWithOpenAI({
-  c,
-  sanitizedSegments,
-  lines,
-  voice,
-  model,
   format,
   signal,
   deviceId,
   requestKey,
-}: Omit<SynthRequest, "ttsProvider">): Promise<SynthResult> {
-  try {
-    const relayResponse = await callDubRelay({
-      c,
-      lines,
-      segments: sanitizedSegments,
-      voice,
-      model,
-      format,
-      signal,
-      deviceId,
-      requestKey,
-    });
-    return { ...relayResponse, usedRelay: true, usedElevenLabs: false };
-  } catch (relayError: any) {
-    if (signal.aborted) {
-      throw relayError;
-    }
-
-    if (!isRetryableRelayError(relayError)) {
-      throw relayError;
-    }
-
-    console.warn(
-      `[dub] OpenAI relay failed (${
-        relayError?.message || relayError
-      }); falling back to direct. segments=${sanitizedSegments.length}`,
-    );
-
-    // Fall back to direct OpenAI
-    const fallbackSegments = await synthesizeSegmentsDirect({
-      c,
-      segments: sanitizedSegments,
-      voice,
-      model,
-      format,
-      signal,
-    });
-
-    return {
-      voice,
-      model,
-      format,
-      segmentCount: fallbackSegments.length,
-      segments: fallbackSegments,
-      usedRelay: false,
-      usedElevenLabs: false,
-    };
-  }
-}
-
-async function synthesizeSegmentsDirect({
-  c,
-  segments,
-  voice,
-  model,
-  format,
-  signal,
-}: {
-  c: Context;
-  segments: Array<{
-    index: number;
-    text: string;
-    targetDuration?: number;
-  }>;
-  voice: string;
-  model: string;
-  format: SpeechFormat;
-  signal: AbortSignal;
-}): Promise<
-  Array<{ index: number; audioBase64: string; targetDuration?: number }>
-> {
-  if (signal.aborted) {
-    throw new DOMException("Operation cancelled", "AbortError");
-  }
-
-  const results: Array<{
-    index: number;
-    audioBase64: string;
-    targetDuration?: number;
-  }> = [];
-  const errors: unknown[] = [];
-  let cursor = 0;
-
-  const maxConcurrency = Math.max(
-    1,
-    Math.min(FALLBACK_SEGMENT_CONCURRENCY, segments.length),
-  );
-
-  const claimNextSegmentIndex = (): number | null => {
-    if (signal.aborted || errors.length > 0 || cursor >= segments.length) {
-      return null;
-    }
-    const currentIndex = cursor;
-    cursor += 1;
-    return currentIndex;
-  };
-
-  const workers = Array.from({ length: maxConcurrency }, async () => {
-    for (
-      let currentIndex = claimNextSegmentIndex();
-      currentIndex !== null;
-      currentIndex = claimNextSegmentIndex()
-    ) {
-      const seg = segments[currentIndex];
-      try {
-        const direct = await callSpeechDirect({
-          c,
-          text: seg.text,
-          voice,
-          model,
-          format,
-          signal,
-        });
-
-        results.push({
-          index: seg.index,
-          audioBase64: direct.audioBase64,
-          targetDuration: seg.targetDuration,
-        });
-      } catch (err) {
-        errors.push(err);
-        return;
-      }
-    }
+}: SynthRequest): Promise<SynthResult> {
+  const elevenLabsResponse = await callElevenLabsDubRelay({
+    c,
+    segments: sanitizedSegments,
+    voice,
+    format,
+    signal,
+    deviceId,
+    requestKey,
   });
-
-  await Promise.all(workers);
-
-  if (errors.length) {
-    throw errors[0];
-  }
-
-  results.sort((a, b) => a.index - b.index);
-  return results;
+  console.log(
+    `[dub] ElevenLabs TTS succeeded, segments=${sanitizedSegments.length}`,
+  );
+  return {
+    ...elevenLabsResponse,
+    format: (elevenLabsResponse.format as SpeechFormat) || "mp3",
+    usedRelay: true,
+  };
 }

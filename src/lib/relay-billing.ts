@@ -22,7 +22,7 @@ import {
   DEFAULT_STAGE5_TRANSLATION_MODEL,
   STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL,
   STAGE5_ELEVENLABS_SCRIBE_MODEL,
-  STAGE5_TTS_MODEL_STANDARD,
+  STAGE5_TTS_MODEL_ELEVEN_V4,
 } from "./model-catalog";
 
 export const RELAY_BILLING_ROUTE_SEGMENTS = {
@@ -274,7 +274,9 @@ function parseTtsInput(body: Record<string, unknown>): TtsSpendInput | RelayFail
 
   return {
     characters: Math.max(0, Math.ceil(characters)),
-    model: (asNonEmptyString(body.model) || STAGE5_TTS_MODEL_STANDARD) as TTSModel,
+    // Managed TTS is ElevenLabs v4 only; a missing model must never price at
+    // the retired OpenAI tts-1 rate.
+    model: (asNonEmptyString(body.model) || STAGE5_TTS_MODEL_ELEVEN_V4) as TTSModel,
   };
 }
 

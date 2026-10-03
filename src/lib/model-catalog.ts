@@ -11,8 +11,11 @@ export const STAGE5_CLAUDE_SONNET_MODEL = "claude-sonnet-5";
 export const STAGE5_CLAUDE_OPUS_MODEL = "claude-opus-4-8";
 export const STAGE5_WHISPER_MODEL = "whisper-1";
 export const STAGE5_ELEVENLABS_SCRIBE_MODEL = "elevenlabs-scribe";
-export const STAGE5_TTS_MODEL_STANDARD = "tts-1";
-export const STAGE5_TTS_MODEL_HD = "tts-1-hd";
+// Retired OpenAI TTS models (shut down 2027-01-06). Nothing synthesizes with
+// them any more; their prices stay only so reservations created before the
+// ElevenLabs-only migration still settle at the rate they were reserved at.
+const STAGE5_TTS_MODEL_STANDARD = "tts-1";
+const STAGE5_TTS_MODEL_HD = "tts-1-hd";
 export const STAGE5_TTS_MODEL_ELEVEN_V3 = "eleven_v3";
 export const STAGE5_TTS_MODEL_ELEVEN_V4 = "eleven_v4";
 const STAGE5_TTS_MODEL_ELEVEN_MULTILINGUAL_V2_LEGACY = "eleven_multilingual_v2";
