@@ -28,14 +28,15 @@ export function makeOpenAI(c: Context<any>) {
 /**
  * Send transcription to the internal relay endpoint.
  * Billing stays owned by the worker via X-Stage5-* reservation headers.
+ * Transcription is ElevenLabs Scribe only (OpenAI whisper-1 shuts down
+ * 2027-02-26): whatever model or quality an older Translator sent, the relay
+ * is always asked for Scribe and no OpenAI key is forwarded. (Scribe has no
+ * prompt parameter, so a legacy Whisper `prompt` is not forwarded either.)
  */
 export async function callRelayServer({
   c,
   file,
-  model,
-  qualityMode,
   language,
-  prompt,
   signal,
   deviceId,
   requestKey,
@@ -43,10 +44,7 @@ export async function callRelayServer({
 }: {
   c: Context<any>;
   file: File;
-  model: string;
-  qualityMode?: boolean;
   language?: string;
-  prompt?: string;
   signal: AbortSignal;
   deviceId: string;
   requestKey: string;
@@ -55,26 +53,17 @@ export async function callRelayServer({
   // Prepare form data for relay
   const relayFormData = new FormData();
   relayFormData.append("file", file);
-  relayFormData.append("model", model);
-  relayFormData.append("response_format", "verbose_json");
-  relayFormData.append("timestamp_granularities[]", "word");
-  relayFormData.append("timestamp_granularities[]", "segment");
-  if (typeof qualityMode === "boolean") {
-    relayFormData.append("qualityMode", String(qualityMode));
-  }
+  relayFormData.append("model", "scribe_v2");
+  relayFormData.append("qualityMode", "true");
 
   if (language) {
     relayFormData.append("language", language);
-  }
-  if (prompt) {
-    relayFormData.append("prompt", prompt);
   }
 
   const relayResponse = await fetch(`${OPENAI_RELAY_URL}/transcribe`, {
     method: "POST",
     headers: {
       "X-Relay-Secret": c.env.RELAY_SECRET,
-      "X-OpenAI-Key": c.env.OPENAI_API_KEY,
       "X-Stage5-Device-Id": deviceId,
       "X-Stage5-Request-Key": requestKey,
       ...(c.env.ELEVENLABS_API_KEY

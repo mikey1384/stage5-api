@@ -6,7 +6,10 @@ import {
   webSearchCallsToCredits,
   type TTSModel,
 } from "../pricing";
-import { DEFAULT_STAGE5_TRANSLATION_MODEL } from "../model-catalog";
+import {
+  DEFAULT_STAGE5_TRANSLATION_MODEL,
+  resolveStage5TranscriptionBillingModel,
+} from "../model-catalog";
 import { getDatabase } from "./core";
 import {
   getUserByOpaqueApiToken,
@@ -458,9 +461,11 @@ export const deductTranscriptionCredits = async ({
   model: string;
   idempotencyKey?: string;
 }): Promise<boolean> => {
-  const spend = secondsToCredits({ seconds, model });
+  // Transcription is Scribe-only; never price at the retired whisper-1 rate.
+  const billedModel = resolveStage5TranscriptionBillingModel(model);
+  const spend = secondsToCredits({ seconds, model: billedModel });
   const reason = "TRANSCRIBE";
-  const meta = { seconds, model };
+  const meta = { seconds, model: billedModel, requestedModel: model };
   if (idempotencyKey) {
     return updateBalanceIdempotent(deviceId, spend, {
       reason,

@@ -21,8 +21,8 @@ import {
 import {
   DEFAULT_STAGE5_TRANSLATION_MODEL,
   STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL,
-  STAGE5_ELEVENLABS_SCRIBE_MODEL,
   STAGE5_TTS_MODEL_ELEVEN_V4,
+  resolveStage5TranscriptionBillingModel,
 } from "./model-catalog";
 
 export const RELAY_BILLING_ROUTE_SEGMENTS = {
@@ -253,16 +253,22 @@ function parseTranslationFinalizeInput(
 }
 
 function parseTranscriptionInput(
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  { settling = false }: { settling?: boolean } = {}
 ): TranscriptionSpendInput | RelayFailure {
   const seconds = asFiniteNumber(body.seconds);
   if (seconds === null) {
     return fail(400, "seconds required for transcription");
   }
 
+  // Transcription is Scribe-only: holds (reserve/confirm) always price as
+  // Scribe whatever model the relay names. A finalize may still carry
+  // "whisper-1" for Whisper work that finished before the Scribe-only deploy.
   return {
     seconds: Math.max(0, Math.ceil(seconds)),
-    model: asNonEmptyString(body.model) || STAGE5_ELEVENLABS_SCRIBE_MODEL,
+    model: resolveStage5TranscriptionBillingModel(asNonEmptyString(body.model), {
+      settlingLegacyWork: settling,
+    }),
   };
 }
 
@@ -638,7 +644,7 @@ export async function finalizeRelayCredits(
     }
 
     case RELAY_BILLING_SERVICES.TRANSCRIPTION: {
-      const parsed = parseTranscriptionInput(body);
+      const parsed = parseTranscriptionInput(body, { settling: true });
       if ("ok" in parsed) return parsed;
       const spend = estimateTranscriptionCredits(parsed);
       const result = await settleBillingReservation({

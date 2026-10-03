@@ -1,9 +1,4 @@
-import {
-  STAGE5_TTS_MODEL_ELEVEN_V4,
-  STAGE5_WHISPER_MODEL,
-} from "./model-catalog";
-
-export const ALLOWED_TRANSCRIPTION_MODELS = [STAGE5_WHISPER_MODEL];
+import { STAGE5_TTS_MODEL_ELEVEN_V4 } from "./model-catalog";
 
 // Managed dubbing is ElevenLabs-only: OpenAI's TTS models (tts-1, tts-1-hd,
 // gpt-4o-mini-tts) shut down on 2027-01-06.

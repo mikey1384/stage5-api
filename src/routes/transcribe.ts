@@ -86,7 +86,7 @@ import { v4 as uuidv4 } from "uuid";
 import type { Stage5ApiBindings } from "../types/env";
 import {
   STAGE5_ELEVENLABS_SCRIBE_MODEL,
-  STAGE5_WHISPER_MODEL,
+  resolveStage5TranscriptionBillingModel,
 } from "../lib/model-catalog";
 
 const router = new Hono<{
@@ -94,17 +94,21 @@ const router = new Hono<{
   Variables: AuthVariables;
 }>();
 
+// Transcription is ElevenLabs Scribe only. OpenAI whisper-1 (and
+// gpt-4o-transcribe) shut down 2027-02-26 and their replacement returns no
+// timestamps, so it cannot make subtitles. Older Translator builds may still
+// send model "whisper-1" or qualityMode=false: those requests are served by
+// Scribe and reserved/billed at the Scribe price. There is no Whisper fallback.
 const DEFAULT_TRANSCRIPTION_MODEL = "scribe_v2";
-const OPENAI_FALLBACK_TRANSCRIPTION_MODEL = STAGE5_WHISPER_MODEL;
 const ELEVENLABS_TRANSCRIPTION_MODEL = STAGE5_ELEVENLABS_SCRIBE_MODEL;
 const TRANSCRIPTION_WEBHOOK_TOKEN_SCOPE = "transcribe-r2-webhook-v1";
-const WHISPER_MAX_FILE_SIZE_BYTES = Math.max(
-  1,
-  Number.parseInt(
-    process.env.WHISPER_MAX_FILE_SIZE_BYTES || String(25 * 1024 * 1024),
-    10
-  )
-);
+const TRANSCRIPTION_PROVIDER_UNAVAILABLE_ERROR =
+  "transcription-provider-unavailable";
+const TRANSCRIPTION_PROVIDER_UNAVAILABLE_BODY = {
+  error: TRANSCRIPTION_PROVIDER_UNAVAILABLE_ERROR,
+  message:
+    "Transcription is temporarily unavailable. Please try again in a few minutes.",
+} as const;
 const TRANSCRIPTION_RESERVE_PADDING_SECONDS = Math.max(
   0,
   Number.parseInt(process.env.TRANSCRIPTION_RESERVE_PADDING_SECONDS || "2", 10)
@@ -144,14 +148,6 @@ function isDurableTranscriptionClientRequestKeyConflict(error: unknown): boolean
   );
 }
 
-
-function normalizeTranscriptionModelForBilling(model?: string): string {
-  const normalized = (model || "").trim().toLowerCase();
-  if (normalized.includes("whisper")) {
-    return OPENAI_FALLBACK_TRANSCRIPTION_MODEL;
-  }
-  return ELEVENLABS_TRANSCRIPTION_MODEL;
-}
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -216,13 +212,12 @@ function extractRelayErrorMessage(body: string, fallback: string): string {
   try {
     const parsed = JSON.parse(body);
     if (parsed && typeof parsed === "object") {
-      const message = (parsed as any).message;
-      if (typeof message === "string" && message.trim()) {
-        return message.trim();
-      }
-      const error = (parsed as any).error;
-      if (typeof error === "string" && error.trim()) {
-        return error.trim();
+      // The relay sends { error, details }; other callers use { error, message }.
+      for (const key of ["message", "details", "error"]) {
+        const value = (parsed as any)[key];
+        if (typeof value === "string" && value.trim()) {
+          return value.trim();
+        }
       }
     }
   } catch {
@@ -230,6 +225,31 @@ function extractRelayErrorMessage(body: string, fallback: string): string {
   }
 
   return body.trim() || fallback;
+}
+
+function extractRelayErrorCode(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body);
+    const error = parsed && typeof parsed === "object" ? (parsed as any).error : null;
+    return typeof error === "string" && error.trim() ? error.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Scribe retries are exhausted inside the relay, which then answers 502
+ * transcription-provider-unavailable. A relay gateway outage (502/503/504
+ * without a JSON body) is the same condition from the client's point of view.
+ */
+function isTranscriptionProviderUnavailable(error: RelayHttpError): boolean {
+  if (extractRelayErrorCode(error.body || "") === TRANSCRIPTION_PROVIDER_UNAVAILABLE_ERROR) {
+    return true;
+  }
+  return (
+    (error.status === 502 || error.status === 503 || error.status === 504) &&
+    extractRelayErrorCode(error.body || "") === null
+  );
 }
 
 function parseStoredTranscriptionJobResult(
@@ -322,79 +342,6 @@ function isJobOlderThanHours(createdAt: string | null | undefined, hours: number
     return false;
   }
   return Date.now() - createdAtMs >= hours * 60 * 60 * 1_000;
-}
-
-function resolveDirectTranscriptionQuality({
-  explicitQualityRaw,
-  modelHint,
-}: {
-  explicitQualityRaw: unknown;
-  modelHint?: string;
-}): {
-  useHighQuality: boolean;
-  source: "explicit" | "model-hint" | "default";
-} {
-  const explicit = parseBooleanLike(explicitQualityRaw);
-  if (typeof explicit === "boolean") {
-    return { useHighQuality: explicit, source: "explicit" };
-  }
-
-  const normalizedHint =
-    typeof modelHint === "string" ? modelHint.trim().toLowerCase() : "";
-  const hintTokens = normalizedHint.split(/[^a-z0-9]+/).filter(Boolean);
-  if (hintTokens.includes("whisper")) {
-    return { useHighQuality: false, source: "model-hint" };
-  }
-  if (hintTokens.includes("scribe") || hintTokens.includes("elevenlabs")) {
-    return { useHighQuality: true, source: "model-hint" };
-  }
-
-  return { useHighQuality: true, source: "default" };
-}
-
-function getWhisperFileSizeGuardMessage(fileSizeBytes: number): string | null {
-  if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) return null;
-  if (fileSizeBytes <= WHISPER_MAX_FILE_SIZE_BYTES) return null;
-  const currentMB = (fileSizeBytes / (1024 * 1024)).toFixed(1);
-  const maxMB = (WHISPER_MAX_FILE_SIZE_BYTES / (1024 * 1024)).toFixed(1);
-  return `File is ${currentMB}MB; Whisper supports up to ${maxMB}MB per request.`;
-}
-
-function buildTranscriptionFallbackConfirmationPayload({
-  requestedReserveSpend,
-  fallbackReserveSpend,
-  reason,
-  whisperGuardMessage,
-}: {
-  requestedReserveSpend: number;
-  fallbackReserveSpend: number;
-  reason: "insufficient-credits" | "provider-unavailable";
-  whisperGuardMessage?: string | null;
-}): {
-  error: "transcription-fallback-confirmation-required";
-  message: string;
-  reason: "insufficient-credits" | "provider-unavailable";
-  requestedModel: string;
-  fallbackModel: string;
-  requestedReserveSpend: number;
-  fallbackReserveSpend: number;
-  whisperGuardMessage?: string;
-} {
-  const message =
-    reason === "insufficient-credits"
-      ? "High-quality transcription needs more credits. Continue with Whisper instead, or recharge to keep ElevenLabs quality."
-      : "High-quality transcription is unavailable right now. Continue with Whisper instead, or retry later to keep ElevenLabs quality.";
-
-  return {
-    error: "transcription-fallback-confirmation-required",
-    message,
-    reason,
-    requestedModel: ELEVENLABS_TRANSCRIPTION_MODEL,
-    fallbackModel: OPENAI_FALLBACK_TRANSCRIPTION_MODEL,
-    requestedReserveSpend,
-    fallbackReserveSpend,
-    ...(whisperGuardMessage ? { whisperGuardMessage } : {}),
-  };
 }
 
 function parseRequestedDurationSeconds(value: unknown): number | null {
@@ -717,7 +664,13 @@ async function resolveDuplicateDirectTranscriptionReservation({
       deviceId,
       requestKey,
       actualSeconds: pendingFinalize.actualSeconds,
-      billedModel: pendingFinalize.billedModel,
+      // A pending finalize recorded before the Scribe-only deploy may name
+      // whisper-1 for Whisper work that already ran; every other value
+      // settles at the Scribe price.
+      billedModel: resolveStage5TranscriptionBillingModel(
+        pendingFinalize.billedModel,
+        { settlingLegacyWork: true }
+      ),
       meta: {
         ...pendingFinalize.settlementMeta,
         ...buildStoredTranscriptionReplayMeta(duplicate.storedReplay),
@@ -1365,7 +1318,9 @@ router.post("/", async (c) => {
     const qualityMode = parseBooleanLike(requestedQualityMode);
     const language = formData.get("language")?.toString();
     const prompt = formData.get("prompt")?.toString();
-    // New pricing is default; legacy flags are ignored
+    // model / qualityMode / prompt only identify the request (idempotency key
+    // and audit meta). They no longer pick a provider or a price: every request,
+    // including legacy "whisper-1" / qualityMode=false, runs on Scribe.
 
     if (!(file instanceof File)) {
       return c.json(
@@ -1441,59 +1396,19 @@ router.post("/", async (c) => {
       requestedDurationSeconds,
       fileSizeBytes: file.size,
     });
-    const requestedQuality = resolveDirectTranscriptionQuality({
-      explicitQualityRaw: requestedQualityMode,
-      modelHint: requestedModel,
-    });
-    const whisperGuardMessage = getWhisperFileSizeGuardMessage(file.size);
-    const requestedReserveModel = requestedQuality.useHighQuality
-      ? ELEVENLABS_TRANSCRIPTION_MODEL
-      : OPENAI_FALLBACK_TRANSCRIPTION_MODEL;
-    const requestedReserveSpend = estimateTranscriptionCredits({
-      seconds: reserveSeconds,
-      model: requestedReserveModel,
-    });
-    const whisperReserveSpend = estimateTranscriptionCredits({
-      seconds: reserveSeconds,
-      model: OPENAI_FALLBACK_TRANSCRIPTION_MODEL,
-    });
-    const whisperFallbackAvailable = whisperGuardMessage === null;
-
-    if (
-      requestedQuality.useHighQuality &&
-      whisperFallbackAvailable &&
-      !c.env.ELEVENLABS_API_KEY &&
-      c.env.OPENAI_API_KEY
-    ) {
+    // Scribe is the only transcription provider. Without its key there is
+    // nothing to fall back to, so fail before holding any credits.
+    if (!c.env.ELEVENLABS_API_KEY) {
+      console.error(
+        "[transcribe] ELEVENLABS_API_KEY is not configured; Scribe is the only transcription provider"
+      );
       return respondReplay({
         kind: "error",
-        status: 409,
-        body: buildTranscriptionFallbackConfirmationPayload({
-          requestedReserveSpend,
-          fallbackReserveSpend: whisperReserveSpend,
-          reason: "provider-unavailable",
-          whisperGuardMessage,
-        }),
+        status: 502,
+        body: { ...TRANSCRIPTION_PROVIDER_UNAVAILABLE_BODY },
       });
     }
-
-    if (
-      requestedQuality.useHighQuality &&
-      whisperFallbackAvailable &&
-      requestedReserveSpend > user.creditBalance &&
-      whisperReserveSpend <= user.creditBalance
-    ) {
-      return respondReplay({
-        kind: "error",
-        status: 409,
-        body: buildTranscriptionFallbackConfirmationPayload({
-          requestedReserveSpend,
-          fallbackReserveSpend: whisperReserveSpend,
-          reason: "insufficient-credits",
-          whisperGuardMessage,
-        }),
-      });
-    }
+    const reserveModel = ELEVENLABS_TRANSCRIPTION_MODEL;
 
     let reserved:
       | Awaited<ReturnType<typeof reserveTranscriptionCredits>>
@@ -1503,7 +1418,7 @@ router.post("/", async (c) => {
         deviceId: user.deviceId,
         requestKey,
         reserveSeconds,
-        reserveModel: requestedReserveModel,
+        reserveModel,
         meta: {
           source: "relay-worker",
           fileSizeBytes: file.size,
@@ -1511,8 +1426,7 @@ router.post("/", async (c) => {
           qualityMode: typeof qualityMode === "boolean" ? qualityMode : "auto",
           language: language ?? null,
           requestedDurationSeconds,
-          reserveModel: requestedReserveModel,
-          qualitySource: requestedQuality.source,
+          reserveModel,
           directRequestLease,
           directRequestOwnership,
         },
@@ -1583,10 +1497,7 @@ router.post("/", async (c) => {
       transcription = await callRelayServer({
         c,
         file,
-        model: requestedModel,
-        qualityMode,
         language: language ?? undefined,
-        prompt: prompt ?? undefined,
         signal: abortController.signal,
         deviceId: user.deviceId,
         requestKey,
@@ -1640,6 +1551,13 @@ router.post("/", async (c) => {
           reason: "relay-http-error",
           message,
         });
+        if (isTranscriptionProviderUnavailable(relayError)) {
+          return respondReplay({
+            kind: "error",
+            status: 502,
+            body: { ...TRANSCRIPTION_PROVIDER_UNAVAILABLE_BODY },
+          });
+        }
         return respondReplay({
           kind: "error",
           status: relayError.status,
@@ -1663,15 +1581,9 @@ router.post("/", async (c) => {
       );
     }
 
-    const billedModel = normalizeTranscriptionModelForBilling(
-      typeof (transcription as any)?.model === "string"
-        ? (transcription as any).model
-        : requestedModel
-    );
-    const provider =
-      billedModel === OPENAI_FALLBACK_TRANSCRIPTION_MODEL
-        ? "OpenAI"
-        : "ElevenLabs";
+    // Scribe produced the transcript whatever model the client named.
+    const billedModel = ELEVENLABS_TRANSCRIPTION_MODEL;
+    const provider = "ElevenLabs";
     const billingDur = getBillingDurationSeconds(transcription as any);
     if (billingDur === null) {
       await releaseActiveReservation({
@@ -1688,7 +1600,11 @@ router.post("/", async (c) => {
       });
     }
     const actualSeconds = Math.ceil(billingDur);
-    const responsePayload = transcription as any;
+    // Same success shape as before (text, segments with start/end/text/words,
+    // words, duration, model) so older Translator builds parse it unchanged.
+    // There is no provider fallback any more, so never echo a `fallback` key.
+    const responsePayload = { ...((transcription ?? {}) as any) };
+    delete responsePayload.fallback;
     const replaySuccess: JsonReplayResult = {
       kind: "success",
       status: 200,

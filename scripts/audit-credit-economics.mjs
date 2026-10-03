@@ -16,8 +16,9 @@ const translationPrices = {
   "claude-opus-4-8": { in: 5 / 1_000_000, out: 25 / 1_000_000 },
 };
 
+// OpenAI whisper-1 is retired (shuts down 2027-02-26); managed transcription
+// is ElevenLabs Scribe only, so Whisper is no longer part of the schedule.
 const transcriptionPrices = {
-  "whisper-1": { perSecond: 0.006 / 60 },
   "elevenlabs-scribe": { perSecond: 0.4 / 3600 },
 };
 
@@ -90,10 +91,6 @@ const rows = [
   {
     label: "Claude Opus 4.8 output / 1M tokens",
     vendorCostUsd: 1_000_000 * translationPrices["claude-opus-4-8"].out,
-  },
-  {
-    label: "Whisper-1 / hour",
-    vendorCostUsd: 3600 * transcriptionPrices["whisper-1"].perSecond,
   },
   {
     label: "ElevenLabs Scribe / hour",

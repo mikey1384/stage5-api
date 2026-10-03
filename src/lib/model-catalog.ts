@@ -9,8 +9,13 @@ export const STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL = "gpt-5.4";
 export const STAGE5_REVIEW_TRANSLATION_MODEL = "gpt-5.5";
 export const STAGE5_CLAUDE_SONNET_MODEL = "claude-sonnet-5";
 export const STAGE5_CLAUDE_OPUS_MODEL = "claude-opus-4-8";
-export const STAGE5_WHISPER_MODEL = "whisper-1";
 export const STAGE5_ELEVENLABS_SCRIBE_MODEL = "elevenlabs-scribe";
+// Retired OpenAI transcription model (whisper-1 shuts down 2027-02-26). Every
+// transcription now runs on ElevenLabs Scribe and is reserved/billed at the
+// Scribe price. The whisper-1 price stays ONLY so reservations whose Whisper
+// work finished before the Scribe-only deploy still settle at the rate that
+// work ran at (see resolveStage5TranscriptionBillingModel).
+const STAGE5_RETIRED_WHISPER_MODEL = "whisper-1";
 // Retired OpenAI TTS models (shut down 2027-01-06). Nothing synthesizes with
 // them any more; their prices stay only so reservations created before the
 // ElevenLabs-only migration still settle at the rate they were reserved at.
@@ -73,7 +78,8 @@ export const STAGE5_TRANSLATION_MODEL_PRICES = {
 } as const;
 
 export const STAGE5_TRANSCRIPTION_MODEL_PRICES = {
-  [STAGE5_WHISPER_MODEL]: {
+  [STAGE5_RETIRED_WHISPER_MODEL]: {
+    // Legacy settlement only; never used for new holds (see above).
     perSecond: 0.006 / 60, // $0.006 per minute = $0.36/hr
   },
   [STAGE5_ELEVENLABS_SCRIBE_MODEL]: {
@@ -129,4 +135,24 @@ export function normalizeStage5TranslationBillingModel(model?: string): string {
       canonical as keyof typeof STAGE5_TRANSLATION_BILLING_MODEL_ALIASES
     ] || canonical
   );
+}
+
+/**
+ * Transcription is ElevenLabs Scribe only. Whatever model a client or an older
+ * relay names (including "whisper-1" or nothing), new holds and new work are
+ * priced as Scribe. `settlingLegacyWork` is set only when settling a pending
+ * finalize recorded before the Scribe-only deploy, whose transcript Whisper
+ * actually produced; only then does "whisper-1" keep its own price.
+ */
+export function resolveStage5TranscriptionBillingModel(
+  model?: string,
+  { settlingLegacyWork = false }: { settlingLegacyWork?: boolean } = {}
+): string {
+  if (
+    settlingLegacyWork &&
+    canonicalizeModelId(model) === STAGE5_RETIRED_WHISPER_MODEL
+  ) {
+    return STAGE5_RETIRED_WHISPER_MODEL;
+  }
+  return STAGE5_ELEVENLABS_SCRIBE_MODEL;
 }
