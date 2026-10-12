@@ -48,6 +48,64 @@ export const getCredits = async ({
   }
 };
 
+// A one-time welcome grant, so a new user sees their first video subtitled
+// before deciding to pay: about 20 minutes of transcription. Only a device
+// that has never had credits qualifies (no credits row, no ledger history).
+// Device IDs are client-generated, so grants are also capped per hashed IP and
+// per day, which bounds what reinstalling to farm credits can take.
+export const WELCOME_CREDITS = 6_300;
+export const WELCOME_MAX_PER_IP_PER_DAY = 2;
+export const WELCOME_MAX_PER_DAY = 150;
+
+export const grantWelcomeCredits = async ({
+  deviceId,
+  ipHash,
+}: {
+  deviceId: string;
+  ipHash: string | null;
+}): Promise<CreditRecord | null> => {
+  const db = getDatabase();
+
+  const history = await db
+    .prepare("SELECT 1 FROM credit_ledger WHERE device_id = ? LIMIT 1")
+    .bind(deviceId)
+    .first();
+  if (history) return null;
+
+  const recent = (await db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN json_extract(meta, '$.ipHash') = ? THEN 1 ELSE 0 END) AS fromIp
+         FROM credit_ledger
+        WHERE reason = 'WELCOME' AND created_at > datetime('now', '-1 day')`
+    )
+    .bind(ipHash ?? "")
+    .first()) as { total: number | null; fromIp: number | null } | null;
+  if (Number(recent?.total ?? 0) >= WELCOME_MAX_PER_DAY) return null;
+  if (ipHash && Number(recent?.fromIp ?? 0) >= WELCOME_MAX_PER_IP_PER_DAY) return null;
+
+  // Only the request that creates the row grants, so concurrent first
+  // balance checks can't grant twice.
+  const inserted = await db
+    .prepare(
+      `INSERT INTO credits (device_id, credit_balance, updated_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(device_id) DO NOTHING`
+    )
+    .bind(deviceId, WELCOME_CREDITS)
+    .run();
+  if (!inserted.meta?.changes) return null;
+
+  await recordLedger({
+    deviceId,
+    delta: WELCOME_CREDITS,
+    reason: "WELCOME",
+    meta: { ipHash },
+  });
+  console.log(`Granted ${WELCOME_CREDITS} welcome credits to device ${deviceId}`);
+  return getCredits({ deviceId });
+};
+
 // Add credits to a device (upsert)
 export const creditDevice = async ({
   deviceId,

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test, { before, beforeEach, afterEach } from "node:test";
+import { randomUUID } from "node:crypto";
 
+import { saveAnalyticsPreference } from "../src/lib/analytics-preferences.ts";
 import worker from "../src/index.ts";
 import { ensureDatabase } from "../src/lib/db/core.ts";
 import { registerDeviceApiToken } from "../src/lib/db/api-tokens.ts";
@@ -34,6 +36,93 @@ const ctx = {
   passThroughOnException() {},
 };
 
+// Wire payloads already produced by Translator 1.18.4. Completion here is a
+// client diagnostic; only the signed Stripe webhook can record a purchase.
+const currentDesktopEvents = [
+  ...["transcription", "dubbing", "summary"].flatMap((feature) =>
+    ["started", "completed", "credit_blocked", "cancelled", "failed"].map(
+      (outcome) => ({ event: `${feature}_${outcome}` }),
+    ),
+  ),
+  ...["started", "completed", "cancelled", "failed"].map((outcome) => ({
+    event: `merge_${outcome}`,
+  })),
+  ...["credit_checkout", "byo_unlock"].flatMap((flow) =>
+    ["button_shown", "button_clicked", "session_created", "opened", "completed", "failed", "cancelled"].map(
+      (outcome) => ({
+        event: `${flow}_${outcome}`,
+        ...(flow === "credit_checkout" ? { packId: "MICRO" } : {}),
+        placement: flow === "credit_checkout" ? "settings-credit-card" : "settings-byo",
+        ...(outcome === "failed" ? { failureReason: "api_error" } : {}),
+      }),
+    ),
+  ),
+  { event: "url_download_caption_only", sourceType: "youtube", mediaFailure: "http_403" },
+  { event: "app_critical_failure", failureClass: "renderer_window_hung", startupPhase: "runtime", failedAppVersion: "1.20.0", failedPlatform: "darwin", failedArchitecture: "arm64" },
+];
+
+async function postDesktopEvent(token, fields) {
+  return worker.fetch(new Request("http://localhost/analytics/events", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ eventId: randomUUID(), consentRevision: 1, appVersion: "1.18.4", platform: "darwin", architecture: "arm64", locale: "ko-KR", ...fields }),
+  }), env, ctx);
+}
+
+test("current desktop funnel payloads reach the outbox without manufacturing purchases", async () => {
+  const deviceId = randomUUID();
+  const token = await registerDeviceApiToken({ deviceId });
+  await saveAnalyticsPreference(env, `translator-device:${deviceId}`, { enabled: true, revision: 1 });
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+  for (const fields of currentDesktopEvents) {
+    const eventId = randomUUID();
+    const response = await postDesktopEvent(token, { eventId, ...fields });
+    assert.equal(response.status, 202, fields.event);
+    const row = sqlite.prepare("SELECT event_name, params_json FROM analytics_outbox WHERE event_id = ?")
+      .get(`translator:${fields.event}:${eventId}`);
+    assert.equal(row.event_name, fields.event);
+    const params = JSON.parse(row.params_json);
+    assert.equal(params.pack_id, fields.packId);
+    assert.equal(params.placement, fields.placement);
+    assert.equal(params.failure_reason, fields.failureReason);
+    assert.equal(params.media_failure, fields.mediaFailure);
+    assert.equal(params.source_type, fields.sourceType);
+    assert.equal(params.value, undefined);
+    assert.equal(params.transaction_id, undefined);
+    const repeated = await postDesktopEvent(token, { eventId, ...fields });
+    assert.deepEqual(await repeated.json(), { ok: true, duplicate: true });
+  }
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM analytics_outbox").get().n, 35);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM analytics_outbox WHERE event_name = 'purchase'").get().n, 0);
+});
+
+test("new desktop event contexts reject content, forged revenue and mixed event fields", async () => {
+  const deviceId = randomUUID();
+  const token = await registerDeviceApiToken({ deviceId });
+  await saveAnalyticsPreference(env, `translator-device:${deviceId}`, { enabled: true, revision: 1 });
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+  for (const fields of [
+    { event: "purchase", value: 1, currency: "USD" },
+    { event: "credit_checkout_completed", value: 1 },
+    { event: "credit_checkout_completed", transactionId: "untrusted" },
+    { event: "credit_checkout_failed", failureReason: "customer content" },
+    { event: "credit_checkout_opened", failureReason: "api_error" },
+    { event: "byo_unlock_completed", packId: "MICRO" },
+    { event: "transcription_completed", placement: "settings-byo" },
+    { event: "transcription_completed", feature: "translation" },
+    { event: "summary_completed", workflow: "full_srt" },
+    { event: "app_open", packId: "MICRO" },
+    { event: "url_download_caption_only", sourceType: "youtube" },
+    { event: "url_download_caption_only", sourceType: "other", mediaFailure: "http_403" },
+    { event: "url_download_caption_only", sourceType: "youtube", mediaFailure: "private URL or error text" },
+    { event: "url_download_completed", sourceType: "youtube", mediaFailure: "http_403" },
+    { event: "url_download_caption_only", sourceType: "youtube", mediaFailure: "http_403", downloadFailure: "site_rejected" },
+  ]) {
+    assert.equal((await postDesktopEvent(token, fields)).status, 400, JSON.stringify(fields));
+  }
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM analytics_outbox").get().n, 0);
+});
+
 before(async () => {
   resetSqliteD1Database(sqlite);
   await ensureDatabase({ DB: db });
@@ -49,6 +138,7 @@ afterEach(() => {
 
 test("analytics outbox pseudonymizes subjects, deduplicates events, and sends a valid GA4 envelope", async () => {
   const subjectKey = "translator-device:11111111-1111-4111-8111-111111111111";
+  await saveAnalyticsPreference(env, subjectKey, { enabled: true, revision: 1 });
   const first = await enqueueAnalyticsEvent(env, {
     eventId: "purchase:pi_exact_once",
     eventName: "purchase",
@@ -117,6 +207,7 @@ test("analytics outbox pseudonymizes subjects, deduplicates events, and sends a 
 });
 
 test("failed Measurement Protocol delivery stays pending with retry metadata", async () => {
+  await saveAnalyticsPreference(env, "translator-device:retry-device", { enabled: true, revision: 1 });
   await enqueueAnalyticsEvent(env, {
     eventId: "app_open:retry",
     eventName: "app_open",
@@ -139,6 +230,7 @@ test("failed Measurement Protocol delivery stays pending with retry metadata", a
 });
 
 test("concurrent outbox flushes lease an event before delivery", async () => {
+  await saveAnalyticsPreference(env, "translator-device:concurrent", { enabled: true, revision: 1 });
   await enqueueAnalyticsEvent(env, {
     eventId: "begin_checkout:concurrent",
     eventName: "begin_checkout",
@@ -170,6 +262,7 @@ test("concurrent outbox flushes lease an event before delivery", async () => {
 test("authenticated desktop product events accept only minimized allowlisted data", async () => {
   const deviceId = "22222222-2222-4222-8222-222222222222";
   const token = await registerDeviceApiToken({ deviceId });
+  await saveAnalyticsPreference(env, `translator-device:${deviceId}`, { enabled: true, revision: 1 });
   const sentBodies = [];
   globalThis.fetch = async (_url, init) => {
     sentBodies.push(JSON.parse(String(init.body)));
@@ -187,7 +280,7 @@ test("authenticated desktop product events accept only minimized allowlisted dat
       body: JSON.stringify({
         eventId: "33333333-3333-4333-8333-333333333333",
         event: "app_meaningful_use",
-        appVersion: "1.13.22",
+        consentRevision: 1, appVersion: "1.13.22",
         platform: "darwin",
         architecture: "arm64",
         locale: "ko-KR",
@@ -221,6 +314,7 @@ test("authenticated desktop product events accept only minimized allowlisted dat
 test("authenticated translation funnel events accept only the full-SRT workflow", async () => {
   const deviceId = "66666666-6666-4666-8666-666666666666";
   const token = await registerDeviceApiToken({ deviceId });
+  await saveAnalyticsPreference(env, `translator-device:${deviceId}`, { enabled: true, revision: 1 });
   globalThis.fetch = async () => new Response(null, { status: 204 });
 
   const response = await worker.fetch(
@@ -234,7 +328,7 @@ test("authenticated translation funnel events accept only the full-SRT workflow"
       body: JSON.stringify({
         eventId: "77777777-7777-4777-8777-777777777777",
         event: "translation_completed",
-        appVersion: "1.16.8",
+        consentRevision: 1, appVersion: "1.16.8",
         platform: "darwin",
         architecture: "arm64",
         locale: "en-US",
@@ -270,7 +364,7 @@ test("authenticated translation funnel events accept only the full-SRT workflow"
       body: JSON.stringify({
         eventId: "88888888-8888-4888-8888-888888888888",
         event: "translation_started",
-        appVersion: "1.16.8",
+        consentRevision: 1, appVersion: "1.16.8",
         platform: "darwin",
         architecture: "arm64",
         locale: "en-US",
@@ -291,7 +385,7 @@ test("authenticated translation funnel events accept only the full-SRT workflow"
       body: JSON.stringify({
         eventId: "99999999-9999-4999-8999-999999999999",
         event: "translation_credit_blocked",
-        appVersion: "1.16.7",
+        consentRevision: 1, appVersion: "1.16.7",
         platform: "darwin",
         architecture: "arm64",
         locale: "en-US",
@@ -307,6 +401,7 @@ test("authenticated translation funnel events accept only the full-SRT workflow"
 test("critical desktop failures accept only minimized allowlisted diagnostics", async () => {
   const deviceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const token = await registerDeviceApiToken({ deviceId });
+  await saveAnalyticsPreference(env, `translator-device:${deviceId}`, { enabled: true, revision: 1 });
   globalThis.fetch = async () => new Response(null, { status: 204 });
 
   const response = await worker.fetch(
@@ -319,7 +414,7 @@ test("critical desktop failures accept only minimized allowlisted diagnostics", 
       body: JSON.stringify({
         eventId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         event: "app_critical_failure",
-        appVersion: "1.16.9",
+        consentRevision: 1, appVersion: "1.16.9",
         platform: "darwin",
         architecture: "x64",
         locale: "en-US",
@@ -363,7 +458,7 @@ test("critical desktop failures accept only minimized allowlisted diagnostics", 
       body: JSON.stringify({
         eventId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         event: "app_critical_failure",
-        appVersion: "1.16.9",
+        consentRevision: 1, appVersion: "1.16.9",
         platform: "darwin",
         architecture: "x64",
         locale: "en-US",
@@ -390,7 +485,7 @@ test("critical desktop failures accept only minimized allowlisted diagnostics", 
       body: JSON.stringify({
         eventId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
         event: "app_critical_failure",
-        appVersion: "1.16.9",
+        consentRevision: 1, appVersion: "1.16.9",
         platform: "darwin",
         architecture: "x64",
         locale: "en-US",
@@ -410,6 +505,7 @@ test("critical desktop failures accept only minimized allowlisted diagnostics", 
 test("URL download recovery events expose coarse outcomes but reject browsing data", async () => {
   const deviceId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   const token = await registerDeviceApiToken({ deviceId });
+  await saveAnalyticsPreference(env, `translator-device:${deviceId}`, { enabled: true, revision: 1 });
   globalThis.fetch = async () => new Response(null, { status: 204 });
 
   const required = await worker.fetch(
@@ -422,7 +518,7 @@ test("URL download recovery events expose coarse outcomes but reject browsing da
       body: JSON.stringify({
         eventId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
         event: "url_download_cookie_required",
-        appVersion: "1.16.10",
+        consentRevision: 1, appVersion: "1.16.10",
         platform: "darwin",
         architecture: "arm64",
         locale: "en-US",
@@ -459,7 +555,7 @@ test("URL download recovery events expose coarse outcomes but reject browsing da
       body: JSON.stringify({
         eventId: "12121212-1212-4212-8212-121212121212",
         event: "url_cookie_connect_completed",
-        appVersion: "1.16.10",
+        consentRevision: 1, appVersion: "1.16.10",
         platform: "darwin",
         architecture: "arm64",
         locale: "en-US",
@@ -482,7 +578,7 @@ test("URL download recovery events expose coarse outcomes but reject browsing da
       body: JSON.stringify({
         eventId: "34343434-3434-4434-8434-343434343434",
         event: "url_download_started",
-        appVersion: "1.16.10",
+        consentRevision: 1, appVersion: "1.16.10",
         platform: "darwin",
         architecture: "arm64",
         locale: "en-US",
@@ -499,6 +595,7 @@ test("URL download recovery events expose coarse outcomes but reject browsing da
 test("internal desktop devices are acknowledged without entering customer analytics", async () => {
   const deviceId = "44444444-4444-4444-8444-444444444444";
   const token = await registerDeviceApiToken({ deviceId });
+  await saveAnalyticsPreference(env, `translator-device:${deviceId}`, { enabled: true, revision: 1 });
   sqlite
     .prepare(
       `INSERT INTO internal_devices (device_id, classification, source)
@@ -523,7 +620,7 @@ test("internal desktop devices are acknowledged without entering customer analyt
       body: JSON.stringify({
         eventId: "55555555-5555-4555-8555-555555555555",
         event: "app_open",
-        appVersion: "1.16.6",
+        consentRevision: 1, appVersion: "1.16.6",
         platform: "win32",
         architecture: "x64",
         locale: "zh-TW",

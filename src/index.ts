@@ -16,6 +16,7 @@ import analyticsRouter from "./routes/analytics";
 import { ensureDatabase } from "./lib/db";
 import { runReconciliation } from "./lib/reconciliation";
 import { flushAnalyticsOutbox } from "./lib/product-analytics";
+import { redactDeliveredAnalyticsDetails } from "./lib/analytics-retention";
 import { minimumTranslatorVersionGate } from "./lib/translator-version-gate";
 import { runBillingStorageCleanup } from "./lib/billing-storage-cleanup";
 import type { Stage5ApiBindings } from "./types/env";
@@ -139,6 +140,15 @@ export default {
     await ensureDatabase(env);
     ctx.waitUntil(
       (async () => {
+        try {
+          const retention = await redactDeliveredAnalyticsDetails();
+          if (retention.redacted > 0) {
+            console.log(`[cron/analytics-retention] redacted=${retention.redacted}`);
+          }
+        } catch (error: any) {
+          console.error("[cron/analytics-retention] Failed:", error?.message || error);
+        }
+
         try {
           const analytics = await flushAnalyticsOutbox(env);
           if (

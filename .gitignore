@@ -52,3 +52,5 @@ wrangler.toml.bak
 # Testing
 coverage/
 .nyc_output/ 
+# Local release artifacts (deployed bundles, source maps)
+.local/

@@ -1,4 +1,5 @@
 import { getDatabase } from "./db/core";
+import { discardIneligibleAnalytics, PENDING_ANALYTICS_RETENTION_MS } from "./analytics-retention";
 import type { Stage5ApiBindings } from "../types/env";
 
 const GA4_COLLECT_ENDPOINT = "https://www.google-analytics.com/mp/collect";
@@ -147,6 +148,7 @@ export async function enqueueAnalyticsEvent(
     params,
     occurredAt = new Date(),
     availableAt = occurredAt,
+    consentRevision,
   }: {
     eventId: string;
     eventName: string;
@@ -154,14 +156,21 @@ export async function enqueueAnalyticsEvent(
     params: AnalyticsEventParams;
     occurredAt?: Date;
     availableAt?: Date;
+    consentRevision?: number;
   },
-): Promise<"queued" | "duplicate" | "not_configured"> {
+): Promise<"queued" | "duplicate" | "not_configured" | "excluded"> {
   if (!hasAnalyticsConfiguration(env)) return "not_configured";
 
   const clientId = await deriveAnonymousClientId(env, subjectKey);
   if (!clientId) return "not_configured";
 
   const db = getDatabase();
+  const existing = await db.prepare("SELECT event_id FROM analytics_outbox WHERE event_id = ?")
+    .bind(normalizeEventId(eventId)).first();
+  if (existing) return "duplicate";
+  if (!Number.isFinite(occurredAt.getTime()) ||
+      occurredAt.getTime() <= Date.now() - PENDING_ANALYTICS_RETENTION_MS ||
+      occurredAt.getTime() > Date.now() + 5 * 60 * 1000) return "excluded";
   const result = await db
     .prepare(
       `INSERT INTO analytics_outbox (
@@ -173,7 +182,9 @@ export async function enqueueAnalyticsEvent(
          available_at,
          created_at,
          updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ) SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+       WHERE EXISTS (SELECT 1 FROM analytics_preferences
+         WHERE client_id = ? AND enabled = 1 AND (? IS NULL OR revision = ?))
        ON CONFLICT(event_id) DO NOTHING`,
     )
     .bind(
@@ -183,22 +194,24 @@ export async function enqueueAnalyticsEvent(
       JSON.stringify(sanitizeParams(params)),
       occurredAt.getTime() * 1000,
       availableAt.toISOString(),
+      clientId, consentRevision ?? null, consentRevision ?? null,
     )
     .run();
 
-  return Number(result?.meta?.changes ?? 0) > 0 ? "queued" : "duplicate";
+  if (Number(result?.meta?.changes ?? 0) > 0) return "queued";
+  return await db.prepare("SELECT event_id FROM analytics_outbox WHERE event_id = ?")
+    .bind(normalizeEventId(eventId)).first() ? "duplicate" : "excluded";
 }
 
 export async function enqueueAnalyticsEventSafely(
   env: Stage5ApiBindings,
   input: Parameters<typeof enqueueAnalyticsEvent>[1],
-): Promise<"queued" | "duplicate" | "not_configured" | "failed"> {
+): Promise<"queued" | "duplicate" | "not_configured" | "excluded" | "failed"> {
   try {
     return await enqueueAnalyticsEvent(env, input);
   } catch (error) {
     console.warn(
-      `[analytics] Failed to enqueue ${input.eventName} (${input.eventId}):`,
-      error,
+      `[analytics] Failed to enqueue ${input.eventName}`,
     );
     return "failed";
   }
@@ -218,10 +231,12 @@ async function claimForDelivery(eventId: string): Promise<boolean> {
        SET available_at = ?,
            updated_at = CURRENT_TIMESTAMP
        WHERE event_id = ?
-         AND sent_at IS NULL
-         AND available_at <= ?`,
+         AND sent_at IS NULL AND discarded_at IS NULL
+         AND available_at <= ? AND occurred_at_micros > ?
+         AND EXISTS (SELECT 1 FROM analytics_preferences p
+           WHERE p.client_id = analytics_outbox.client_id AND p.enabled = 1)`,
     )
-    .bind(leaseUntil, eventId, now)
+    .bind(leaseUntil, eventId, now, (Date.now() - PENDING_ANALYTICS_RETENTION_MS) * 1000)
     .run();
   return Number(result?.meta?.changes ?? 0) > 0;
 }
@@ -234,7 +249,7 @@ async function markSent(eventId: string): Promise<void> {
            attempts = attempts + 1,
            last_error = NULL,
            updated_at = CURRENT_TIMESTAMP
-       WHERE event_id = ? AND sent_at IS NULL`,
+       WHERE event_id = ? AND sent_at IS NULL AND discarded_at IS NULL`,
     )
     .bind(eventId)
     .run();
@@ -252,7 +267,7 @@ async function markFailed(
            available_at = ?,
            last_error = ?,
            updated_at = CURRENT_TIMESTAMP
-       WHERE event_id = ? AND sent_at IS NULL`,
+       WHERE event_id = ? AND sent_at IS NULL AND discarded_at IS NULL`,
     )
     .bind(retryAt(attempts + 1), error.slice(0, 500), eventId)
     .run();
@@ -262,6 +277,7 @@ export async function flushAnalyticsOutbox(
   env: Stage5ApiBindings,
   { limit = DEFAULT_BATCH_LIMIT }: { limit?: number } = {},
 ): Promise<AnalyticsFlushReport> {
+  await discardIneligibleAnalytics();
   if (!hasAnalyticsConfiguration(env)) {
     return { configured: false, selected: 0, sent: 0, failed: 0 };
   }
@@ -275,7 +291,7 @@ export async function flushAnalyticsOutbox(
       `SELECT event_id, event_name, client_id, params_json,
               occurred_at_micros, attempts
        FROM analytics_outbox
-       WHERE sent_at IS NULL AND available_at <= ?
+       WHERE sent_at IS NULL AND discarded_at IS NULL AND available_at <= ?
        ORDER BY created_at ASC
        LIMIT ?`,
     )
@@ -302,6 +318,7 @@ export async function flushAnalyticsOutbox(
           client_id: event.client_id,
           timestamp_micros: Number(event.occurred_at_micros),
           non_personalized_ads: true,
+          consent: { ad_user_data: "DENIED", ad_personalization: "DENIED" },
           events: [
             {
               name: event.event_name,
@@ -321,7 +338,8 @@ export async function flushAnalyticsOutbox(
       await markFailed(
         event.event_id,
         Number(event.attempts ?? 0),
-        error instanceof Error ? error.message : String(error),
+        error instanceof Error && /^GA4 Measurement Protocol HTTP \d+$/.test(error.message)
+          ? error.message : "delivery_failed",
       );
     }
   }

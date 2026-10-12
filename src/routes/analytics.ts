@@ -1,3 +1,4 @@
+import { readAnalyticsPreference, saveAnalyticsPreference } from "../lib/analytics-preferences";
 import { Hono } from "hono";
 import { z } from "zod";
 import { getUserByApiKey, isInternalDevice } from "../lib/db";
@@ -12,6 +13,8 @@ const router = new Hono<{ Bindings: Stage5ApiBindings }>();
 const productEventSchema = z
   .object({
     eventId: z.string().uuid(),
+    occurredAt: z.string().datetime().optional(),
+    consentRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
     event: z.enum([
       "app_open",
       "app_meaningful_use",
@@ -21,8 +24,42 @@ const productEventSchema = z
       "translation_credit_blocked",
       "translation_cancelled",
       "translation_failed",
+      "transcription_started",
+      "transcription_completed",
+      "transcription_credit_blocked",
+      "transcription_cancelled",
+      "transcription_failed",
+      "dubbing_started",
+      "dubbing_completed",
+      "dubbing_credit_blocked",
+      "dubbing_cancelled",
+      "dubbing_failed",
+      "summary_started",
+      "summary_completed",
+      "summary_credit_blocked",
+      "summary_cancelled",
+      "summary_failed",
+      "merge_started",
+      "merge_completed",
+      "merge_cancelled",
+      "merge_failed",
+      "credit_checkout_button_shown",
+      "credit_checkout_button_clicked",
+      "credit_checkout_session_created",
+      "credit_checkout_opened",
+      "credit_checkout_completed",
+      "credit_checkout_failed",
+      "credit_checkout_cancelled",
+      "byo_unlock_button_shown",
+      "byo_unlock_button_clicked",
+      "byo_unlock_session_created",
+      "byo_unlock_opened",
+      "byo_unlock_completed",
+      "byo_unlock_failed",
+      "byo_unlock_cancelled",
       "url_download_started",
       "url_download_completed",
+      "url_download_caption_only",
       "url_download_cookie_required",
       "url_download_cancelled",
       "url_download_failed",
@@ -51,6 +88,7 @@ const productEventSchema = z
         "main_process_rejection",
         "renderer_process_gone",
         "child_process_gone",
+        "renderer_window_hung",
       ])
       .optional(),
     startupPhase: z
@@ -95,6 +133,27 @@ const productEventSchema = z
       ])
       .optional(),
     connectionContext: z.enum(["download_recovery", "settings"]).optional(),
+    mediaFailure: z.enum(["http_403"]).optional(),
+    packId: z.enum(["MICRO", "STARTER", "STANDARD", "PRO"]).optional(),
+    placement: z
+      .enum([
+        "zero-credit-banner",
+        "credit-ran-out-dialog",
+        "settings-credit-card",
+        "settings-byo",
+        "agent",
+      ])
+      .optional(),
+    failureReason: z
+      .enum([
+        "network_error",
+        "api_error",
+        "stripe_error",
+        "settlement_timeout",
+        "already_pending",
+        "unknown",
+      ])
+      .optional(),
   })
   .strict();
 
@@ -117,6 +176,31 @@ function flushInBackground(c: any): void {
     void flush;
   }
 }
+
+const preferenceSchema = z.object({
+  enabled: z.boolean(), revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+}).strict();
+
+router.get("/preferences", async (c) => {
+  const deviceId = await authenticatedDeviceId(c);
+  if (!deviceId) return c.json({ error: "Missing authorization" }, 401);
+  const result = await readAnalyticsPreference(c.env, `translator-device:${deviceId}`);
+  return result ? c.json(result) : c.json({ error: "Preferences temporarily unavailable" }, 503);
+});
+
+router.post("/preferences", async (c) => {
+  const deviceId = await authenticatedDeviceId(c);
+  if (!deviceId) return c.json({ error: "Missing authorization" }, 401);
+  try {
+    const input = preferenceSchema.parse(await c.req.json());
+    const result = await saveAnalyticsPreference(c.env, `translator-device:${deviceId}`, input);
+    return result ? c.json(result) : c.json({ error: "Preferences temporarily unavailable" }, 503);
+  } catch (error) {
+    if (error instanceof z.ZodError || error instanceof SyntaxError)
+      return c.json({ error: "Invalid preference" }, 400);
+    return c.json({ error: "Preferences temporarily unavailable" }, 503);
+  }
+});
 
 router.post("/events", async (c) => {
   const deviceId = await authenticatedDeviceId(c);
@@ -180,6 +264,30 @@ router.post("/events", async (c) => {
       input.failedArchitecture ||
       input.processReason,
     );
+    const isPurchaseDiagnostic =
+      input.event.startsWith("credit_checkout_") ||
+      input.event.startsWith("byo_unlock_");
+    const hasPurchaseFields = Boolean(
+      input.packId || input.placement || input.failureReason,
+    );
+    const isAdditionalWorkflow = [
+      "transcription_", "dubbing_", "summary_", "merge_",
+    ].some((prefix) => input.event.startsWith(prefix));
+    if (
+      (!isPurchaseDiagnostic && hasPurchaseFields) ||
+      ((isPurchaseDiagnostic || isAdditionalWorkflow) &&
+        (input.feature || input.workflow)) ||
+      (input.event.startsWith("byo_unlock_") && input.packId) ||
+      (input.failureReason && !input.event.endsWith("_failed"))
+    ) {
+      return c.json(
+        {
+          error: "Invalid request data",
+          message: "Event context does not match the declared desktop diagnostic",
+        },
+        400,
+      );
+    }
     const isProcessFailure =
       input.failureClass === "renderer_process_gone" ||
       input.failureClass === "child_process_gone";
@@ -220,7 +328,8 @@ router.post("/events", async (c) => {
       input.sourceType ||
       input.cookieCause ||
       input.downloadFailure ||
-      input.connectionContext,
+      input.connectionContext ||
+      input.mediaFailure,
     );
     const hasInvalidUrlEventShape =
       isUrlEvent &&
@@ -232,6 +341,10 @@ router.post("/events", async (c) => {
           Boolean(input.cookieCause) ||
         (input.event === "url_download_failed") !==
           Boolean(input.downloadFailure) ||
+        (input.event === "url_download_caption_only") !==
+          Boolean(input.mediaFailure) ||
+        (input.event === "url_download_caption_only" &&
+          input.sourceType !== "youtube") ||
         isUrlConnectionEvent !== Boolean(input.connectionContext));
     if (hasInvalidUrlEventShape) {
       return c.json(
@@ -257,9 +370,15 @@ router.post("/events", async (c) => {
       return c.json({ ok: true, duplicate: false, excluded: true }, 202);
     }
 
+    // Old app versions have no user choice. Acknowledge without collecting.
+    if (input.consentRevision === undefined) {
+      return c.json({ ok: true, duplicate: false, excluded: true }, 202);
+    }
     const result = await enqueueAnalyticsEventSafely(c.env, {
       eventId: `translator:${input.event}:${input.eventId}`,
       eventName: input.event,
+      occurredAt: input.occurredAt ? new Date(input.occurredAt) : new Date(),
+      consentRevision: input.consentRevision,
       subjectKey: `translator-device:${deviceId}`,
       params: {
         app_version: input.appVersion,
@@ -288,6 +407,17 @@ router.post("/events", async (c) => {
         ...(input.connectionContext
           ? { connection_context: input.connectionContext }
           : {}),
+        ...(input.mediaFailure ? { media_failure: input.mediaFailure } : {}),
+        ...(input.packId ? { pack_id: input.packId } : {}),
+        ...(input.placement ? { placement: input.placement } : {}),
+        ...(input.failureReason ? { failure_reason: input.failureReason } : {}),
+        // Client completion reports never supply purchase values or settlement IDs.
+        ...(isPurchaseDiagnostic
+          ? {
+              commerce_surface: "translator_desktop",
+              attribution_scope: "desktop_diagnostic",
+            }
+          : {}),
         engagement_time_msec: 1,
       },
     });
@@ -302,6 +432,7 @@ router.post("/events", async (c) => {
       );
     }
 
+    if (result === "excluded") return c.json({ ok: true, duplicate: false, excluded: true }, 202);
     flushInBackground(c);
     return c.json({ ok: true, duplicate: result === "duplicate" }, 202);
   } catch (error) {

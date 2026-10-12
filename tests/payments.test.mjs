@@ -1,3 +1,4 @@
+import { saveAnalyticsPreference } from "../src/lib/analytics-preferences.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { before, beforeEach } from "node:test";
@@ -1553,7 +1554,7 @@ test("checkout polling refuses sessions owned by another device", async () => {
   assert.equal(body.error, "Forbidden");
 });
 
-test("checkout and signed fulfillment produce one authoritative analytics purchase", async () => {
+for (const analyticsEnabled of [true, false]) test(`checkout fulfills once with analytics ${analyticsEnabled ? "on" : "off"}`, async () => {
   const deviceId = "99999999-0000-4000-8000-000000000010";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const sessionId = "cs_measurement_exact_once";
@@ -1570,6 +1571,7 @@ test("checkout and signed fulfillment produce one authoritative analytics purcha
   env.GA4_TRANSLATOR_MEASUREMENT_ID = "G-PAYMENTTEST";
   env.GA4_API_SECRET = "payment-test-secret";
   env.ANALYTICS_PSEUDONYM_SECRET = "payment-pseudonym-secret";
+  await saveAnalyticsPreference(env, `translator-device:${deviceId}`, { enabled: analyticsEnabled, revision: 1 });
   globalThis.fetch = async (_url, init) => {
     sentEvents.push(JSON.parse(String(init.body)).events[0]);
     return new Response(null, { status: 204 });
@@ -1646,6 +1648,13 @@ test("checkout and signed fulfillment produce one authoritative analytics purcha
       assert.equal(webhookResponse.status, 200);
     }
 
+    assert.equal(sqlite.prepare("SELECT count(*) AS n FROM stripe_fulfillments WHERE payment_intent_id = ?").get(paymentIntentId).n, 1);
+    if (!analyticsEnabled) {
+      assert.equal(count("SELECT COUNT(*) AS count FROM analytics_outbox"), 0);
+      assert.equal(sentEvents.length, 0);
+      assert.ok(sqlite.prepare("SELECT credit_balance FROM credits WHERE device_id = ?").get(deviceId).credit_balance > 0);
+      return;
+    }
     assert.equal(
       count(
         "SELECT COUNT(*) AS count FROM analytics_outbox WHERE event_name = 'begin_checkout'",
