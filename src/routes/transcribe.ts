@@ -115,9 +115,11 @@ const TRANSCRIPTION_RESERVE_PADDING_SECONDS = Math.max(
 );
 const TRANSCRIPTION_RESERVE_FLOOR_BYTES_PER_SECOND = Math.max(
   1,
-  // Reserve against compressed speech files too; 16 kbps audio is roughly 2000 B/s.
+  // The app uploads 64 kbps Opus for Scribe (~8000 B/s plus container overhead).
+  // A lower floor inflates the provisional hold several-fold and rejects users who
+  // can afford the job; the relay probes the real duration before vendor work.
   Number.parseInt(
-    process.env.TRANSCRIPTION_RESERVE_FLOOR_BYTES_PER_SECOND || "2000",
+    process.env.TRANSCRIPTION_RESERVE_FLOOR_BYTES_PER_SECOND || "8500",
     10
   )
 );
