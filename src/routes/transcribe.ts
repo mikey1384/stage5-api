@@ -380,7 +380,7 @@ function estimateReservationSecondsFromFileSize(fileSizeBytes: number): number {
 
 // This is only the worker-side provisional hold. The relay later probes the
 // uploaded media and performs an exact confirm before vendor work starts.
-function resolveInitialReservationSeconds({
+export function resolveInitialReservationSeconds({
   requestedDurationSeconds,
   fileSizeBytes,
 }: {
