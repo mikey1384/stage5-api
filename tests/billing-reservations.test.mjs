@@ -249,3 +249,41 @@ test("relay translation finalization settles legacy GPT-5.4 reservations at rese
   assert.equal(reservation?.status, "settled");
   assert.equal(reservation?.settled_spend, legacySpend);
 });
+
+test("refused holds are recorded with the balance at refusal; granted holds are not", async () => {
+  const deviceId = "rejection-monitor-device";
+  await creditDevice({ deviceId, packId: "MICRO" });
+
+  const refused = await reserveBillingCredits({
+    deviceId,
+    service: "transcription",
+    requestKey: "too-big",
+    spend: 80_000,
+    reason: "TRANSCRIBE_RESERVE",
+    meta: { reserveSeconds: 10_000 },
+  });
+  assert.deepEqual(refused, { ok: false, error: "insufficient-credits" });
+
+  const granted = await reserveBillingCredits({
+    deviceId,
+    service: "transcription",
+    requestKey: "fits",
+    spend: 1_000,
+    reason: "TRANSCRIBE_RESERVE",
+  });
+  assert.equal(granted.ok, true);
+
+  const rows = sqlite
+    .prepare("SELECT device_id, service, stage, requested_spend, balance, reason, meta FROM billing_rejections")
+    .all();
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ ...rows[0] }, {
+    device_id: deviceId,
+    service: "transcription",
+    stage: "reserve",
+    requested_spend: 80_000,
+    balance: 15_000,
+    reason: "TRANSCRIBE_RESERVE",
+    meta: JSON.stringify({ reserveSeconds: 10_000 }),
+  });
+});

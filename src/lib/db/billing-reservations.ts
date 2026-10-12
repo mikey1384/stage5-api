@@ -310,7 +310,7 @@ export async function confirmExistingBillingReservation({
   return { ok: true, reservation };
 }
 
-export async function increaseBillingReservation({
+async function increaseBillingReservationUnrecorded({
   deviceId,
   service,
   requestKey,
@@ -520,7 +520,7 @@ export async function increaseBillingReservation({
   });
 }
 
-export async function reserveBillingCredits({
+async function reserveBillingCreditsUnrecorded({
   deviceId,
   service,
   requestKey,
@@ -1137,4 +1137,77 @@ export async function releaseBillingReservation({
 
     return { ok: true, status: "released", refundedSpend: refund } as const;
   });
+}
+
+// Records a hold refused for insufficient balance. Monitoring must never
+// change the billing outcome, so failures here are logged and swallowed.
+async function recordBillingRejection({
+  deviceId,
+  service,
+  stage,
+  requestedSpend,
+  reason,
+  meta,
+}: {
+  deviceId: string;
+  service: string;
+  stage: "reserve" | "increase";
+  requestedSpend: number;
+  reason: string;
+  meta?: unknown;
+}): Promise<void> {
+  try {
+    await getDatabase()
+      .prepare(
+        `INSERT INTO billing_rejections
+           (device_id, service, stage, requested_spend, balance, reason, meta)
+         VALUES (?, ?, ?, ?, (SELECT credit_balance FROM credits WHERE device_id = ?), ?, ?)`
+      )
+      .bind(
+        deviceId,
+        service,
+        stage,
+        Math.ceil(requestedSpend),
+        deviceId,
+        reason,
+        serializeMeta(meta)
+      )
+      .run();
+  } catch (error) {
+    console.error("[billing] Failed to record billing rejection:", error);
+  }
+}
+
+export async function reserveBillingCredits(
+  args: Parameters<typeof reserveBillingCreditsUnrecorded>[0]
+): ReturnType<typeof reserveBillingCreditsUnrecorded> {
+  const result = await reserveBillingCreditsUnrecorded(args);
+  if (!result.ok && result.error === "insufficient-credits") {
+    await recordBillingRejection({
+      deviceId: args.deviceId,
+      service: args.service,
+      stage: "reserve",
+      requestedSpend: args.spend,
+      reason: args.reason,
+      meta: args.meta,
+    });
+  }
+  return result;
+}
+
+export async function increaseBillingReservation(
+  args: Parameters<typeof increaseBillingReservationUnrecorded>[0]
+): ReturnType<typeof increaseBillingReservationUnrecorded> {
+  const result = await increaseBillingReservationUnrecorded(args);
+  if (!result.ok && result.error === "insufficient-credits") {
+    await recordBillingRejection({
+      deviceId: args.deviceId,
+      service: args.service,
+      stage: "increase",
+      requestedSpend: args.requiredSpend,
+      reason: args.reason,
+      meta: args.meta,
+    });
+  }
+  return result;
 }
