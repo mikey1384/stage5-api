@@ -121,7 +121,7 @@ test("subtitle review falls back to GPT-5.5 when worker-side Anthropic review is
   );
 });
 
-test("subtitle draft remains on the default Stage5 translation model", () => {
+test("subtitle drafts use Haiku 5.5 when Anthropic is available, the default model otherwise", () => {
   assert.equal(
     resolveAuthoritativeTranslationModel({
       requestedModel: "claude-opus-4-6",
@@ -136,6 +136,15 @@ test("subtitle draft remains on the default Stage5 translation model", () => {
       canUseAnthropic: true,
       translationPhase: "draft",
       qualityMode: true,
+    }),
+    "claude-haiku-5-5",
+  );
+  assert.equal(
+    resolveAuthoritativeTranslationModel({
+      requestedModel: "gpt-5.1",
+      messages: [],
+      canUseAnthropic: false,
+      translationPhase: "draft",
     }),
     DEFAULT_STAGE5_TRANSLATION_MODEL,
   );

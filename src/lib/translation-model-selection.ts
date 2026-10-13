@@ -1,6 +1,7 @@
 import { isClaudeModel } from "./constants";
 import { isAllowedTranslationModel, normalizeTranslationModel } from "./pricing";
 import {
+  STAGE5_CLAUDE_HAIKU_5_5_MODEL,
   STAGE5_CLAUDE_OPUS_5_5_MODEL,
   STAGE5_REVIEW_TRANSLATION_MODEL,
 } from "./model-catalog";
@@ -101,8 +102,12 @@ export function resolveAuthoritativeTranslationModel({
             ? "review"
             : "draft";
 
+  // Drafts: Haiku 5.5 when Anthropic is available (2026-10-13 trial: about a
+  // tenth of GPT-5.1's cost); GPT-5.1 only as fallback. Mirrors the relay.
   if (effectivePhase !== "review") {
-    return normalizeTranslationModel(undefined);
+    return canUseAnthropic
+      ? STAGE5_CLAUDE_HAIKU_5_5_MODEL
+      : normalizeTranslationModel(undefined);
   }
 
   return canUseAnthropic
