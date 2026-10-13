@@ -26,8 +26,8 @@ const REVIEW_MESSAGES = [
   },
 ];
 
-test("subtitle review defaults to GPT-5.5 on the Stage5 credit path", () => {
-  for (const modelFamily of [undefined, "auto", "gpt"]) {
+test("subtitle review uses Opus 5.5 whenever Anthropic is available, GPT-5.5 only as fallback", () => {
+  for (const modelFamily of [undefined, "auto", "gpt", "claude"]) {
     for (const canUseAnthropic of [false, true]) {
       assert.equal(
         resolveAuthoritativeTranslationModel({
@@ -38,7 +38,7 @@ test("subtitle review defaults to GPT-5.5 on the Stage5 credit path", () => {
           translationPhase: "review",
           qualityMode: true,
         }),
-        STAGE5_REVIEW_TRANSLATION_MODEL,
+        canUseAnthropic ? "claude-opus-5-5" : STAGE5_REVIEW_TRANSLATION_MODEL,
       );
     }
   }
@@ -103,7 +103,7 @@ test("subtitle review honors the Anthropic family hint when worker-side Anthropi
       translationPhase: "review",
       qualityMode: true,
     }),
-    STAGE5_CLAUDE_OPUS_MODEL,
+    "claude-opus-5-5",
   );
 });
 

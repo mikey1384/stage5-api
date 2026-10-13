@@ -1,9 +1,8 @@
 import { isClaudeModel } from "./constants";
 import { isAllowedTranslationModel, normalizeTranslationModel } from "./pricing";
 import {
-  STAGE5_CLAUDE_OPUS_MODEL,
+  STAGE5_CLAUDE_OPUS_5_5_MODEL,
   STAGE5_REVIEW_TRANSLATION_MODEL,
-  normalizeStage5TranslationModel,
 } from "./model-catalog";
 
 export type TranslationModelFamily = "gpt" | "claude" | "auto";
@@ -16,9 +15,11 @@ export type TranslationChatMessage = {
 
 export const DEFAULT_TRANSLATION_MAX_COMPLETION_TOKENS = 16_000;
 export const EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS = 32_000;
-const STAGE5_ANTHROPIC_REVIEW_TRANSLATION_MODEL = normalizeStage5TranslationModel(
-  STAGE5_CLAUDE_OPUS_MODEL
-);
+// Credit-mode review uses Anthropic's current Opus at the comparable price
+// tier (2026-10-13 trial: about half the cost of GPT-5.5, more complete).
+// GPT-5.5 is only the fallback when Anthropic is unavailable. Mirrors
+// openai-relay resolveTranslationModel.
+const STAGE5_ANTHROPIC_REVIEW_TRANSLATION_MODEL = STAGE5_CLAUDE_OPUS_5_5_MODEL;
 
 export function isLikelySubtitleReviewMessages(
   messages: TranslationChatMessage[] | undefined
@@ -104,11 +105,7 @@ export function resolveAuthoritativeTranslationModel({
     return normalizeTranslationModel(undefined);
   }
 
-  const prefersClaudeReview =
-    canUseAnthropic &&
-    (modelFamily === "claude" || isClaudeModel(normalizedRequestedModel));
-
-  return prefersClaudeReview
+  return canUseAnthropic
     ? STAGE5_ANTHROPIC_REVIEW_TRANSLATION_MODEL
     : STAGE5_REVIEW_TRANSLATION_MODEL;
 }
