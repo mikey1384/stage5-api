@@ -13,6 +13,7 @@ import dubRouter from "./routes/dub";
 import entitlementsRouter from "./routes/entitlements";
 import authRouter from "./routes/auth";
 import analyticsRouter from "./routes/analytics";
+import usageRouter from "./routes/usage";
 import { ensureDatabase } from "./lib/db";
 import { runReconciliation } from "./lib/reconciliation";
 import { flushAnalyticsOutbox } from "./lib/product-analytics";
@@ -98,6 +99,7 @@ app.route("/transcribe", transcribeRouter);
 app.route("/translate", translateRouter);
 app.route("/dub", dubRouter);
 app.route("/analytics", analyticsRouter);
+app.route("/usage", usageRouter);
 app.route("/admin", adminRouter);
 
 // Pretty printing only AFTER routes so it never eats request bodies
