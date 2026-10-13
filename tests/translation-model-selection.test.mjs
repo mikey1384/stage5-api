@@ -152,3 +152,24 @@ test("non-subtitle translation requests still honor explicit allowed models", ()
     STAGE5_CLAUDE_OPUS_MODEL,
   );
 });
+
+test("current Claude generation is priced and allowed; Sonnet 5 uses its list price", async () => {
+  const { isAllowedTranslationModel, tokensToCredits } = await import("../src/lib/pricing.ts");
+  const { resolveTranslationReservationMaxCompletionTokens, EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS } =
+    await import("../src/lib/translation-model-selection.ts");
+  assert.equal(isAllowedTranslationModel("claude-sonnet-5-5"), true);
+  assert.equal(isAllowedTranslationModel("claude-opus-5-5"), true);
+  // Same tokens cost the same on Sonnet 5 and Sonnet 5.5 ($2 / $10).
+  const sonnet5 = tokensToCredits({ prompt: 1000, completion: 300, model: "claude-sonnet-5" });
+  const sonnet55 = tokensToCredits({ prompt: 1000, completion: 300, model: "claude-sonnet-5-5" });
+  assert.equal(sonnet5, sonnet55);
+  // Opus 5.5 ($4 / $20) is cheaper than Opus 4.8 ($5 / $25).
+  assert(
+    tokensToCredits({ prompt: 1000, completion: 300, model: "claude-opus-5-5" }) <
+      tokensToCredits({ prompt: 1000, completion: 300, model: "claude-opus-4-8" })
+  );
+  assert.equal(
+    resolveTranslationReservationMaxCompletionTokens({ model: "claude-opus-5-5" }),
+    EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS
+  );
+});

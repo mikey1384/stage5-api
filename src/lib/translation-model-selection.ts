@@ -113,6 +113,8 @@ export function resolveAuthoritativeTranslationModel({
     : STAGE5_REVIEW_TRANSLATION_MODEL;
 }
 
+const ALWAYS_THINKING_CLAUDE_MODELS = new Set<string>(["claude-opus-5-5"]);
+
 export function resolveTranslationReservationMaxCompletionTokens({
   model,
   reasoning,
@@ -121,9 +123,14 @@ export function resolveTranslationReservationMaxCompletionTokens({
   reasoning?: unknown;
 }): number {
   const effort = String((reasoning as any)?.effort || "").trim().toLowerCase();
+  // Opus 5.5 thinks on every request (it can't be disabled), so it needs the
+  // extended allowance. Mirrors openai-relay's claudeModelAlwaysThinks.
   if (
     isClaudeModel(model) &&
-    (effort === "medium" || effort === "high" || effort === "xhigh")
+    (effort === "medium" ||
+      effort === "high" ||
+      effort === "xhigh" ||
+      ALWAYS_THINKING_CLAUDE_MODELS.has(model))
   ) {
     return EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS;
   }

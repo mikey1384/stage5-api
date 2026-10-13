@@ -9,6 +9,10 @@ export const STAGE5_LEGACY_REVIEW_TRANSLATION_MODEL = "gpt-5.4";
 export const STAGE5_REVIEW_TRANSLATION_MODEL = "gpt-5.5";
 export const STAGE5_CLAUDE_SONNET_MODEL = "claude-sonnet-5";
 export const STAGE5_CLAUDE_OPUS_MODEL = "claude-opus-4-8";
+// Current Claude generation, priced (and so allowed) for measurement before
+// becoming the defaults (Sonnet 5.5 for drafts, Opus 5.5 for review/summary).
+export const STAGE5_CLAUDE_SONNET_5_5_MODEL = "claude-sonnet-5-5";
+export const STAGE5_CLAUDE_OPUS_5_5_MODEL = "claude-opus-5-5";
 export const STAGE5_ELEVENLABS_SCRIBE_MODEL = "elevenlabs-scribe";
 // Retired OpenAI transcription model (whisper-1 shuts down 2027-02-26). Every
 // transcription now runs on ElevenLabs Scribe and is reserved/billed at the
@@ -67,13 +71,22 @@ export const STAGE5_TRANSLATION_MODEL_PRICES = {
     in: 5 / 1_000_000, // $5.00 per million tokens
     out: 30 / 1_000_000, // $30.00 per million tokens
   },
+  // Anthropic list price is $2 / $10 (it was entered here as $3 / $15).
   [STAGE5_CLAUDE_SONNET_MODEL]: {
-    in: 3 / 1_000_000, // $3.00 per million tokens
-    out: 15 / 1_000_000, // $15.00 per million tokens
+    in: 2 / 1_000_000, // $2.00 per million tokens
+    out: 10 / 1_000_000, // $10.00 per million tokens
   },
   [STAGE5_CLAUDE_OPUS_MODEL]: {
     in: 5 / 1_000_000, // $5.00 per million tokens
     out: 25 / 1_000_000, // $25.00 per million tokens
+  },
+  [STAGE5_CLAUDE_SONNET_5_5_MODEL]: {
+    in: 2 / 1_000_000, // $2.00 per million tokens
+    out: 10 / 1_000_000, // $10.00 per million tokens
+  },
+  [STAGE5_CLAUDE_OPUS_5_5_MODEL]: {
+    in: 4 / 1_000_000, // $4.00 per million tokens
+    out: 20 / 1_000_000, // $20.00 per million tokens
   },
 } as const;
 
