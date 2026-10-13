@@ -8,6 +8,7 @@ import {
   beginOrReplayRecoveryIssue,
   getUserByOpaqueApiToken,
   isLikelyLegacyDeviceId,
+  isInternalDevice,
 } from "../lib/db";
 import {
   deleteReplayArtifact,
@@ -248,6 +249,9 @@ router.post(RELAY_BILLING_ROUTE_SEGMENTS.AUTHORIZE, async (c) => {
       authorized: true,
       deviceId: result.deviceId,
       creditBalance: result.creditBalance,
+      // Lets the relay honor internal-only controls (model trials) for
+      // Stage5's own devices; customers never get them.
+      internal: await isInternalDevice({ deviceId: result.deviceId }),
     });
   } catch (error: any) {
     console.error("[auth/authorize] Error:", error);

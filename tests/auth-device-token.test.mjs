@@ -783,3 +783,33 @@ test("device-token replay schema does not persist pending raw credentials", () =
   assert.ok(!columns.includes("pending_api_token"));
   assert.ok(!columns.includes("pending_recovery_token"));
 });
+
+test("relay authorization marks only internal devices as internal", async () => {
+  const deviceId = "10000000-0000-4000-8000-0000000000aa";
+  const { apiToken } = await registerDeviceApiCredentials({ deviceId });
+  await creditDevice({ deviceId, packId: "MICRO" });
+  const authorize = async () => {
+    const response = await apiRequest("/auth/authorize", {
+      method: "POST",
+      headers: {
+        "X-Relay-Secret": "relay-secret",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ apiKey: apiToken, service: "translation" }),
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+
+  const customer = await authorize();
+  assert.equal(customer.deviceId, deviceId);
+  assert.equal(customer.internal, false);
+
+  sqlite
+    .prepare(
+      "INSERT INTO internal_devices (device_id, classification, source) VALUES (?, 'dev', 'test')"
+    )
+    .run(deviceId);
+  const internal = await authorize();
+  assert.equal(internal.internal, true);
+});
