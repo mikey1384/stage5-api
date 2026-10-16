@@ -21,6 +21,7 @@ export interface CreditRecord {
   device_id: string;
   credit_balance: number;
   updated_at: string | null;
+  monthly_free_month?: string | null;
 }
 
 function buildZeroBalanceCreditRecord(deviceId: string): CreditRecord {
@@ -88,11 +89,12 @@ export const grantWelcomeCredits = async ({
   // balance checks can't grant twice.
   const inserted = await db
     .prepare(
-      `INSERT INTO credits (device_id, credit_balance, updated_at)
-       VALUES (?, ?, CURRENT_TIMESTAMP)
+      `INSERT INTO credits (device_id, credit_balance, monthly_free_month, updated_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(device_id) DO NOTHING`
     )
-    .bind(deviceId, WELCOME_CREDITS)
+    // The welcome grant covers its first month; monthly top-ups start next month.
+    .bind(deviceId, WELCOME_CREDITS, freeCreditMonth(new Date()))
     .run();
   if (!inserted.meta?.changes) return null;
 
@@ -104,6 +106,91 @@ export const grantWelcomeCredits = async ({
   });
   console.log(`Granted ${WELCOME_CREDITS} welcome credits to device ${deviceId}`);
   return getCredits({ deviceId });
+};
+
+// Each calendar month, a device's first balance check tops it up to about one
+// short video (~5 min transcribed and translated). A top-up never stacks:
+// devices already at or above it get nothing, and unused credit does not carry
+// into a larger next-month grant.
+export const MONTHLY_FREE_CREDITS = 2_500;
+export const MONTHLY_FREE_MAX_PER_IP_PER_DAY = 5;
+export const MONTHLY_FREE_MAX_PER_DAY = 500;
+
+export const freeCreditMonth = (now: Date): string =>
+  now.toISOString().slice(0, 7);
+
+export const nextFreeCreditRefresh = (now: Date): string =>
+  new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
+    .toISOString()
+    .slice(0, 10);
+
+export const grantMonthlyFreeCredits = async ({
+  deviceId,
+  ipHash,
+  now = new Date(),
+}: {
+  deviceId: string;
+  ipHash: string | null;
+  now?: Date;
+}): Promise<{ record: CreditRecord | null; granted: number }> => {
+  const db = getDatabase();
+  const month = freeCreditMonth(now);
+  const record = await getCredits({ deviceId });
+  if (!record || record.monthly_free_month === month) {
+    return { record, granted: 0 };
+  }
+  const balance = Number(record.credit_balance) || 0;
+  if (balance >= MONTHLY_FREE_CREDITS) {
+    // Decided for this month: someone holding enough credit gets no top-up.
+    await db
+      .prepare(
+        `UPDATE credits SET monthly_free_month = ?
+          WHERE device_id = ? AND monthly_free_month IS NOT ?`
+      )
+      .bind(month, deviceId, month)
+      .run();
+    return { record: { ...record, monthly_free_month: month }, granted: 0 };
+  }
+
+  const recent = (await db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN json_extract(meta, '$.ipHash') = ? THEN 1 ELSE 0 END) AS fromIp
+         FROM credit_ledger
+        WHERE reason = 'MONTHLY_FREE' AND created_at > datetime('now', '-1 day')`
+    )
+    .bind(ipHash ?? "")
+    .first()) as { total: number | null; fromIp: number | null } | null;
+  // Over a cap: leave the month undecided so a later check can still grant.
+  if (Number(recent?.total ?? 0) >= MONTHLY_FREE_MAX_PER_DAY) {
+    return { record, granted: 0 };
+  }
+  if (ipHash && Number(recent?.fromIp ?? 0) >= MONTHLY_FREE_MAX_PER_IP_PER_DAY) {
+    return { record, granted: 0 };
+  }
+
+  const delta = MONTHLY_FREE_CREDITS - balance;
+  // Only the request that still sees the same balance and an undecided month
+  // grants, so concurrent balance checks or a job settling meanwhile can't
+  // double-grant or overshoot.
+  const updated = await db
+    .prepare(
+      `UPDATE credits
+          SET credit_balance = ?, monthly_free_month = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE device_id = ? AND credit_balance = ? AND monthly_free_month IS NOT ?`
+    )
+    .bind(MONTHLY_FREE_CREDITS, month, deviceId, balance, month)
+    .run();
+  if (!updated.meta?.changes) {
+    return { record: await getCredits({ deviceId }), granted: 0 };
+  }
+  await recordLedger({
+    deviceId,
+    delta,
+    reason: "MONTHLY_FREE",
+    meta: { ipHash, month, toppedUpFrom: balance },
+  });
+  return { record: await getCredits({ deviceId }), granted: delta };
 };
 
 // Add credits to a device (upsert)

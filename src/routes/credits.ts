@@ -4,8 +4,12 @@ import {
   CreditTransferError,
   createTransferCode,
   getCredits,
+  freeCreditMonth,
   getLedgerEntries,
+  grantMonthlyFreeCredits,
   grantWelcomeCredits,
+  MONTHLY_FREE_CREDITS,
+  nextFreeCreditRefresh,
   redeemTransferCode,
 } from "../lib/db";
 import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
@@ -46,13 +50,22 @@ router.get("/:deviceId", async (c) => {
 
   try {
     // A device that has never had credits gets its one-time welcome grant here,
-    // on the balance check every client makes at launch.
+    // on the balance check every client makes at launch; existing devices get
+    // their monthly free top-up the same way.
+    const ipHash = clientIpHash(c.req.header("CF-Connecting-IP"));
+    const existing = await getCredits({ deviceId });
+    const monthly = existing
+      ? await grantMonthlyFreeCredits({ deviceId, ipHash })
+      : { record: null, granted: 0 };
     const credits =
-      (await getCredits({ deviceId })) ??
-      (await grantWelcomeCredits({
-        deviceId,
-        ipHash: clientIpHash(c.req.header("CF-Connecting-IP")),
-      }));
+      monthly.record ?? existing ?? (await grantWelcomeCredits({ deviceId, ipHash }));
+    const now = new Date();
+    const monthlyFree = {
+      credits: MONTHLY_FREE_CREDITS,
+      month: freeCreditMonth(now),
+      refreshesOn: nextFreeCreditRefresh(now),
+      grantedNow: monthly.granted,
+    };
 
     // Backward-compatible shape for older clients: include hoursBalance and creditsPerHour
     const perHour = CREDITS_PER_AUDIO_HOUR;
@@ -64,6 +77,7 @@ router.get("/:deviceId", async (c) => {
         hoursBalance: 0,
         creditsPerHour: perHour,
         updatedAt: null,
+        monthlyFree,
       });
     }
 
@@ -74,6 +88,7 @@ router.get("/:deviceId", async (c) => {
       hoursBalance,
       creditsPerHour: perHour,
       updatedAt: credits.updated_at,
+      monthlyFree,
     });
   } catch (error) {
     console.error("Error fetching credits:", error);
