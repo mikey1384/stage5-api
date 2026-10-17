@@ -273,9 +273,28 @@ function resolveStripeCheckoutLocale(
   return baseMatch ?? "en";
 }
 
+export const CHECKOUT_PLACEMENTS = [
+  "zero-credit-banner",
+  "credit-ran-out-dialog",
+  "settings-credit-card",
+  "settings-byo",
+  "agent",
+  "free-preview-offer",
+] as const;
+
 const createSessionSchema = z.object({
   packId: z.enum(PACK_IDS),
   deviceId: z.string().uuid("Device ID must be a valid UUID"),
+  // Where the checkout started; unknown values are dropped, not rejected,
+  // so a newer app never loses a sale to an older server.
+  placement: z
+    .string()
+    .optional()
+    .transform((value) =>
+      (CHECKOUT_PLACEMENTS as readonly string[]).includes(value ?? "")
+        ? value
+        : undefined,
+    ),
   locale: z.string().trim().min(1).max(24).optional(),
   country: z.string().trim().min(2).max(2).optional(),
 });
@@ -345,6 +364,7 @@ async function recordCheckoutSessionCreatedOrThrow(
     packId?: string | null;
     entitlement?: string | null;
     creditsDelta?: number | null;
+    placement?: string | null;
   },
 ): Promise<void> {
   try {
@@ -425,7 +445,7 @@ router.post("/create-session", async (c) => {
   };
   try {
     const body = await c.req.json();
-    const { packId, deviceId, locale, country } =
+    const { packId, deviceId, locale, country, placement } =
       createSessionSchema.parse(body);
     const checkoutCountry = resolveCheckoutCountry(
       country,
@@ -471,6 +491,7 @@ router.post("/create-session", async (c) => {
         packId,
         credits: pack.credits.toString(),
         checkoutReturnId,
+        ...(placement ? { placement } : {}),
       },
       customer_creation: "if_required",
       payment_intent_data: {
@@ -496,6 +517,7 @@ router.post("/create-session", async (c) => {
       kind: "credits",
       packId,
       creditsDelta: pack.credits,
+      placement: placement ?? null,
     });
     await recordCheckoutStarted(c, {
       sessionId: session.id,

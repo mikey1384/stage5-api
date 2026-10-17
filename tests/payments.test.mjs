@@ -477,6 +477,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
       deviceId,
       packId: "MICRO",
       locale: "en",
+      placement: "free-preview-offer",
     }),
   });
   assert.equal(createPack.status, 200);
@@ -485,7 +486,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.match(createPackJson.returnId, /^[a-zA-Z0-9_-]{16,128}$/);
   const packCheckoutRow = sqlite
     .prepare(
-      `SELECT kind, status, pack_id, credits_delta, checkout_return_id
+      `SELECT kind, status, pack_id, credits_delta, checkout_return_id, placement
        FROM checkout_sessions
        WHERE checkout_session_id = ?`,
     )
@@ -498,6 +499,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
       pack_id: "MICRO",
       credits_delta: packs.MICRO.credits,
       checkout_return_id: createPackJson.returnId,
+      placement: "free-preview-offer",
     },
   );
 
@@ -613,10 +615,13 @@ test("Korean credit checkout keeps USD price IDs and disables adaptive pricing",
       deviceId,
       packId: "STANDARD",
       locale: "ko-KR",
+      // An unknown placement (newer app) is dropped, never a refused sale.
+      placement: "some-future-surface",
     }),
   });
 
   assert.equal(response.status, 200);
+  assert.equal(createdParams[0]?.metadata?.placement, undefined);
   assert.equal((await response.json()).sessionId, "cs_test_korean_pack");
   assert.equal("payment_method_types" in createdParams[0], false);
   assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });

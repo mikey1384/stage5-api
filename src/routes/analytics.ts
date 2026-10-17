@@ -53,6 +53,8 @@ export const PRODUCT_EVENT_NAMES = [
   "byo_unlock_failed",
   "byo_unlock_cancelled",
   "free_preview_ready",
+  "free_preview_offer_clicked",
+  "free_preview_resumed",
   "free_preview_dismissed",
   "free_preview_completed",
   "free_preview_failed",

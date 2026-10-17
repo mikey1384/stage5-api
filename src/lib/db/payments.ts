@@ -172,6 +172,7 @@ export async function recordCheckoutSessionCreated({
   packId = null,
   entitlement = null,
   creditsDelta = null,
+  placement = null,
 }: {
   checkoutSessionId: string;
   checkoutReturnId?: string | null;
@@ -180,6 +181,7 @@ export async function recordCheckoutSessionCreated({
   packId?: string | null;
   entitlement?: string | null;
   creditsDelta?: number | null;
+  placement?: string | null;
 }): Promise<void> {
   const db = getDatabase();
   await db
@@ -193,10 +195,11 @@ export async function recordCheckoutSessionCreated({
          pack_id,
          entitlement,
          credits_delta,
+         placement,
          created_at,
          updated_at
        )
-       VALUES (?, ?, ?, ?, 'created', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
        ON CONFLICT(checkout_session_id) DO UPDATE SET
          checkout_return_id = COALESCE(excluded.checkout_return_id, checkout_sessions.checkout_return_id),
          device_id = excluded.device_id,
@@ -204,6 +207,7 @@ export async function recordCheckoutSessionCreated({
          pack_id = excluded.pack_id,
          entitlement = excluded.entitlement,
          credits_delta = excluded.credits_delta,
+         placement = COALESCE(excluded.placement, checkout_sessions.placement),
          updated_at = CURRENT_TIMESTAMP`
     )
     .bind(
@@ -213,7 +217,8 @@ export async function recordCheckoutSessionCreated({
       kind,
       packId,
       entitlement,
-      typeof creditsDelta === "number" ? creditsDelta : null
+      typeof creditsDelta === "number" ? creditsDelta : null,
+      placement
     )
     .run();
 }
