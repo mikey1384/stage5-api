@@ -52,6 +52,10 @@ export const PRODUCT_EVENT_NAMES = [
   "byo_unlock_completed",
   "byo_unlock_failed",
   "byo_unlock_cancelled",
+  "free_preview_ready",
+  "free_preview_dismissed",
+  "free_preview_completed",
+  "free_preview_failed",
   "url_download_started",
   "url_download_completed",
   "url_download_caption_only",
@@ -144,6 +148,7 @@ const productEventSchema = z
         "settings-credit-card",
         "settings-byo",
         "agent",
+        "free-preview-offer",
       ])
       .optional(),
     failureReason: z
