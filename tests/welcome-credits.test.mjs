@@ -118,3 +118,28 @@ test("grants are capped per day overall", async () => {
   for (let i = 0; i < WELCOME_MAX_PER_DAY; i++) insert.run(randomUUID(), WELCOME_CREDITS, JSON.stringify({ ipHash: `h${i}` }));
   assert.equal((await balance(await newDevice(), "192.0.2.50")).creditBalance, 0);
 });
+
+test("dev and test launches are marked on the welcome grant; anything else is not", async () => {
+  const fetchWith = async (build) => {
+    const device = await newDevice();
+    const headers = {
+      Authorization: `Bearer ${device.token}`,
+      "CF-Connecting-IP": `198.51.100.${Math.floor(Math.random() * 200) + 1}`,
+    };
+    if (build !== undefined) headers["X-Stage5-App-Build"] = build;
+    const res = await worker.fetch(
+      new Request(`http://localhost/credits/${device.deviceId}`, { headers }),
+      env,
+      ctx,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    // The mark never changes what the device gets.
+    assert.equal(body.creditBalance, WELCOME_CREDITS);
+    return JSON.parse(ledger(device.deviceId)[0].meta);
+  };
+  assert.equal((await fetchWith("dev")).build, "dev");
+  assert.equal((await fetchWith("test")).build, "test");
+  assert.equal((await fetchWith("release")).build, undefined);
+  assert.equal((await fetchWith(undefined)).build, undefined);
+});

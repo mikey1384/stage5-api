@@ -15,8 +15,16 @@ import {
 import { CREDITS_PER_AUDIO_HOUR } from "../lib/pricing";
 import { uuidSchema } from "../lib/schemas";
 import { bearerAuth, getErrorMessage, type AuthVariables } from "../lib/middleware";
+import type { AppBuildKind } from "../lib/db/credits";
+import { WIRE_APP_BUILD_HEADER } from "../shared/wire-protocol";
 
 const router = new Hono<{ Variables: AuthVariables }>();
+
+// Dev and scripted test launches say so, so their welcome grants can be left
+// out of funnel numbers. Anything else counts as a real install.
+function appBuildKind(value: string | undefined): AppBuildKind | null {
+  return value === "dev" || value === "test" ? value : null;
+}
 
 // The welcome grant is capped per client IP; only a truncated hash is stored.
 function clientIpHash(ip: string | undefined): string | null {
@@ -58,7 +66,13 @@ router.get("/:deviceId", async (c) => {
       ? await grantMonthlyFreeCredits({ deviceId, ipHash })
       : { record: null, granted: 0 };
     const credits =
-      monthly.record ?? existing ?? (await grantWelcomeCredits({ deviceId, ipHash }));
+      monthly.record ??
+      existing ??
+      (await grantWelcomeCredits({
+        deviceId,
+        ipHash,
+        build: appBuildKind(c.req.header(WIRE_APP_BUILD_HEADER)),
+      }));
     const now = new Date();
     const monthlyFree = {
       credits: MONTHLY_FREE_CREDITS,

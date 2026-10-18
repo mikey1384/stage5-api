@@ -58,12 +58,17 @@ export const WELCOME_CREDITS = 6_300;
 export const WELCOME_MAX_PER_IP_PER_DAY = 2;
 export const WELCOME_MAX_PER_DAY = 150;
 
+export type AppBuildKind = "dev" | "test";
+
 export const grantWelcomeCredits = async ({
   deviceId,
   ipHash,
+  build = null,
 }: {
   deviceId: string;
   ipHash: string | null;
+  /** Set for dev/test launches; measurement queries skip those rows. */
+  build?: AppBuildKind | null;
 }): Promise<CreditRecord | null> => {
   const db = getDatabase();
 
@@ -102,7 +107,7 @@ export const grantWelcomeCredits = async ({
     deviceId,
     delta: WELCOME_CREDITS,
     reason: "WELCOME",
-    meta: { ipHash },
+    meta: build ? { ipHash, build } : { ipHash },
   });
   console.log(`Granted ${WELCOME_CREDITS} welcome credits to device ${deviceId}`);
   return getCredits({ deviceId });
