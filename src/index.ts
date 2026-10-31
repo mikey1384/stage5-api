@@ -20,6 +20,7 @@ import { flushAnalyticsOutbox } from "./lib/product-analytics";
 import { redactDeliveredAnalyticsDetails } from "./lib/analytics-retention";
 import { minimumTranslatorVersionGate } from "./lib/translator-version-gate";
 import { runBillingStorageCleanup } from "./lib/billing-storage-cleanup";
+import { runCheckoutSweep } from "./lib/checkout-sweep";
 import type { Stage5ApiBindings } from "./types/env";
 
 const app = new Hono<{ Bindings: Stage5ApiBindings }>();
@@ -142,6 +143,27 @@ export default {
     await ensureDatabase(env);
     ctx.waitUntil(
       (async () => {
+        if (env.CHECKOUT_SWEEP_ENABLED !== "0" && env.STRIPE_SECRET_KEY) {
+          try {
+            const sweep = await runCheckoutSweep(env);
+            if (
+              sweep.fulfilled > 0 ||
+              sweep.expired > 0 ||
+              sweep.alerted > 0 ||
+              sweep.errors.length > 0
+            ) {
+              console.log(
+                `[cron/checkout-sweep] scanned=${sweep.scanned} fulfilled=${sweep.fulfilled} expired=${sweep.expired} alerted=${sweep.alerted} errors=${sweep.errors.length}`,
+              );
+            }
+            for (const error of sweep.errors) {
+              console.error(`[cron/checkout-sweep] ${error}`);
+            }
+          } catch (error: any) {
+            console.error("[cron/checkout-sweep] Failed:", error?.message || error);
+          }
+        }
+
         try {
           const retention = await redactDeliveredAnalyticsDetails();
           if (retention.redacted > 0) {

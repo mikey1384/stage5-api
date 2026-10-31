@@ -8,6 +8,7 @@ import {
   getCheckoutSessionRecordByReturnId,
   getUserByApiKey,
   markCheckoutSessionCancelled,
+  markCheckoutSessionExpired,
   markEventProcessedIfNew,
   recordCheckoutSessionCreated,
 } from "../lib/db";
@@ -16,6 +17,11 @@ import {
   sendPaymentAlert,
 } from "../lib/payment-alerts";
 import type { Stage5ApiBindings } from "../types/env";
+import {
+  BACKSTOP_POLL_EVENT_TYPE,
+  fulfillPaidCheckoutSession,
+  isCheckoutSessionPaid,
+} from "../lib/checkout-fulfillment";
 import {
   enqueueAnalyticsEventSafely,
   flushAnalyticsOutbox,
@@ -1015,10 +1021,71 @@ router.get("/session/:sessionId", async (c) => {
       );
     }
 
-    const localCheckout = await getCheckoutSessionRecord({
+    let localCheckout = await getCheckoutSessionRecord({
       checkoutSessionId: session.id,
       deviceId: authDeviceId,
     });
+
+    // Backstop: Stripe says paid but the webhook has not fulfilled yet (slow,
+    // failing, or misconfigured endpoint). Fulfilment is idempotent per
+    // PaymentIntent, so racing the webhook grants once.
+    if (
+      isCheckoutSessionPaid(session.payment_status) &&
+      localCheckout?.status !== "fulfilled"
+    ) {
+      try {
+        const result = await fulfillPaidCheckoutSession({
+          env: c.env,
+          session,
+          stripeEventId: null,
+          stripeEventType: BACKSTOP_POLL_EVENT_TYPE,
+        });
+        if (result.outcome === "applied") {
+          console.warn(
+            `[checkout-backstop] Poll fulfilled paid session ${session.id} before its webhook`,
+          );
+          flushAnalyticsInBackground(c);
+        } else if (result.outcome === "invalid_metadata") {
+          await sendPaymentAlert(c.env, {
+            title: "Paid checkout has unusable metadata",
+            severity: "critical",
+            context: {
+              source: BACKSTOP_POLL_EVENT_TYPE,
+              reason: result.reason,
+              ...checkoutSessionFailureContext(session),
+            },
+          });
+        }
+      } catch (error) {
+        console.error("[checkout-backstop] Poll fulfilment failed:", error);
+        await sendPaymentAlert(c.env, {
+          title: "Paid checkout could not be fulfilled from status poll",
+          severity: "critical",
+          context: {
+            source: BACKSTOP_POLL_EVENT_TYPE,
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+            ...checkoutSessionFailureContext(session),
+          },
+        });
+      }
+      localCheckout = await getCheckoutSessionRecord({
+        checkoutSessionId: session.id,
+        deviceId: authDeviceId,
+      });
+    } else if (
+      session.status === "expired" &&
+      localCheckout?.status === "created"
+    ) {
+      await markCheckoutSessionExpired({
+        checkoutSessionId: session.id,
+        stripeEventType: "backstop.session_poll_expired",
+      });
+      localCheckout = await getCheckoutSessionRecord({
+        checkoutSessionId: session.id,
+        deviceId: authDeviceId,
+      });
+    }
 
     return c.json({
       sessionId: session.id,

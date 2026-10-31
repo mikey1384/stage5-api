@@ -20,6 +20,10 @@ export type Stage5ApiBindings = {
   PAYMENT_ALERTS_ENABLED?: string;
   PAYMENT_ALERT_EMAIL_TO?: string;
   PAYMENT_ALERT_EMAIL_FROM?: string;
+  /** "0" turns off the scheduled paid-but-unfulfilled checkout sweep. */
+  CHECKOUT_SWEEP_ENABLED?: string;
+  /** Minutes after payment before an unfulfilled checkout alerts (default 10). */
+  CHECKOUT_UNFULFILLED_ALERT_MINUTES?: string;
   RECONCILE_CRON_ENABLED?: string;
   RECONCILE_CRON_DRY_RUN?: string;
   DIRECT_REPLAY_RETENTION_HOURS?: string;

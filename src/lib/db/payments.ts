@@ -111,6 +111,11 @@ export interface CheckoutSessionRecord {
   created_at: string | null;
   updated_at: string | null;
   fulfilled_at: string | null;
+  last_payment_error_code: string | null;
+  last_payment_decline_code: string | null;
+  last_payment_method_type: string | null;
+  payment_attempt_failures: number;
+  expired_at: string | null;
 }
 
 function serializeMeta(meta: unknown): string {
@@ -161,6 +166,20 @@ function normalizeCheckoutSessionRecord(
     updated_at: typeof row.updated_at === "string" ? row.updated_at : null,
     fulfilled_at:
       typeof row.fulfilled_at === "string" ? row.fulfilled_at : null,
+    last_payment_error_code:
+      typeof row.last_payment_error_code === "string"
+        ? row.last_payment_error_code
+        : null,
+    last_payment_decline_code:
+      typeof row.last_payment_decline_code === "string"
+        ? row.last_payment_decline_code
+        : null,
+    last_payment_method_type:
+      typeof row.last_payment_method_type === "string"
+        ? row.last_payment_method_type
+        : null,
+    payment_attempt_failures: Number(row.payment_attempt_failures ?? 0) || 0,
+    expired_at: typeof row.expired_at === "string" ? row.expired_at : null,
   };
 }
 
@@ -797,4 +816,141 @@ export async function fulfillByoOpenAiUnlock({
     }
     throw error;
   }
+}
+
+export type CheckoutPaymentFailureInput = {
+  checkoutSessionId: string;
+  errorCode?: string | null;
+  declineCode?: string | null;
+  errorMessage?: string | null;
+  paymentMethodType?: string | null;
+};
+
+// Records why a payment attempt failed without changing the checkout status:
+// Stripe keeps the session open so the buyer can retry with another method.
+export async function recordCheckoutPaymentFailure({
+  checkoutSessionId,
+  errorCode = null,
+  declineCode = null,
+  errorMessage = null,
+  paymentMethodType = null,
+}: CheckoutPaymentFailureInput): Promise<boolean> {
+  const db = getDatabase();
+  const result = await db
+    .prepare(
+      `UPDATE checkout_sessions
+       SET last_payment_error_code = ?,
+           last_payment_decline_code = ?,
+           last_payment_error_message = ?,
+           last_payment_method_type = ?,
+           last_payment_error_at = CURRENT_TIMESTAMP,
+           payment_attempt_failures = COALESCE(payment_attempt_failures, 0) + 1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE checkout_session_id = ?
+         AND status != 'fulfilled'`
+    )
+    .bind(
+      errorCode,
+      declineCode,
+      errorMessage ? errorMessage.slice(0, 500) : null,
+      paymentMethodType,
+      checkoutSessionId
+    )
+    .run();
+  return Number(result?.meta?.changes ?? 0) > 0;
+}
+
+// Stripe expired the session (24 h default) without a payment. The reason
+// keeps the last decline, if any, so "left without trying" and "tried and was
+// declined" stay distinguishable.
+export async function markCheckoutSessionExpired({
+  checkoutSessionId,
+  stripeEventId = null,
+  stripeEventType,
+}: {
+  checkoutSessionId: string;
+  stripeEventId?: string | null;
+  stripeEventType: string;
+}): Promise<boolean> {
+  const db = getDatabase();
+  const result = await db
+    .prepare(
+      `UPDATE checkout_sessions
+       SET status = 'cancelled',
+           expired_at = COALESCE(expired_at, CURRENT_TIMESTAMP),
+           stripe_event_id = ?,
+           stripe_event_type = ?,
+           error_message = CASE
+             WHEN COALESCE(payment_attempt_failures, 0) > 0 THEN
+               'expired after ' || payment_attempt_failures ||
+               ' failed payment attempt(s); last: ' ||
+               COALESCE(last_payment_decline_code, last_payment_error_code, 'unknown')
+             ELSE 'expired without a failed payment attempt'
+           END,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE checkout_session_id = ?
+         AND status = 'created'`
+    )
+    .bind(stripeEventId, stripeEventType, checkoutSessionId)
+    .run();
+  return Number(result?.meta?.changes ?? 0) > 0;
+}
+
+export async function listUnsettledCheckoutSessions({
+  sinceHours,
+  limit,
+}: {
+  sinceHours: number;
+  limit: number;
+}): Promise<CheckoutSessionRecord[]> {
+  const db = getDatabase();
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM checkout_sessions
+       WHERE status = 'created'
+         AND created_at >= datetime('now', ?)
+       ORDER BY created_at ASC
+       LIMIT ?`
+    )
+    .bind(`-${Math.max(1, Math.floor(sinceHours))} hours`, limit)
+    .all();
+  return (results ?? [])
+    .map((row: any) => normalizeCheckoutSessionRecord(row))
+    .filter((row: CheckoutSessionRecord | null): row is CheckoutSessionRecord => row !== null);
+}
+
+// Sessions the app's status poll had to fulfil, whose Stripe webhook still has
+// not arrived (a later webhook overwrites stripe_event_type).
+export async function listBackstopFulfilledWithoutWebhook({
+  stripeEventType,
+  olderThanMinutes,
+  sinceHours,
+  limit,
+}: {
+  stripeEventType: string;
+  olderThanMinutes: number;
+  sinceHours: number;
+  limit: number;
+}): Promise<CheckoutSessionRecord[]> {
+  const db = getDatabase();
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM checkout_sessions
+       WHERE status = 'fulfilled'
+         AND stripe_event_type = ?
+         AND fulfilled_at <= datetime('now', ?)
+         AND fulfilled_at >= datetime('now', ?)
+       ORDER BY fulfilled_at ASC
+       LIMIT ?`
+    )
+    .bind(
+      stripeEventType,
+      `-${Math.max(0, Math.floor(olderThanMinutes))} minutes`,
+      `-${Math.max(1, Math.floor(sinceHours))} hours`,
+      limit
+    )
+    .all();
+  return (results ?? [])
+    .map((row: any) => normalizeCheckoutSessionRecord(row))
+    .filter((row: CheckoutSessionRecord | null): row is CheckoutSessionRecord => row !== null);
 }
