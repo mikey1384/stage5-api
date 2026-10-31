@@ -175,7 +175,7 @@ test.after(() => {
 const subjects = () =>
   sentAlerts.map((alert) => alert.personalizations?.[0]?.subject ?? "");
 
-test("adaptive pricing is off only for KR request country, not the client's hints", async () => {
+test("adaptive pricing is off for any Korean signal (request country, client country, locale)", async () => {
   const deviceId = "c0000000-0000-4000-8000-000000000001";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const created = [];
@@ -205,7 +205,7 @@ test("adaptive pricing is off only for KR request country, not the client's hint
 
   assert.deepEqual(
     created.map((params) => params.adaptive_pricing),
-    [{ enabled: true }, { enabled: true }, { enabled: false }, { enabled: true }],
+    [{ enabled: true }, { enabled: false }, { enabled: false }, { enabled: true }],
   );
   // Still USD price IDs: Stripe converts at checkout, USD stays the base.
   assert.equal(created[0].line_items[0].price, packs.MICRO.priceId);

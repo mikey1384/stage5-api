@@ -200,24 +200,57 @@ function resolveCheckoutCountry(
 // price IDs; Stripe converts at checkout and the session's amount_total and
 // currency remain the USD base (local amount in presentment_details).
 //
-// Korea exception, keyed only on the Cloudflare request country (not the
-// client's locale or country hint): from 2026-04-24 to 2026-05-09 KR buyers
-// were charged in KRW (price_data + kr_card/kakao_pay/naver_pay), live Stripe
+// Korea exception: most Korean cards have 원화결제차단 (block KRW charges from
+// overseas merchants) turned on, so a KRW presentment is declined. Live Stripe
 // shows two KRW card declines (try_again_later) on 2026-05-08, and f52dd01
-// (2026-05-09) moved KR back to USD with Adaptive Pricing off. Adaptive Pricing
-// would again present KRW and route Korean buyers onto those rails, so KR
-// requests keep the USD card checkout that has worked since.
-const ADAPTIVE_PRICING_EXCLUDED_REQUEST_COUNTRIES = new Set(["KR"]);
+// (2026-05-09) moved KR back to USD. Stripe picks the presentment currency from
+// its own geolocation of the buyer's browser, which can disagree with the
+// Cloudflare country of the app's API request (2026-10-31: a buyer in Korea got
+// KRW because the request country was not KR). So any Korean signal keeps the
+// USD checkout: request country, the app's country hint, a Korean app locale,
+// or a Korean Accept-Language.
+const ADAPTIVE_PRICING_EXCLUDED_COUNTRIES = new Set(["KR"]);
+const ADAPTIVE_PRICING_EXCLUDED_LANGUAGES = new Set(["ko"]);
 
-export function buildAdaptivePricing(requestCountry: string | null): {
+export type AdaptivePricingSignals = {
+  requestCountry?: string | null;
+  clientCountry?: string | null;
+  locale?: string | null;
+  acceptLanguage?: string | null;
+};
+
+function primaryLanguage(value: string | null | undefined): string {
+  return String(value || "")
+    .split(",")[0]
+    .trim()
+    .split(/[-_;]/)[0]
+    .toLowerCase();
+}
+
+export function buildAdaptivePricing(signals: AdaptivePricingSignals): {
   enabled: boolean;
 } {
-  const country = String(requestCountry || "")
-    .trim()
-    .toUpperCase();
-  return {
-    enabled: !ADAPTIVE_PRICING_EXCLUDED_REQUEST_COUNTRIES.has(country),
-  };
+  const countries = [signals.requestCountry, signals.clientCountry].map(
+    (value) => String(value || "").trim().toUpperCase(),
+  );
+  const languages = [signals.locale, signals.acceptLanguage].map(primaryLanguage);
+  const excluded =
+    countries.some((country) => ADAPTIVE_PRICING_EXCLUDED_COUNTRIES.has(country)) ||
+    languages.some((language) => ADAPTIVE_PRICING_EXCLUDED_LANGUAGES.has(language));
+  return { enabled: !excluded };
+}
+
+function adaptivePricingForRequest(
+  c: any,
+  clientCountry: string | undefined,
+  locale: string | undefined,
+): { enabled: boolean } {
+  return buildAdaptivePricing({
+    requestCountry: getRequestCountry(c),
+    clientCountry,
+    locale,
+    acceptLanguage: c.req.header("Accept-Language") ?? null,
+  });
 }
 
 function getRequestCountry(c: any): string | null {
@@ -503,7 +536,7 @@ router.post("/create-session", async (c) => {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       allow_promotion_codes: true,
-      adaptive_pricing: buildAdaptivePricing(getRequestCountry(c)),
+      adaptive_pricing: adaptivePricingForRequest(c, country, locale),
       locale: checkoutLocale,
       line_items: [buildCreditLineItem(packId)],
       success_url: buildCheckoutReturnPageUrl({
@@ -655,7 +688,7 @@ router.post("/create-byo-unlock", async (c) => {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       allow_promotion_codes: true,
-      adaptive_pricing: buildAdaptivePricing(getRequestCountry(c)),
+      adaptive_pricing: adaptivePricingForRequest(c, country, locale),
       locale: checkoutLocale,
       line_items: [buildByoUnlockLineItem(priceId)],
       success_url: buildCheckoutReturnPageUrl({

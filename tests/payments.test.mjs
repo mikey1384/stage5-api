@@ -590,7 +590,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   );
 });
 
-test("Korean UI locale alone keeps adaptive pricing on (exception follows the request country)", async () => {
+test("Korean UI locale alone turns adaptive pricing off (KRW would hit 원화결제차단)", async () => {
   const deviceId = "44444444-4444-4444-8444-444444444444";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -624,7 +624,7 @@ test("Korean UI locale alone keeps adaptive pricing on (exception follows the re
   assert.equal(createdParams[0]?.metadata?.placement, undefined);
   assert.equal((await response.json()).sessionId, "cs_test_korean_pack");
   assert.equal("payment_method_types" in createdParams[0], false);
-  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: true });
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
   assert.equal(createdParams[0]?.locale, "ko");
   assert.equal(
     createdParams[0]?.line_items?.[0]?.price,
@@ -635,7 +635,7 @@ test("Korean UI locale alone keeps adaptive pricing on (exception follows the re
   assert.equal(createdParams[0]?.metadata?.deviceId, deviceId);
 });
 
-test("Korean UI locale from a non-KR request country gets adaptive pricing", async () => {
+test("Korean UI locale from a non-KR request country still keeps USD (Stripe may geolocate KR)", async () => {
   const deviceId = "47474747-4747-4747-8747-474747474747";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -671,7 +671,7 @@ test("Korean UI locale from a non-KR request country gets adaptive pricing", asy
     "cs_test_korean_country_override",
   );
   assert.equal("payment_method_types" in createdParams[0], false);
-  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: true });
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
   assert.equal(createdParams[0]?.line_items?.[0]?.price, packs.MICRO.priceId);
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
 });
@@ -717,7 +717,7 @@ test("Korean request country keeps USD price IDs with adaptive pricing off", asy
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
 });
 
-test("BYO checkout uses USD price ID with adaptive pricing on outside KR", async () => {
+test("BYO checkout uses USD price ID; Korean locale keeps adaptive pricing off", async () => {
   const deviceId = "49494949-4949-4949-8949-494949494949";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -747,7 +747,7 @@ test("BYO checkout uses USD price ID with adaptive pricing on outside KR", async
   assert.equal(response.status, 200);
   assert.equal((await response.json()).sessionId, "cs_test_korean_byo");
   assert.equal("payment_method_types" in createdParams[0], false);
-  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: true });
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
   assert.equal(createdParams[0]?.locale, "ko");
   assert.equal(
     createdParams[0]?.line_items?.[0]?.price,
@@ -1738,4 +1738,15 @@ test("fresh-device BYO unlock is readable through entitlements without a credits
     ]),
     0,
   );
+});
+
+test("buildAdaptivePricing: any Korean signal keeps USD, others get local currency", async () => {
+  const { buildAdaptivePricing } = await import("../src/routes/payments.ts");
+  assert.deepEqual(buildAdaptivePricing({ requestCountry: "BR", locale: "pt-BR" }), { enabled: true });
+  assert.deepEqual(buildAdaptivePricing({ requestCountry: "KR" }), { enabled: false });
+  assert.deepEqual(buildAdaptivePricing({ requestCountry: "US", clientCountry: "kr" }), { enabled: false });
+  assert.deepEqual(buildAdaptivePricing({ requestCountry: "JP", locale: "ko" }), { enabled: false });
+  assert.deepEqual(buildAdaptivePricing({ requestCountry: "US", locale: "en", acceptLanguage: "ko-KR,ko;q=0.9,en;q=0.8" }), { enabled: false });
+  assert.deepEqual(buildAdaptivePricing({ requestCountry: "US", locale: "en", acceptLanguage: "en-US,ko;q=0.5" }), { enabled: true });
+  assert.deepEqual(buildAdaptivePricing({}), { enabled: true });
 });
