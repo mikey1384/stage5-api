@@ -189,6 +189,31 @@ function resolveCheckoutCountry(
   return null;
 }
 
+// Adaptive Pricing shows the buyer's local currency on the Stripe page and
+// unlocks methods that need it (Pix needs BRL, UPI needs INR). Prices stay USD
+// price IDs; Stripe converts at checkout and the session's amount_total and
+// currency remain the USD base (local amount in presentment_details).
+//
+// Korea exception, keyed only on the Cloudflare request country (not the
+// client's locale or country hint): from 2026-04-24 to 2026-05-09 KR buyers
+// were charged in KRW (price_data + kr_card/kakao_pay/naver_pay), live Stripe
+// shows two KRW card declines (try_again_later) on 2026-05-08, and f52dd01
+// (2026-05-09) moved KR back to USD with Adaptive Pricing off. Adaptive Pricing
+// would again present KRW and route Korean buyers onto those rails, so KR
+// requests keep the USD card checkout that has worked since.
+const ADAPTIVE_PRICING_EXCLUDED_REQUEST_COUNTRIES = new Set(["KR"]);
+
+export function buildAdaptivePricing(requestCountry: string | null): {
+  enabled: boolean;
+} {
+  const country = String(requestCountry || "")
+    .trim()
+    .toUpperCase();
+  return {
+    enabled: !ADAPTIVE_PRICING_EXCLUDED_REQUEST_COUNTRIES.has(country),
+  };
+}
+
 function getRequestCountry(c: any): string | null {
   const cfCountry = (c.req.raw?.cf as { country?: string | null } | undefined)
     ?.country;
@@ -472,7 +497,7 @@ router.post("/create-session", async (c) => {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       allow_promotion_codes: true,
-      adaptive_pricing: { enabled: false },
+      adaptive_pricing: buildAdaptivePricing(getRequestCountry(c)),
       locale: checkoutLocale,
       line_items: [buildCreditLineItem(packId)],
       success_url: buildCheckoutReturnPageUrl({
@@ -624,7 +649,7 @@ router.post("/create-byo-unlock", async (c) => {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       allow_promotion_codes: true,
-      adaptive_pricing: { enabled: false },
+      adaptive_pricing: buildAdaptivePricing(getRequestCountry(c)),
       locale: checkoutLocale,
       line_items: [buildByoUnlockLineItem(priceId)],
       success_url: buildCheckoutReturnPageUrl({

@@ -555,7 +555,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.ok(packCancelUrl.searchParams.get("return_id"));
   assert.equal(packCancelUrl.searchParams.has("session_id"), false);
   assert.equal("payment_method_types" in createdParams[0], false);
-  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: true });
   assert.equal(createdParams[0]?.line_items?.[0]?.price, packs.MICRO.priceId);
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
   assert.match(
@@ -568,7 +568,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   assert.ok(byoCancelUrl.searchParams.get("return_id"));
   assert.equal(byoCancelUrl.searchParams.has("session_id"), false);
   assert.equal("payment_method_types" in createdParams[1], false);
-  assert.deepEqual(createdParams[1]?.adaptive_pricing, { enabled: false });
+  assert.deepEqual(createdParams[1]?.adaptive_pricing, { enabled: true });
   assert.equal(
     createdParams[1]?.line_items?.[0]?.price,
     env.STRIPE_BYO_UNLOCK_PRICE_ID,
@@ -590,7 +590,7 @@ test("fresh device with opaque token can create payment sessions and poll settle
   );
 });
 
-test("Korean credit checkout keeps USD price IDs and disables adaptive pricing", async () => {
+test("Korean UI locale alone keeps adaptive pricing on (exception follows the request country)", async () => {
   const deviceId = "44444444-4444-4444-8444-444444444444";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -624,7 +624,7 @@ test("Korean credit checkout keeps USD price IDs and disables adaptive pricing",
   assert.equal(createdParams[0]?.metadata?.placement, undefined);
   assert.equal((await response.json()).sessionId, "cs_test_korean_pack");
   assert.equal("payment_method_types" in createdParams[0], false);
-  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: true });
   assert.equal(createdParams[0]?.locale, "ko");
   assert.equal(
     createdParams[0]?.line_items?.[0]?.price,
@@ -635,7 +635,7 @@ test("Korean credit checkout keeps USD price IDs and disables adaptive pricing",
   assert.equal(createdParams[0]?.metadata?.deviceId, deviceId);
 });
 
-test("Korean checkout locale does not switch non-KR users to local-currency checkout", async () => {
+test("Korean UI locale from a non-KR request country gets adaptive pricing", async () => {
   const deviceId = "47474747-4747-4747-8747-474747474747";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -671,12 +671,12 @@ test("Korean checkout locale does not switch non-KR users to local-currency chec
     "cs_test_korean_country_override",
   );
   assert.equal("payment_method_types" in createdParams[0], false);
-  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: true });
   assert.equal(createdParams[0]?.line_items?.[0]?.price, packs.MICRO.priceId);
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
 });
 
-test("Korean request country keeps USD price IDs", async () => {
+test("Korean request country keeps USD price IDs with adaptive pricing off", async () => {
   const deviceId = "48484848-4848-4848-8848-484848484848";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -717,7 +717,7 @@ test("Korean request country keeps USD price IDs", async () => {
   assert.equal("price_data" in createdParams[0]?.line_items?.[0], false);
 });
 
-test("Korean BYO checkout uses USD price ID and disables adaptive pricing", async () => {
+test("BYO checkout uses USD price ID with adaptive pricing on outside KR", async () => {
   const deviceId = "49494949-4949-4949-8949-494949494949";
   const apiToken = await registerDeviceApiToken({ deviceId });
   const createdParams = [];
@@ -747,7 +747,7 @@ test("Korean BYO checkout uses USD price ID and disables adaptive pricing", asyn
   assert.equal(response.status, 200);
   assert.equal((await response.json()).sessionId, "cs_test_korean_byo");
   assert.equal("payment_method_types" in createdParams[0], false);
-  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: false });
+  assert.deepEqual(createdParams[0]?.adaptive_pricing, { enabled: true });
   assert.equal(createdParams[0]?.locale, "ko");
   assert.equal(
     createdParams[0]?.line_items?.[0]?.price,
