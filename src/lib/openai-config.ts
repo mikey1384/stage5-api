@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { Context } from "hono";
 import { OPENAI_RELAY_URL, SpeechFormat } from "./constants";
+import { ELEVENLABS_SCRIBE_MODEL_ID } from "./model-catalog";
 
 export class RelayHttpError extends Error {
   status: number;
@@ -53,7 +54,7 @@ export async function callRelayServer({
   // Prepare form data for relay
   const relayFormData = new FormData();
   relayFormData.append("file", file);
-  relayFormData.append("model", "scribe_v2");
+  relayFormData.append("model", ELEVENLABS_SCRIBE_MODEL_ID);
   relayFormData.append("qualityMode", "true");
 
   if (language) {

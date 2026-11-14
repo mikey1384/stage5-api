@@ -99,7 +99,10 @@ const router = new Hono<{
 // timestamps, so it cannot make subtitles. Older Translator builds may still
 // send model "whisper-1" or qualityMode=false: those requests are served by
 // Scribe and reserved/billed at the Scribe price. There is no Whisper fallback.
-const DEFAULT_TRANSCRIPTION_MODEL = "scribe_v2";
+// This fallback is part of persisted request hashes, not vendor selection.
+// Keep it stable so an omitted-model retry across the v3 deploy finds its
+// original reservation/replay instead of charging and transcribing again.
+const LEGACY_TRANSCRIPTION_IDENTITY_MODEL = "scribe_v2";
 const ELEVENLABS_TRANSCRIPTION_MODEL = STAGE5_ELEVENLABS_SCRIBE_MODEL;
 const TRANSCRIPTION_WEBHOOK_TOKEN_SCOPE = "transcribe-r2-webhook-v1";
 const TRANSCRIPTION_PROVIDER_UNAVAILABLE_ERROR =
@@ -1309,7 +1312,7 @@ router.post("/", async (c) => {
     const file = formData.get("file");
     const requestedModel =
       formData.get("model")?.toString()?.trim() ||
-      DEFAULT_TRANSCRIPTION_MODEL;
+      LEGACY_TRANSCRIPTION_IDENTITY_MODEL;
     const requestedQualityMode =
       formData.get("qualityMode")?.toString() ??
       formData.get("quality_mode")?.toString();

@@ -14,6 +14,9 @@ export const STAGE5_CLAUDE_OPUS_MODEL = "claude-opus-4-8";
 export const STAGE5_CLAUDE_SONNET_5_5_MODEL = "claude-sonnet-5-5";
 export const STAGE5_CLAUDE_OPUS_5_5_MODEL = "claude-opus-5-5";
 export const STAGE5_CLAUDE_HAIKU_5_5_MODEL = "claude-haiku-5-5";
+// Vendor model and stable billing id are separate so in-flight reservations
+// and older clients keep the same Scribe pricing across model upgrades.
+export const ELEVENLABS_SCRIBE_MODEL_ID = "scribe_v3";
 export const STAGE5_ELEVENLABS_SCRIBE_MODEL = "elevenlabs-scribe";
 // Retired OpenAI transcription model (whisper-1 shuts down 2027-02-26). Every
 // transcription now runs on ElevenLabs Scribe and is reserved/billed at the

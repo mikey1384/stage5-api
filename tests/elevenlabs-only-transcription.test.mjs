@@ -194,7 +194,7 @@ test('old client model "whisper-1" + qualityMode=false is transcribed by Scribe 
     ["/transcribe"]
   );
   const relayCall = calls[0];
-  assert.equal(relayCall.form.get("model"), "scribe_v2");
+  assert.equal(relayCall.form.get("model"), "scribe_v3");
   assert.equal(relayCall.form.get("qualityMode"), "true");
   assert.equal(relayCall.form.get("prompt"), null);
   assert.equal(relayCall.headers["X-OpenAI-Key"], undefined);
@@ -259,6 +259,70 @@ test("Scribe unavailable after relay retries: 502 transcription-provider-unavail
   assert.equal((await getCredits({ deviceId })).credit_balance, balanceBefore);
 });
 
+for (const model of ["scribe_v2", "scribe_v3", undefined]) {
+  test(`${model ?? "omitted"} model requests use v3 and settle Scribe credits only once across retries`, async () => {
+    const deviceId = "70000000-0000-4000-8000-000000000007";
+    const apiToken = await setupDevice(deviceId);
+    const balanceBefore = (await getCredits({ deviceId })).credit_balance;
+    const calls = mockRelay(() => Response.json(scribeShapedResult(30)));
+    const form = legacyWhisperForm({ durationSec: 30 });
+    if (model) form.set("model", model);
+    else form.delete("model");
+    form.set("qualityMode", "true");
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await apiRequest(
+        "/transcribe",
+        transcribeRequest(apiToken, form, `tx-scribe-upgrade-${model ?? "default"}`)
+      );
+      assert.equal(response.status, 200);
+      const payload = await response.json();
+      assert.equal(payload.model, "elevenlabs-scribe");
+      assert.deepEqual(payload.segments, scribeShapedResult(30).segments);
+    }
+
+    assert.equal(calls.length, 1, "the retry must replay without calling the vendor");
+    assert.equal(calls[0].form.get("model"), "scribe_v3");
+    const reservations = transcriptionReservations(deviceId);
+    assert.equal(reservations.length, 1);
+    const [reservation] = reservations;
+    assert.equal(reservation.status, "settled");
+    assert.equal(reservation.settled_spend, scribe(30));
+    const meta = JSON.parse(reservation.meta);
+    assert.equal(meta.requestedModel, model ?? "scribe_v2");
+    assert.equal(meta.billedModel, "elevenlabs-scribe");
+    assert.equal(balanceBefore - (await getCredits({ deviceId })).credit_balance, scribe(30));
+  });
+}
+
+test("an omitted-model retry across the v3 upgrade replays the pre-upgrade Scribe reservation", async () => {
+  const deviceId = "70000000-0000-4000-8000-000000000008";
+  const apiToken = await setupDevice(deviceId);
+  const balanceBefore = (await getCredits({ deviceId })).credit_balance;
+  const calls = mockRelay(() => Response.json(scribeShapedResult(30)));
+  const form = legacyWhisperForm({ durationSec: 30 });
+  // An omitted model on the old worker hashed exactly like explicit v2.
+  form.set("model", "scribe_v2");
+  const first = await apiRequest(
+    "/transcribe",
+    transcribeRequest(apiToken, form, "tx-omitted-model-upgrade")
+  );
+  assert.equal(first.status, 200);
+  const firstResult = await first.json();
+
+  form.delete("model");
+  const retried = await apiRequest(
+    "/transcribe",
+    transcribeRequest(apiToken, form, "tx-omitted-model-upgrade")
+  );
+  assert.equal(retried.status, 200);
+  assert.deepEqual(await retried.json(), firstResult);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].form.get("model"), "scribe_v3");
+  assert.equal(transcriptionReservations(deviceId).length, 1);
+  assert.equal(balanceBefore - (await getCredits({ deviceId })).credit_balance, scribe(30));
+});
+
 test("a relay gateway outage (bare 503) is reported as provider-unavailable and releases the hold", async () => {
   const deviceId = "70000000-0000-4000-8000-000000000003";
   const apiToken = await setupDevice(deviceId);
@@ -286,7 +350,7 @@ test("insufficient credits returns the normal 402 insufficient-credits, never a 
   const calls = mockRelay(() => new Response("unexpected", { status: 599 }));
 
   const form = legacyWhisperForm({ durationSec: 3600 });
-  form.set("model", "scribe_v2");
+  form.set("model", "scribe_v3");
   form.set("qualityMode", "true");
   const response = await apiRequest(
     "/transcribe",
