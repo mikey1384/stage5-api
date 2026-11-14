@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test, { before, beforeEach } from "node:test";
 
 import worker from "../src/index.ts";
-import { clampUsageDay } from "../src/routes/usage.ts";
+import { HANDOFF_USAGE_COUNT_EVENTS, clampUsageDay } from "../src/routes/usage.ts";
+import { PRODUCT_EVENT_NAMES } from "../src/routes/analytics.ts";
 import { ensureDatabase } from "../src/lib/db/core.ts";
 import {
   createSqliteD1Database,
@@ -98,4 +99,33 @@ test("days in the future or older than two weeks are counted on today", () => {
   assert.equal(clampUsageDay("2026-09-29", now), "2026-09-29");
   assert.equal(clampUsageDay("2026-09-28", now), "2026-10-13");
   assert.equal(clampUsageDay("2026-10-14", now), "2026-10-13");
+});
+
+test("the download handoff names are accepted as anonymous counts", async () => {
+  assert.deepEqual([...HANDOFF_USAGE_COUNT_EVENTS], [
+    "home_translate_clicked",
+    "home_download_only_clicked",
+    "download_handoff_shown",
+    "download_handoff_clicked",
+    "download_handoff_dismissed",
+    "download_handoff_translation_started",
+  ]);
+  const counts = HANDOFF_USAGE_COUNT_EVENTS.map((event) => ({ event, day: today, n: 2 }));
+  // Mixed with an established name, as an app may send them in one batch.
+  counts.push({ event: "app_open", day: today, n: 1 });
+  assert.equal(
+    (await post({ appVersion: "1.33.0", platform: "darwin", counts })).status,
+    204,
+  );
+  const stored = rows();
+  assert.equal(stored.length, 7);
+  for (const event of HANDOFF_USAGE_COUNT_EVENTS) {
+    assert.equal(stored.find((r) => r.event === event)?.count, 2, event);
+  }
+});
+
+test("handoff names stay out of the opt-in analytics allow-list", () => {
+  for (const event of HANDOFF_USAGE_COUNT_EVENTS) {
+    assert.ok(!PRODUCT_EVENT_NAMES.includes(event), event);
+  }
 });

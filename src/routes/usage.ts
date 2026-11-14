@@ -6,9 +6,22 @@ import type { Stage5ApiBindings } from "../types/env";
 // Anonymous step counts. The request carries no device id or token and the
 // handler stores nothing about the sender: only per-day totals per event,
 // platform and app version.
+// The Home link buttons and the download handoff card (Translator 1.33+).
+// Anonymous counts only: the app does not send these as opt-in events, so
+// they are deliberately not in PRODUCT_EVENT_NAMES.
+export const HANDOFF_USAGE_COUNT_EVENTS = [
+  "home_translate_clicked",
+  "home_download_only_clicked",
+  "download_handoff_shown",
+  "download_handoff_clicked",
+  "download_handoff_dismissed",
+  "download_handoff_translation_started",
+] as const;
+
 export const USAGE_COUNT_EVENTS = [
   ...PRODUCT_EVENT_NAMES,
   "app_first_open",
+  ...HANDOFF_USAGE_COUNT_EVENTS,
 ] as const;
 
 const MAX_COUNT_PER_ENTRY = 500;
