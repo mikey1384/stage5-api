@@ -1144,6 +1144,7 @@ export async function releaseBillingReservation({
 async function recordBillingRejection({
   deviceId,
   service,
+  requestKey,
   stage,
   requestedSpend,
   reason,
@@ -1151,6 +1152,7 @@ async function recordBillingRejection({
 }: {
   deviceId: string;
   service: string;
+  requestKey: string;
   stage: "reserve" | "increase";
   requestedSpend: number;
   reason: string;
@@ -1170,7 +1172,12 @@ async function recordBillingRejection({
         Math.ceil(requestedSpend),
         deviceId,
         reason,
-        serializeMeta(meta)
+        serializeMeta({
+          ...(meta && typeof meta === "object" && !Array.isArray(meta)
+            ? meta as Record<string, unknown>
+            : {}),
+          requestKey,
+        })
       )
       .run();
   } catch (error) {
@@ -1186,6 +1193,7 @@ export async function reserveBillingCredits(
     await recordBillingRejection({
       deviceId: args.deviceId,
       service: args.service,
+      requestKey: args.requestKey,
       stage: "reserve",
       requestedSpend: args.spend,
       reason: args.reason,
@@ -1203,6 +1211,7 @@ export async function increaseBillingReservation(
     await recordBillingRejection({
       deviceId: args.deviceId,
       service: args.service,
+      requestKey: args.requestKey,
       stage: "increase",
       requestedSpend: args.requiredSpend,
       reason: args.reason,

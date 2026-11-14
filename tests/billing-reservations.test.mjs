@@ -284,6 +284,23 @@ test("refused holds are recorded with the balance at refusal; granted holds are 
     requested_spend: 80_000,
     balance: 15_000,
     reason: "TRANSCRIBE_RESERVE",
-    meta: JSON.stringify({ reserveSeconds: 10_000 }),
+    meta: JSON.stringify({ reserveSeconds: 10_000, requestKey: "too-big" }),
   });
+
+  await creditDevice({ deviceId, packId: "STARTER" });
+  const retry = await reserveBillingCredits({
+    deviceId,
+    service: "transcription",
+    requestKey: "too-big",
+    spend: 80_000,
+    reason: "TRANSCRIBE_RESERVE",
+  });
+  assert.equal(retry.ok, true);
+  const linked = sqlite.prepare(`
+    SELECT b.status FROM billing_rejections r
+    JOIN billing_reservations b
+      ON b.device_id = r.device_id AND b.service = r.service
+     AND b.request_key = json_extract(r.meta, '$.requestKey')
+  `).get();
+  assert.equal(linked.status, "reserved");
 });
