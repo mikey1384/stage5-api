@@ -7,6 +7,7 @@ import {
   runInTransaction,
 } from "./core";
 import crypto from "node:crypto";
+import { withoutJobKey } from "../job-details";
 
 export type BillingReservationStatus = "reserved" | "settled" | "released";
 
@@ -1172,9 +1173,10 @@ async function recordBillingRejection({
         Math.ceil(requestedSpend),
         deviceId,
         reason,
+        // A refused hold is not a credit record, so it keeps no job details.
         serializeMeta({
           ...(meta && typeof meta === "object" && !Array.isArray(meta)
-            ? meta as Record<string, unknown>
+            ? (withoutJobKey(meta) as Record<string, unknown>)
             : {}),
           requestKey,
         })

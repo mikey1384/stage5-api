@@ -71,6 +71,8 @@ import {
   getRelayDispatchConfig,
 } from "./translate/relay-config";
 import type { Stage5ApiBindings } from "../types/env";
+import { jobMeta, parseJobDetails } from "../lib/job-details";
+import { WIRE_JOB_DETAILS_HEADER } from "../shared/wire-protocol";
 
 const router = new Hono<{
   Bindings: Stage5ApiBindings;
@@ -403,6 +405,7 @@ router.post("/", async (c) => {
         estimatedPromptTokens,
         maxCompletionTokens,
         requestId,
+        ...jobMeta(parseJobDetails(c.req.header(WIRE_JOB_DETAILS_HEADER))),
       },
     });
     if (!createResult.ok) {

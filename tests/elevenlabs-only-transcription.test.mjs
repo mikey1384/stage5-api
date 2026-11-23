@@ -477,3 +477,44 @@ test("no stage5-api source calls OpenAI transcription or offers a Whisper fallba
   walk(root);
   assert.deepEqual(offenders, []);
 });
+
+test("job details sent with a transcription are kept on its credit record and nowhere else", async () => {
+  const deviceId = "70000000-0000-4000-8000-0000000000d1";
+  const apiToken = await setupDevice(deviceId);
+  const calls = mockRelay((call) =>
+    new URL(call.url).pathname === "/transcribe"
+      ? Response.json(scribeShapedResult(60))
+      : new Response("unexpected", { status: 599 })
+  );
+  const details = {
+    targetLanguage: "korean",
+    videoSeconds: 5400,
+    sourceSite: "youtube.com",
+  };
+  const request = transcribeRequest(
+    apiToken,
+    legacyWhisperForm({ durationSec: 60 }),
+    "tx-job-details-1"
+  );
+  request.headers["X-Stage5-Job-Details"] = JSON.stringify({
+    ...details,
+    title: "not kept",
+    sourceLanguage: "not a language",
+  });
+  const response = await apiRequest("/transcribe", request);
+  assert.equal(response.status, 200, JSON.stringify(await response.json()));
+
+  const reserve = sqlite
+    .prepare(
+      "SELECT json_extract(meta, '$.job') AS job FROM credit_ledger WHERE device_id = ? AND reason = 'TRANSCRIBE_RESERVE'"
+    )
+    .all(deviceId);
+  assert.equal(reserve.length, 1);
+  assert.deepEqual(JSON.parse(reserve[0].job), details);
+  // The relay and the provider never see them.
+  assert.equal(calls.length, 1);
+  assert.equal(
+    Object.keys(calls[0].headers).some((name) => /job-details/i.test(name)),
+    false
+  );
+});

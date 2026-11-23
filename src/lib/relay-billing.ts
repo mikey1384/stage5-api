@@ -1,3 +1,4 @@
+import { jobMeta, parseJobDetails, withoutJobKey } from "./job-details";
 import {
   getUserByApiKey,
   confirmExistingBillingReservation,
@@ -146,8 +147,18 @@ function mergeMeta(
   baseMeta: Record<string, unknown>,
   extraMeta: unknown
 ): Record<string, unknown> {
-  const extraObject = asObject(extraMeta);
+  // `job` is reserved for validated job details; relay meta cannot set it.
+  const extraObject = asObject(withoutJobKey(extraMeta));
   return extraObject ? { ...baseMeta, ...extraObject } : baseMeta;
+}
+
+// The relay forwards the app's job-details header value untouched; it is
+// validated here, the one place that decides what a credit record keeps.
+function withJobDetails(
+  meta: Record<string, unknown>,
+  rawJobDetails: unknown
+): Record<string, unknown> {
+  return { ...meta, ...jobMeta(parseJobDetails(rawJobDetails)) };
 }
 
 function getDuplicateReservationDetails(
@@ -420,7 +431,10 @@ export async function reserveRelayCredits(
         requestKey,
         spend,
         reason: "TRANSLATE_RESERVE",
-        meta: mergeMeta({ ...parsed, spend }, body.meta),
+        meta: withJobDetails(
+          mergeMeta({ ...parsed, spend }, body.meta),
+          body.jobDetails
+        ),
       });
       if (!result.ok) {
         return fail(402, "Insufficient credits");
@@ -448,7 +462,10 @@ export async function reserveRelayCredits(
         requestKey,
         spend,
         reason: "TRANSCRIBE_RESERVE",
-        meta: mergeMeta({ ...parsed, spend }, body.meta),
+        meta: withJobDetails(
+          mergeMeta({ ...parsed, spend }, body.meta),
+          body.jobDetails
+        ),
       });
       if (!result.ok) {
         return fail(402, "Insufficient credits");
@@ -557,7 +574,7 @@ export async function confirmRelayReservation(
     }
   }
 
-  const confirmMeta = asObject(body.meta);
+  const confirmMeta = asObject(withoutJobKey(body.meta));
   if (confirmMeta) {
     const merged = await mergeBillingReservationMeta({
       deviceId,
@@ -736,7 +753,7 @@ export async function releaseRelayCredits(
         : service === RELAY_BILLING_SERVICES.TRANSCRIPTION
           ? "TRANSCRIBE"
           : "DUB",
-    meta: body.meta,
+    meta: withoutJobKey(body.meta),
   });
   if (!result.ok) {
     return fail(400, result.error);
@@ -775,7 +792,7 @@ export async function persistRelayReservationMeta(
     deviceId,
     service,
     requestKey,
-    meta: body.meta,
+    meta: withoutJobKey(body.meta),
   });
   if (!result.ok) {
     return fail(409, result.error);

@@ -84,6 +84,8 @@ import {
 import { buildDirectTranscriptionReservationKey } from "../lib/transcription-idempotency";
 import { v4 as uuidv4 } from "uuid";
 import type { Stage5ApiBindings } from "../types/env";
+import { jobMeta, parseJobDetails } from "../lib/job-details";
+import { WIRE_JOB_DETAILS_HEADER } from "../shared/wire-protocol";
 import {
   STAGE5_ELEVENLABS_SCRIBE_MODEL,
   resolveStage5TranscriptionBillingModel,
@@ -1323,6 +1325,7 @@ router.post("/", async (c) => {
     const qualityMode = parseBooleanLike(requestedQualityMode);
     const language = formData.get("language")?.toString();
     const prompt = formData.get("prompt")?.toString();
+    const jobDetails = parseJobDetails(c.req.header(WIRE_JOB_DETAILS_HEADER));
     // model / qualityMode / prompt only identify the request (idempotency key
     // and audit meta). They no longer pick a provider or a price: every request,
     // including legacy "whisper-1" / qualityMode=false, runs on Scribe.
@@ -1434,6 +1437,7 @@ router.post("/", async (c) => {
           reserveModel,
           directRequestLease,
           directRequestOwnership,
+          ...jobMeta(jobDetails),
         },
       });
       if (!reserved.ok) {
@@ -2119,6 +2123,7 @@ router.post("/process/:jobId", async (c) => {
         jobId,
         fileSizeBytes: r2Object.size,
         requestedDurationSeconds: job.duration_seconds,
+        ...jobMeta(parseJobDetails(c.req.header(WIRE_JOB_DETAILS_HEADER))),
       },
     });
     if (!reserved.ok) {

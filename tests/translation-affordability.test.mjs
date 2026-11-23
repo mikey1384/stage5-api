@@ -145,6 +145,17 @@ after(async()=>{
   sqlite.close();
 });
 
+test('job details sent to the relay reach the hold\'s credit record, validated',async()=>{
+  setBalance(5000);
+  const details={sourceLanguage:'es',targetLanguage:'korean',videoSeconds:1800,sourceSite:'vimeo.com'};
+  const send=(key,headers)=>originalFetch(baseUrl+'/translate-direct',{method:'POST',headers:{authorization:`Bearer ${apiToken}`,'Content-Type':'application/json','Idempotency-Key':key,...headers},body:JSON.stringify({messages:syntheticSubtitleMessages(),model:'claude-haiku-5-5',translationPhase:'draft'})});
+  assert.equal((await send('with-details',{'X-Stage5-Job-Details':JSON.stringify({...details,title:'not kept'})})).status,200);
+  assert.equal((await send('without-details',{})).status,200);
+  assert.equal((await send('oversized',{'X-Stage5-Job-Details':JSON.stringify({...details,pad:'x'.repeat(600)})})).status,200);
+  const jobs=sqlite.prepare("SELECT json_extract(meta,'$.job') job FROM credit_ledger WHERE device_id=? AND reason='TRANSLATE_RESERVE' ORDER BY id").all(deviceId).map(row=>row.job===null?null:JSON.parse(row.job));
+  assert.deepEqual(jobs,[details,null,null]);
+});
+
 function call(operationId='single',overrides={}){
   return callAIModel({messages:syntheticSubtitleMessages(),model:'claude-haiku-5-5',translationPhase:'draft',operationId,retryAttempts:1,...overrides});
 }
