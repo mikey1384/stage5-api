@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test, { before, beforeEach } from "node:test";
 
 import worker from "../src/index.ts";
-import { HANDOFF_USAGE_COUNT_EVENTS, clampUsageDay } from "../src/routes/usage.ts";
+import {
+  FREE_PREVIEW_DISMISS_REASON_EVENTS,
+  HANDOFF_USAGE_COUNT_EVENTS,
+  clampUsageDay,
+} from "../src/routes/usage.ts";
 import { PRODUCT_EVENT_NAMES } from "../src/routes/analytics.ts";
 import { ensureDatabase } from "../src/lib/db/core.ts";
 import {
@@ -126,6 +130,31 @@ test("the download handoff names are accepted as anonymous counts", async () => 
 
 test("handoff names stay out of the opt-in analytics allow-list", () => {
   for (const event of HANDOFF_USAGE_COUNT_EVENTS) {
+    assert.ok(!PRODUCT_EVENT_NAMES.includes(event), event);
+  }
+});
+
+test("the free-preview dismissal reasons are accepted as anonymous counts only", async () => {
+  assert.deepEqual([...FREE_PREVIEW_DISMISS_REASON_EVENTS], [
+    "free_preview_dismiss_price",
+    "free_preview_dismiss_quality",
+    "free_preview_dismiss_enough",
+    "free_preview_dismiss_trying",
+    "free_preview_dismiss_download_only",
+  ]);
+  const counts = FREE_PREVIEW_DISMISS_REASON_EVENTS.map((event) => ({
+    event,
+    day: today,
+    n: 3,
+  }));
+  assert.equal(
+    (await post({ appVersion: "1.34.0", platform: "win32", counts })).status,
+    204,
+  );
+  const stored = rows();
+  assert.equal(stored.length, 5);
+  for (const event of FREE_PREVIEW_DISMISS_REASON_EVENTS) {
+    assert.equal(stored.find((r) => r.event === event)?.count, 3, event);
     assert.ok(!PRODUCT_EVENT_NAMES.includes(event), event);
   }
 });

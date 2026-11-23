@@ -18,10 +18,21 @@ export const HANDOFF_USAGE_COUNT_EVENTS = [
   "download_handoff_translation_started",
 ] as const;
 
+// The one-tap answer to "What held you back?" after the free-preview offer
+// is dismissed (Translator 1.34+). Anonymous counts only, like the above.
+export const FREE_PREVIEW_DISMISS_REASON_EVENTS = [
+  "free_preview_dismiss_price",
+  "free_preview_dismiss_quality",
+  "free_preview_dismiss_enough",
+  "free_preview_dismiss_trying",
+  "free_preview_dismiss_download_only",
+] as const;
+
 export const USAGE_COUNT_EVENTS = [
   ...PRODUCT_EVENT_NAMES,
   "app_first_open",
   ...HANDOFF_USAGE_COUNT_EVENTS,
+  ...FREE_PREVIEW_DISMISS_REASON_EVENTS,
 ] as const;
 
 const MAX_COUNT_PER_ENTRY = 500;
