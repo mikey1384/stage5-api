@@ -3,6 +3,7 @@ import test, { before, beforeEach } from "node:test";
 
 import worker from "../src/index.ts";
 import {
+  CHECKOUT_PACK_COUNT_MISMATCH_EVENT,
   FREE_PREVIEW_DISMISS_REASON_EVENTS,
   HANDOFF_USAGE_COUNT_EVENTS,
   clampUsageDay,
@@ -157,4 +158,23 @@ test("the free-preview dismissal reasons are accepted as anonymous counts only",
     assert.equal(stored.find((r) => r.event === event)?.count, 3, event);
     assert.ok(!PRODUCT_EVENT_NAMES.includes(event), event);
   }
+});
+
+test("the checkout pack-count mismatch is accepted as an anonymous count only", async () => {
+  assert.equal(CHECKOUT_PACK_COUNT_MISMATCH_EVENT, "checkout_pack_count_mismatch");
+  assert.equal(
+    (
+      await post({
+        appVersion: "1.36.0",
+        platform: "darwin",
+        counts: [{ event: CHECKOUT_PACK_COUNT_MISMATCH_EVENT, day: today, n: 1 }],
+      })
+    ).status,
+    204,
+  );
+  assert.equal(
+    rows().find((r) => r.event === CHECKOUT_PACK_COUNT_MISMATCH_EVENT)?.count,
+    1,
+  );
+  assert.ok(!PRODUCT_EVENT_NAMES.includes(CHECKOUT_PACK_COUNT_MISMATCH_EVENT));
 });

@@ -28,11 +28,18 @@ export const FREE_PREVIEW_DISMISS_REASON_EVENTS = [
   "free_preview_dismiss_download_only",
 ] as const;
 
+// The app refused to open a checkout because the server created it for a
+// different number of packs than the offer showed (Translator 1.36+). It
+// should stay at zero; anything else means the app and the API disagree.
+export const CHECKOUT_PACK_COUNT_MISMATCH_EVENT =
+  "checkout_pack_count_mismatch" as const;
+
 export const USAGE_COUNT_EVENTS = [
   ...PRODUCT_EVENT_NAMES,
   "app_first_open",
   ...HANDOFF_USAGE_COUNT_EVENTS,
   ...FREE_PREVIEW_DISMISS_REASON_EVENTS,
+  CHECKOUT_PACK_COUNT_MISMATCH_EVENT,
 ] as const;
 
 const MAX_COUNT_PER_ENTRY = 500;
