@@ -87,10 +87,14 @@ test("partner mail sends one message through SendGrid from the Stage5 sender", a
   assert.deepEqual(captured.body.reply_to, { email: "contact@momentik.kr" });
   assert.equal(captured.body.subject, "Your photo walk Bcc: x@y.z");
   assert.deepEqual(captured.body.categories, ["partner-mail", "momentik"]);
-  assert.equal(captured.body.mail_settings, undefined);
+  // nothing appended: no footer, no unsubscribe text, no tracking
+  assert.deepEqual(captured.body.mail_settings, { footer: { enable: false }, bypass_list_management: { enable: false } });
+  assert.equal(captured.body.tracking_settings.subscription_tracking.enable, false);
+  assert.equal(captured.body.tracking_settings.click_tracking.enable, false);
+  assert.equal(captured.body.tracking_settings.open_tracking.enable, false);
 
   await send({ ...valid, sandbox: true });
-  assert.deepEqual(captured.body.mail_settings, { sandbox_mode: { enable: true } });
+  assert.deepEqual(captured.body.mail_settings.sandbox_mode, { enable: true });
 });
 
 test("partner mail forwards small typed attachments and rejects bad ones", async () => {

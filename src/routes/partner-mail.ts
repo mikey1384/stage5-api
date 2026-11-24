@@ -156,13 +156,18 @@ router.post("/send", async (c) => {
         content,
         ...(attachments.length ? { attachments } : {}),
         categories: ["partner-mail", partner],
-        // sandbox: SendGrid validates the request (key, sender, payload) without delivering.
-        ...(body.sandbox === true
-          ? { mail_settings: { sandbox_mode: { enable: true } } }
-          : {}),
+        // Partner mail goes out exactly as written: no account-level footer and no
+        // unsubscribe/tracking text appended. sandbox validates without delivering.
+        mail_settings: {
+          footer: { enable: false },
+          bypass_list_management: { enable: false },
+          ...(body.sandbox === true ? { sandbox_mode: { enable: true } } : {}),
+        },
         tracking_settings: {
           click_tracking: { enable: false, enable_text: false },
           open_tracking: { enable: false },
+          subscription_tracking: { enable: false },
+          ganalytics: { enable: false },
         },
       }),
     }
