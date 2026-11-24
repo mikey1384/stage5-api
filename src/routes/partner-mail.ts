@@ -29,7 +29,34 @@ type PartnerMailBody = {
   fromName?: unknown;
   partner?: unknown;
   sandbox?: unknown;
+  attachments?: unknown;
 };
+
+const MAX_ATTACHMENTS = 3;
+const MAX_ATTACHMENT_B64 = 1_400_000; // ~1 MB decoded each
+const ATTACHMENT_TYPES = /^(text\/calendar(; ?method=(REQUEST|CANCEL|PUBLISH))?|application\/pdf|text\/csv|image\/(png|jpeg))$/i;
+
+type SendGridAttachment = { content: string; filename: string; type: string; disposition: "attachment" };
+
+/** Small, typed attachments only (calendar invites, statements). Returns an error code or the list. */
+function parseAttachments(raw: unknown): SendGridAttachment[] | string {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_ATTACHMENTS) return "invalid_attachments";
+  const out: SendGridAttachment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") return "invalid_attachments";
+    const a = item as Record<string, unknown>;
+    const filename = clean(str(a.filename), 100).replace(/[\\/]/g, "_");
+    const type = str(a.type);
+    const content = typeof a.content === "string" ? a.content.replace(/\s+/g, "") : "";
+    if (!filename || !ATTACHMENT_TYPES.test(type)) return "invalid_attachments";
+    if (!content || content.length > MAX_ATTACHMENT_B64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(content)) {
+      return "invalid_attachments";
+    }
+    out.push({ content, filename, type, disposition: "attachment" });
+  }
+  return out;
+}
 
 function timingSafeEqual(a: string, b: string): boolean {
   const enc = new TextEncoder();
@@ -97,6 +124,9 @@ router.post("/send", async (c) => {
     return c.json({ error: "too_large" }, 413);
   }
 
+  const attachments = parseAttachments(body.attachments);
+  if (typeof attachments === "string") return c.json({ error: attachments }, 400);
+
   const apiKey = String(c.env.SENDGRID_API_KEY || "").trim();
   const from = resolveFrom(c.env);
   if (!apiKey || !from) {
@@ -124,6 +154,7 @@ router.post("/send", async (c) => {
         ...(replyTo ? { reply_to: { email: replyTo } } : {}),
         subject,
         content,
+        ...(attachments.length ? { attachments } : {}),
         categories: ["partner-mail", partner],
         // sandbox: SendGrid validates the request (key, sender, payload) without delivering.
         ...(body.sandbox === true

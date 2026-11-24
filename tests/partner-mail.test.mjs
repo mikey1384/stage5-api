@@ -93,6 +93,23 @@ test("partner mail sends one message through SendGrid from the Stage5 sender", a
   assert.deepEqual(captured.body.mail_settings, { sandbox_mode: { enable: true } });
 });
 
+test("partner mail forwards small typed attachments and rejects bad ones", async () => {
+  let captured;
+  globalThis.fetch = async (_url, init) => {
+    captured = JSON.parse(init.body);
+    return new Response(null, { status: 202 });
+  };
+  const ics = Buffer.from("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n").toString("base64");
+  const ok = await send({ ...valid, attachments: [{ filename: "invite.ics", type: "text/calendar; method=REQUEST", content: ics }] });
+  assert.equal(ok.status, 202);
+  assert.deepEqual(captured.attachments, [
+    { content: ics, filename: "invite.ics", type: "text/calendar; method=REQUEST", disposition: "attachment" },
+  ]);
+  assert.equal((await send({ ...valid, attachments: [{ filename: "x.exe", type: "application/x-msdownload", content: ics }] })).status, 400);
+  assert.equal((await send({ ...valid, attachments: [{ filename: "a.ics", type: "text/calendar", content: "not base64!" }] })).status, 400);
+  assert.equal((await send({ ...valid, attachments: new Array(4).fill({ filename: "a.ics", type: "text/calendar", content: ics }) })).status, 400);
+});
+
 test("partner mail reports SendGrid failures without leaking the key", async () => {
   globalThis.fetch = async () => new Response("bad from", { status: 403 });
   const res = await send(valid);
