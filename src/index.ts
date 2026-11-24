@@ -14,6 +14,7 @@ import entitlementsRouter from "./routes/entitlements";
 import authRouter from "./routes/auth";
 import analyticsRouter from "./routes/analytics";
 import usageRouter from "./routes/usage";
+import partnerMailRouter from "./routes/partner-mail";
 import { ensureDatabase } from "./lib/db";
 import { runReconciliation } from "./lib/reconciliation";
 import { flushAnalyticsOutbox } from "./lib/product-analytics";
@@ -102,6 +103,8 @@ app.route("/dub", dubRouter);
 app.route("/analytics", analyticsRouter);
 app.route("/usage", usageRouter);
 app.route("/admin", adminRouter);
+// Partner-app transactional mail (shared-secret auth, outside the version gate)
+app.route("/partner-mail", partnerMailRouter);
 
 // Pretty printing only AFTER routes so it never eats request bodies
 app.use("*", prettyJSON());

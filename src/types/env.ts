@@ -14,6 +14,10 @@ export type Stage5ApiBindings = {
   ADMIN_DEVICE_ID?: string;
   SENDGRID_API_KEY?: string;
   SENDGRID_API_URL?: string;
+  /** Shared secret for POST /partner-mail/send; route is disabled when unset. */
+  PARTNER_MAIL_SECRET?: string;
+  /** Sender for partner mail; falls back to the alert sender. */
+  PARTNER_MAIL_FROM?: string;
   ALERT_EMAIL_TO?: string;
   ALERT_EMAIL_FROM?: string;
   EMAIL_SENDER?: string;
