@@ -9,7 +9,12 @@ import {
   enqueueAnalyticsEventSafely,
   type AnalyticsItem,
 } from "./product-analytics";
-import { isValidPackId, packs, type PackId } from "../types/packs";
+import {
+  isValidPackId,
+  packQuantity,
+  packs,
+  type PackId,
+} from "../types/packs";
 import type { Stage5ApiBindings } from "../types/env";
 
 const BYO_UNLOCK_USD = 10;
@@ -21,7 +26,11 @@ export const BACKSTOP_POLL_EVENT_TYPE = "backstop.session_poll";
 export const BACKSTOP_SWEEP_EVENT_TYPE = "backstop.checkout_sweep";
 
 export type CheckoutFulfillmentResult =
-  | { outcome: "applied" | "duplicate"; mode: "credits" | "byo"; deviceId: string }
+  | {
+      outcome: "applied" | "duplicate";
+      mode: "credits" | "byo";
+      deviceId: string;
+    }
   | { outcome: "not_paid" }
   | { outcome: "not_translator" }
   | { outcome: "invalid_metadata"; reason: string; deviceId: string };
@@ -190,9 +199,11 @@ export async function fulfillPaidCheckoutSession({
     };
   }
 
+  const packCount = packQuantity(packId as PackId, metadata.quantity);
   const result = await fulfillCreditPackPurchase({
     deviceId,
     packId: packId as PackId,
+    quantity: packCount,
     checkoutSessionId: session.id,
     paymentIntentId,
     stripeEventId,
@@ -213,7 +224,7 @@ export async function fulfillPaidCheckoutSession({
     transactionId,
     mode: "credits",
     packId: packId as PackId,
-    value: sessionUsdValue(session, packs[packId as PackId].usd),
+    value: sessionUsdValue(session, packs[packId as PackId].usd * packCount),
     currency: "usd",
   });
   return { outcome: result, mode: "credits", deviceId };

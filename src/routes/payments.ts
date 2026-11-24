@@ -2,7 +2,15 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type Stripe from "stripe";
 import { getStripe } from "../lib/stripe";
-import { isValidPackId, packs, PACK_IDS, type PackId } from "../types/packs";
+import {
+  isValidPackId,
+  MAX_PACK_QUANTITY,
+  MULTI_PACK_ID,
+  packQuantity,
+  packs,
+  PACK_IDS,
+  type PackId,
+} from "../types/packs";
 import {
   getCheckoutSessionRecord,
   getCheckoutSessionRecordByReturnId,
@@ -155,12 +163,13 @@ async function recordCheckoutStarted(
 
 function buildCreditLineItem(
   packId: PackId,
+  quantity: number,
 ): Stripe.Checkout.SessionCreateParams.LineItem {
   const pack = packs[packId];
 
   return {
     price: pack.priceId,
-    quantity: 1,
+    quantity,
   };
 }
 
@@ -231,12 +240,21 @@ export function buildAdaptivePricing(signals: AdaptivePricingSignals): {
   enabled: boolean;
 } {
   const countries = [signals.requestCountry, signals.clientCountry].map(
-    (value) => String(value || "").trim().toUpperCase(),
+    (value) =>
+      String(value || "")
+        .trim()
+        .toUpperCase(),
   );
-  const languages = [signals.locale, signals.acceptLanguage].map(primaryLanguage);
+  const languages = [signals.locale, signals.acceptLanguage].map(
+    primaryLanguage,
+  );
   const excluded =
-    countries.some((country) => ADAPTIVE_PRICING_EXCLUDED_COUNTRIES.has(country)) ||
-    languages.some((language) => ADAPTIVE_PRICING_EXCLUDED_LANGUAGES.has(language));
+    countries.some((country) =>
+      ADAPTIVE_PRICING_EXCLUDED_COUNTRIES.has(country),
+    ) ||
+    languages.some((language) =>
+      ADAPTIVE_PRICING_EXCLUDED_LANGUAGES.has(language),
+    );
   return { enabled: !excluded };
 }
 
@@ -346,22 +364,34 @@ export const CHECKOUT_PLACEMENTS = [
   "free-preview-offer",
 ] as const;
 
-const createSessionSchema = z.object({
-  packId: z.enum(PACK_IDS),
-  deviceId: z.string().uuid("Device ID must be a valid UUID"),
-  // Where the checkout started; unknown values are dropped, not rejected,
-  // so a newer app never loses a sale to an older server.
-  placement: z
-    .string()
-    .optional()
-    .transform((value) =>
-      (CHECKOUT_PLACEMENTS as readonly string[]).includes(value ?? "")
-        ? value
-        : undefined,
-    ),
-  locale: z.string().trim().min(1).max(24).optional(),
-  country: z.string().trim().min(2).max(2).optional(),
-});
+const createSessionSchema = z
+  .object({
+    packId: z.enum(PACK_IDS),
+    // Several $1 packs in one payment, for a video that needs a little more
+    // than one. Other packs are sold one at a time.
+    quantity: z.number().int().min(1).max(MAX_PACK_QUANTITY).optional(),
+    deviceId: z.string().uuid("Device ID must be a valid UUID"),
+    // Where the checkout started; unknown values are dropped, not rejected,
+    // so a newer app never loses a sale to an older server.
+    placement: z
+      .string()
+      .optional()
+      .transform((value) =>
+        (CHECKOUT_PLACEMENTS as readonly string[]).includes(value ?? "")
+          ? value
+          : undefined,
+      ),
+    locale: z.string().trim().min(1).max(24).optional(),
+    country: z.string().trim().min(2).max(2).optional(),
+  })
+  .refine(
+    ({ packId, quantity }) =>
+      quantity === undefined || quantity === 1 || packId === MULTI_PACK_ID,
+    {
+      message: "Only the $1 pack can be bought in multiples",
+      path: ["quantity"],
+    },
+  );
 
 const createByoUnlockSchema = z.object({
   deviceId: z.string().uuid("Device ID must be a valid UUID"),
@@ -509,8 +539,9 @@ router.post("/create-session", async (c) => {
   };
   try {
     const body = await c.req.json();
-    const { packId, deviceId, locale, country, placement } =
+    const { packId, deviceId, locale, country, placement, quantity } =
       createSessionSchema.parse(body);
+    const packCount = packQuantity(packId, quantity);
     const checkoutCountry = resolveCheckoutCountry(
       country,
       getRequestCountry(c),
@@ -538,7 +569,7 @@ router.post("/create-session", async (c) => {
       allow_promotion_codes: true,
       adaptive_pricing: adaptivePricingForRequest(c, country, locale),
       locale: checkoutLocale,
-      line_items: [buildCreditLineItem(packId)],
+      line_items: [buildCreditLineItem(packId, packCount)],
       success_url: buildCheckoutReturnPageUrl({
         uiOrigin,
         status: "success",
@@ -553,7 +584,8 @@ router.post("/create-session", async (c) => {
       metadata: {
         deviceId,
         packId,
-        credits: pack.credits.toString(),
+        credits: (pack.credits * packCount).toString(),
+        ...(packCount > 1 ? { quantity: packCount.toString() } : {}),
         checkoutReturnId,
         ...(placement ? { placement } : {}),
       },
@@ -562,7 +594,8 @@ router.post("/create-session", async (c) => {
         metadata: {
           deviceId,
           packId,
-          credits: pack.credits.toString(),
+          credits: (pack.credits * packCount).toString(),
+          ...(packCount > 1 ? { quantity: packCount.toString() } : {}),
           checkoutReturnId,
         },
       },
@@ -580,7 +613,7 @@ router.post("/create-session", async (c) => {
       deviceId,
       kind: "credits",
       packId,
-      creditsDelta: pack.credits,
+      creditsDelta: pack.credits * packCount,
       placement: placement ?? null,
     });
     await recordCheckoutStarted(c, {
@@ -588,13 +621,16 @@ router.post("/create-session", async (c) => {
       deviceId,
       mode: "credits",
       packId,
-      value: pack.usd,
+      value: pack.usd * packCount,
     });
 
     return c.json({
       url: session.url,
       sessionId: session.id,
       returnId: checkoutReturnId,
+      // Echoed so the app can confirm the session charges for the number
+      // of packs it showed before it opens the page.
+      quantity: packCount,
     });
   } catch (error) {
     if (isJsonParseError(error)) {

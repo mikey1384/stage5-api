@@ -8,7 +8,7 @@ import { ensureDatabase } from "../src/lib/db/core.ts";
 import { registerDeviceApiToken } from "../src/lib/db/api-tokens.ts";
 import { fulfillByoOpenAiUnlock } from "../src/lib/db/payments.ts";
 import { getStripe } from "../src/lib/stripe.ts";
-import { packs } from "../src/types/packs.ts";
+import { packQuantity, packs } from "../src/types/packs.ts";
 import {
   createSqliteD1Database,
   resetSqliteD1Database,
@@ -1749,4 +1749,253 @@ test("buildAdaptivePricing: any Korean signal keeps USD, others get local curren
   assert.deepEqual(buildAdaptivePricing({ requestCountry: "US", locale: "en", acceptLanguage: "ko-KR,ko;q=0.9,en;q=0.8" }), { enabled: false });
   assert.deepEqual(buildAdaptivePricing({ requestCountry: "US", locale: "en", acceptLanguage: "en-US,ko;q=0.5" }), { enabled: true });
   assert.deepEqual(buildAdaptivePricing({}), { enabled: true });
+});
+
+// ---- Several $1 packs in one payment (the free-preview offer's price) ----
+
+function multiPackHelpers(deviceId) {
+  return {
+    balance: () =>
+      sqlite
+        .prepare("SELECT credit_balance FROM credits WHERE device_id = ?")
+        .get(deviceId)?.credit_balance ?? 0,
+    packRows: () =>
+      sqlite
+        .prepare(
+          "SELECT delta, reason, json_extract(meta, '$.quantity') AS quantity FROM credit_ledger WHERE device_id = ? AND reason LIKE 'PACK_%'",
+        )
+        .all(deviceId)
+        .map((row) => ({ ...row })),
+  };
+}
+
+async function createMultiPackSession(apiToken, body) {
+  return apiRequest("/payments/create-session", {
+    method: "POST",
+    headers: authHeaders(apiToken, { "content-type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+}
+
+async function deliverWebhook(signature) {
+  return apiRequest("/stripe/webhook", {
+    method: "POST",
+    headers: { "stripe-signature": signature, "content-type": "application/json" },
+    body: JSON.stringify({ ok: true }),
+  });
+}
+
+test("pack quantity is a whole number from 1 to 4 of the $1 pack, otherwise one", () => {
+  assert.equal(packQuantity("MICRO", 3), 3);
+  assert.equal(packQuantity("MICRO", "4"), 4);
+  assert.equal(packQuantity("MICRO", undefined), 1);
+  assert.equal(packQuantity("MICRO", null), 1);
+  assert.equal(packQuantity("MICRO", 0), 1);
+  assert.equal(packQuantity("MICRO", 5), 1);
+  assert.equal(packQuantity("MICRO", 2.5), 1);
+  assert.equal(packQuantity("MICRO", "2.5"), 1);
+  assert.equal(packQuantity("MICRO", "-2"), 1);
+  assert.equal(packQuantity("MICRO", "three"), 1);
+  assert.equal(packQuantity("STARTER", 3), 1);
+  assert.equal(packQuantity("PRO", "2"), 1);
+});
+
+test("three $1 packs in one checkout charge for three and grant three packs of credits", async () => {
+  const deviceId = "cccccccc-0000-4000-8000-000000000001";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  const sessionId = "cs_test_multi_pack_checkout";
+  const { balance, packRows } = multiPackHelpers(deviceId);
+  let created;
+
+  configureStripeStubs({
+    createSession: async (params) => {
+      created = params;
+      return {
+        id: sessionId,
+        url: `https://checkout.stripe.com/c/pay/${sessionId}`,
+        metadata: params.metadata,
+      };
+    },
+    constructEvent: async () => ({
+      id: "evt_multi_pack_checkout",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: sessionId,
+          payment_status: "paid",
+          payment_intent: "pi_test_multi_pack_checkout",
+          // Exactly what the server wrote on the session.
+          metadata: created.metadata,
+        },
+      },
+    }),
+  });
+
+  const response = await createMultiPackSession(apiToken, {
+    deviceId,
+    packId: "MICRO",
+    quantity: 3,
+    placement: "free-preview-offer",
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).quantity, 3);
+  assert.deepEqual(created.line_items, [
+    { price: packs.MICRO.priceId, quantity: 3 },
+  ]);
+  assert.equal(created.metadata.quantity, "3");
+  assert.equal(created.metadata.credits, String(packs.MICRO.credits * 3));
+  assert.equal(created.payment_intent_data.metadata.quantity, "3");
+  assert.equal(
+    sqlite
+      .prepare("SELECT credits_delta FROM checkout_sessions WHERE checkout_session_id = ?")
+      .get(sessionId).credits_delta,
+    packs.MICRO.credits * 3,
+  );
+
+  assert.equal((await deliverWebhook("sig_multi_pack_checkout")).status, 200);
+  assert.equal(balance(), packs.MICRO.credits * 3);
+  assert.deepEqual(packRows(), [
+    { delta: packs.MICRO.credits * 3, reason: "PACK_MICRO", quantity: 3 },
+  ]);
+
+  // The same event again grants nothing more.
+  assert.equal((await deliverWebhook("sig_multi_pack_checkout")).status, 200);
+  assert.equal(balance(), packs.MICRO.credits * 3);
+  assert.equal(packRows().length, 1);
+
+  // Nor does the payment-intent event for the same payment, even if its
+  // own metadata named a different number.
+  getStripe(env.STRIPE_SECRET_KEY).webhooks.constructEventAsync = async () => ({
+    id: "evt_multi_pack_checkout_intent",
+    type: "payment_intent.succeeded",
+    data: {
+      object: {
+        id: "pi_test_multi_pack_checkout",
+        status: "succeeded",
+        metadata: { deviceId, packId: "MICRO", quantity: "1" },
+      },
+    },
+  });
+  assert.equal((await deliverWebhook("sig_multi_pack_checkout_intent")).status, 200);
+  assert.equal(balance(), packs.MICRO.credits * 3);
+  assert.equal(packRows().length, 1);
+});
+
+test("a payment-intent confirmation of a multi-pack checkout grants the same credits", async () => {
+  const deviceId = "cccccccc-0000-4000-8000-000000000002";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  const sessionId = "cs_test_multi_pack_intent";
+  const paymentIntentId = "pi_test_multi_pack_intent";
+  const { balance, packRows } = multiPackHelpers(deviceId);
+  let created;
+
+  configureStripeStubs({
+    createSession: async (params) => {
+      created = params;
+      return {
+        id: sessionId,
+        url: `https://checkout.stripe.com/c/pay/${sessionId}`,
+        metadata: params.metadata,
+      };
+    },
+    // The session cannot be found, so only the payment intent's own
+    // metadata says how many packs were bought.
+    listSessions: async () => ({ data: [] }),
+    constructEvent: async () => ({
+      id: "evt_multi_pack_intent",
+      type: "payment_intent.succeeded",
+      data: {
+        object: {
+          id: paymentIntentId,
+          status: "succeeded",
+          metadata: created.payment_intent_data.metadata,
+        },
+      },
+    }),
+  });
+
+  assert.equal(
+    (
+      await createMultiPackSession(apiToken, {
+        deviceId,
+        packId: "MICRO",
+        quantity: 4,
+      })
+    ).status,
+    200,
+  );
+  assert.equal((await deliverWebhook("sig_multi_pack_intent")).status, 200);
+  assert.equal(balance(), packs.MICRO.credits * 4);
+  assert.deepEqual(packRows(), [
+    { delta: packs.MICRO.credits * 4, reason: "PACK_MICRO", quantity: 4 },
+  ]);
+});
+
+test("a checkout without a quantity still buys exactly one pack", async () => {
+  const deviceId = "cccccccc-0000-4000-8000-000000000003";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  const sessionId = "cs_test_single_pack_default";
+  const { balance, packRows } = multiPackHelpers(deviceId);
+  let created;
+
+  configureStripeStubs({
+    createSession: async (params) => {
+      created = params;
+      return {
+        id: sessionId,
+        url: `https://checkout.stripe.com/c/pay/${sessionId}`,
+        metadata: params.metadata,
+      };
+    },
+    constructEvent: async () => ({
+      id: "evt_single_pack_default",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: sessionId,
+          payment_status: "paid",
+          payment_intent: "pi_test_single_pack_default",
+          metadata: created.metadata,
+        },
+      },
+    }),
+  });
+
+  assert.equal(
+    (await createMultiPackSession(apiToken, { deviceId, packId: "MICRO" })).status,
+    200,
+  );
+  assert.deepEqual(created.line_items, [
+    { price: packs.MICRO.priceId, quantity: 1 },
+  ]);
+  assert.equal("quantity" in created.metadata, false);
+  assert.equal((await deliverWebhook("sig_single_pack_default")).status, 200);
+  assert.equal(balance(), packs.MICRO.credits);
+  assert.deepEqual(packRows(), [
+    { delta: packs.MICRO.credits, reason: "PACK_MICRO", quantity: null },
+  ]);
+});
+
+test("quantities the offer never uses are refused before Stripe is called", async () => {
+  const deviceId = "cccccccc-0000-4000-8000-000000000004";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  let stripeCalls = 0;
+  configureStripeStubs({
+    createSession: async () => {
+      stripeCalls += 1;
+      return { id: "cs_never", url: "https://checkout.stripe.com/c/pay/cs_never" };
+    },
+  });
+  for (const body of [
+    { deviceId, packId: "MICRO", quantity: 5 },
+    { deviceId, packId: "MICRO", quantity: 0 },
+    { deviceId, packId: "MICRO", quantity: 1.5 },
+    { deviceId, packId: "MICRO", quantity: "3" },
+    { deviceId, packId: "STARTER", quantity: 2 },
+    { deviceId, packId: "PRO", quantity: 4 },
+  ]) {
+    const response = await createMultiPackSession(apiToken, body);
+    assert.equal(response.status, 400, JSON.stringify(body));
+  }
+  assert.equal(stripeCalls, 0);
 });

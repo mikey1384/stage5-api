@@ -26,6 +26,31 @@ export const packs = {
   },
 } as const;
 
+// The free-preview offer sells the $1 pack in multiples, so a video that
+// needs a little more than one pack costs $2, $3 or $4 instead of jumping to
+// the $5 pack. Five or more is never offered: the $5 pack holds more.
+export const MULTI_PACK_ID: PackId = "MICRO";
+export const MAX_PACK_QUANTITY = 4;
+
+/**
+ * How many packs a checkout bought. Anything but a whole number from 1 to
+ * MAX_PACK_QUANTITY of the multi-buy pack counts as one.
+ */
+export function packQuantity(packId: PackId, raw: unknown): number {
+  const value =
+    typeof raw === "string" && /^[0-9]{1,2}$/.test(raw) ? Number(raw) : raw;
+  if (
+    packId !== MULTI_PACK_ID ||
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_PACK_QUANTITY
+  ) {
+    return 1;
+  }
+  return value;
+}
+
 export const isValidPackId = (id: string): id is PackId => {
   return PACK_IDS.includes(id as PackId);
 };

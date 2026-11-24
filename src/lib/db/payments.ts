@@ -1,4 +1,4 @@
-import { packs, type PackId } from "../../types/packs";
+import { packQuantity, packs, type PackId } from "../../types/packs";
 import { getDatabase } from "./core";
 
 export const isEventProcessed = async ({
@@ -79,6 +79,8 @@ type StripeFulfillmentBase = {
 
 type CreditPackFulfillmentInput = StripeFulfillmentBase & {
   packId: PackId;
+  /** Packs bought in this one payment (the $1 pack only); defaults to one. */
+  quantity?: number;
   stripePaymentStatus?: string | null;
 };
 
@@ -538,6 +540,7 @@ async function runInTransaction<T>(work: () => Promise<T>): Promise<T> {
 export async function fulfillCreditPackPurchase({
   deviceId,
   packId,
+  quantity,
   checkoutSessionId = null,
   paymentIntentId = null,
   stripeEventId = null,
@@ -550,7 +553,8 @@ export async function fulfillCreditPackPurchase({
     throw new Error(`Invalid pack ID for Stripe fulfillment: ${packId}`);
   }
 
-  const creditsToAdd = pack.credits;
+  const packCount = packQuantity(packId, quantity);
+  const creditsToAdd = pack.credits * packCount;
   const reason = `PACK_${packId.toUpperCase()}`;
   const fulfillmentKey = buildStripeFulfillmentKey(
     "credits",
@@ -559,6 +563,7 @@ export async function fulfillCreditPackPurchase({
   );
   const metaJson = serializeMeta({
     packId,
+    ...(packCount > 1 ? { quantity: packCount } : {}),
     creditsAdded: creditsToAdd,
     checkoutSessionId,
     paymentIntentId,

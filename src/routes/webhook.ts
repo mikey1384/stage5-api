@@ -29,7 +29,12 @@ import {
   recordPurchaseAnalytics,
 } from "../lib/checkout-fulfillment";
 import { flushAnalyticsOutbox } from "../lib/product-analytics";
-import { isValidPackId, packs, type PackId } from "../types/packs";
+import {
+  isValidPackId,
+  packQuantity,
+  packs,
+  type PackId,
+} from "../types/packs";
 import type { Stage5ApiBindings } from "../types/env";
 
 const router = new Hono<{ Bindings: Stage5ApiBindings }>();
@@ -69,6 +74,8 @@ type CheckoutPaymentIntentDetails = {
   checkoutSessionPaymentStatus: Stripe.Checkout.Session.PaymentStatus | null;
   deviceId: string | null;
   packId: string | null;
+  /** How many packs the checkout bought, as written in its metadata. */
+  quantity: string | null;
   entitlement: string | null;
   mode: "credits" | "byo";
 };
@@ -111,6 +118,7 @@ async function resolveCheckoutDetailsFromPaymentIntent({
     checkoutSessionPaymentStatus: session?.payment_status ?? null,
     deviceId: typeof metadata.deviceId === "string" ? metadata.deviceId : null,
     packId: typeof metadata.packId === "string" ? metadata.packId : null,
+    quantity: typeof metadata.quantity === "string" ? metadata.quantity : null,
     entitlement,
     mode: entitlement === "byo_openai" ? "byo" : "credits",
   };
@@ -145,7 +153,10 @@ async function sendDedupedPaymentAlert(
       eventType: "payment_alert",
     });
   } catch (error) {
-    console.warn(`[payment-alerts] dedupe write failed for ${dedupeKey}:`, error);
+    console.warn(
+      `[payment-alerts] dedupe write failed for ${dedupeKey}:`,
+      error,
+    );
   }
   if (isNew) {
     await sendPaymentAlert(env, input);
@@ -469,7 +480,9 @@ const handleCheckoutExpired = async ({
     stripeEventType: eventType,
   });
   if (changed) {
-    console.log(`Checkout session ${session.id} expired; recorded as cancelled`);
+    console.log(
+      `Checkout session ${session.id} expired; recorded as cancelled`,
+    );
   }
 };
 
@@ -488,7 +501,8 @@ const handlePaymentSucceeded = async ({
     paymentIntent,
     logContext: "succeeded",
   });
-  const { checkoutSessionId, entitlement, deviceId, packId } = checkoutDetails;
+  const { checkoutSessionId, entitlement, deviceId, packId, quantity } =
+    checkoutDetails;
   if (entitlement === "byo_openai" && deviceId) {
     try {
       const result = await fulfillByoOpenAiUnlock({
@@ -540,9 +554,11 @@ const handlePaymentSucceeded = async ({
 
   if (deviceId && packId && isValidPackId(packId)) {
     try {
+      const packCount = packQuantity(packId, quantity);
       const result = await fulfillCreditPackPurchase({
         deviceId,
         packId: packId as PackId,
+        quantity: packCount,
         checkoutSessionId,
         paymentIntentId: paymentIntent.id,
         stripeEventId: eventId,
@@ -576,7 +592,7 @@ const handlePaymentSucceeded = async ({
           typeof paymentIntent.amount_received === "number" &&
           paymentIntent.amount_received > 0
             ? paymentIntent.amount_received / 100
-            : packs[packId].usd,
+            : packs[packId].usd * packCount,
         currency: paymentIntent.currency,
       });
     } catch (error) {
