@@ -544,3 +544,78 @@ test("signature failures return 400 and alert at most once an hour", async () =>
   assert.equal((await postWebhook()).status, 400);
   assert.equal(subjects().filter((s) => /signature verification failed/.test(s)).length, 1);
 });
+
+test("sweep alerts once when a paid checkout was credited a different amount than it was sold for", async () => {
+  const deviceId = "c0000000-0000-4000-8000-0000000000c1";
+  // Sold as three $1 packs, but the session carries no quantity, as if an
+  // older server had created it: the grant is one pack.
+  await recordCheckoutSessionCreated({
+    checkoutSessionId: "cs_test_credit_mismatch",
+    deviceId,
+    kind: "credits",
+    packId: "MICRO",
+    creditsDelta: packs.MICRO.credits * 3,
+  });
+  sessionsById.set("cs_test_credit_mismatch", {
+    id: "cs_test_credit_mismatch",
+    object: "checkout.session",
+    status: "complete",
+    payment_status: "paid",
+    payment_intent: "pi_test_credit_mismatch",
+    mode: "payment",
+    amount_total: 300,
+    currency: "usd",
+    created: Math.floor(Date.now() / 1000),
+    metadata: { deviceId, packId: "MICRO" },
+  });
+
+  const report = await runCheckoutSweep(env);
+  assert.equal(report.fulfilled, 1);
+  assert.equal(balance(deviceId), packs.MICRO.credits);
+  const mismatchAlerts = () =>
+    sentAlerts.filter((alert) =>
+      /credited a different amount/.test(
+        alert.personalizations?.[0]?.subject ?? "",
+      ),
+    );
+  assert.equal(mismatchAlerts().length, 1);
+  const text = JSON.stringify(mismatchAlerts()[0]);
+  assert.match(text, /expectedCredits: 45000/);
+  assert.match(text, /grantedCredits: 15000/);
+  assert.match(text, /cs_test_credit_mismatch/);
+
+  // Reported once, and nothing is changed automatically.
+  await runCheckoutSweep(env);
+  assert.equal(mismatchAlerts().length, 1);
+  assert.equal(balance(deviceId), packs.MICRO.credits);
+});
+
+test("sweep stays quiet when a multi-pack checkout was credited in full", async () => {
+  const deviceId = "c0000000-0000-4000-8000-0000000000c2";
+  await recordCheckoutSessionCreated({
+    checkoutSessionId: "cs_test_credit_match",
+    deviceId,
+    kind: "credits",
+    packId: "MICRO",
+    creditsDelta: packs.MICRO.credits * 3,
+  });
+  sessionsById.set("cs_test_credit_match", {
+    id: "cs_test_credit_match",
+    object: "checkout.session",
+    status: "complete",
+    payment_status: "paid",
+    payment_intent: "pi_test_credit_match",
+    mode: "payment",
+    amount_total: 300,
+    currency: "usd",
+    created: Math.floor(Date.now() / 1000),
+    metadata: { deviceId, packId: "MICRO", quantity: "3" },
+  });
+
+  const report = await runCheckoutSweep(env);
+  assert.equal(report.fulfilled, 1);
+  assert.equal(report.alerted, 0);
+  assert.equal(balance(deviceId), packs.MICRO.credits * 3);
+  assert.equal((await runCheckoutSweep(env)).alerted, 0);
+  assert.equal(sentAlerts.length, 0);
+});

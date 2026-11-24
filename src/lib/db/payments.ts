@@ -959,3 +959,67 @@ export async function listBackstopFulfilledWithoutWebhook({
     .map((row: any) => normalizeCheckoutSessionRecord(row))
     .filter((row: CheckoutSessionRecord | null): row is CheckoutSessionRecord => row !== null);
 }
+
+export type CreditGrantMismatch = {
+  checkoutSessionId: string;
+  deviceId: string;
+  packId: string | null;
+  paymentIntentId: string | null;
+  /** Credits the checkout was created for (pack credits x quantity). */
+  expectedCredits: number;
+  /** Credits the ledger shows for this payment; null when it shows none. */
+  grantedCredits: number | null;
+  fulfilledAt: string | null;
+};
+
+/**
+ * Fulfilled credit checkouts whose ledger grant differs from what the
+ * checkout was created for. The grant is found by the session id or the
+ * payment intent id its ledger row carries.
+ */
+export async function listCreditGrantMismatches({
+  sinceHours,
+  limit,
+}: {
+  sinceHours: number;
+  limit: number;
+}): Promise<CreditGrantMismatch[]> {
+  const db = getDatabase();
+  const { results } = await db
+    .prepare(
+      `SELECT checkout_session_id, device_id, pack_id, payment_intent_id,
+              credits_delta AS expected_credits, granted_credits, fulfilled_at
+       FROM (
+         SELECT cs.*,
+                (SELECT SUM(l.delta)
+                   FROM credit_ledger l
+                  WHERE l.device_id = cs.device_id
+                    AND l.reason LIKE 'PACK_%'
+                    AND (json_extract(l.meta, '$.checkoutSessionId') = cs.checkout_session_id
+                         OR (cs.payment_intent_id IS NOT NULL
+                             AND json_extract(l.meta, '$.paymentIntentId') = cs.payment_intent_id))
+                ) AS granted_credits
+           FROM checkout_sessions cs
+          WHERE cs.kind = 'credits'
+            AND cs.status = 'fulfilled'
+            AND cs.credits_delta IS NOT NULL
+            AND cs.fulfilled_at >= datetime('now', ?)
+       )
+       WHERE granted_credits IS NULL OR granted_credits != expected_credits
+       ORDER BY fulfilled_at ASC
+       LIMIT ?`
+    )
+    .bind(`-${Math.max(1, Math.floor(sinceHours))} hours`, limit)
+    .all();
+  return (results ?? []).map((row: any) => ({
+    checkoutSessionId: String(row.checkout_session_id),
+    deviceId: String(row.device_id),
+    packId: row.pack_id == null ? null : String(row.pack_id),
+    paymentIntentId:
+      row.payment_intent_id == null ? null : String(row.payment_intent_id),
+    expectedCredits: Number(row.expected_credits),
+    grantedCredits:
+      row.granted_credits == null ? null : Number(row.granted_credits),
+    fulfilledAt: row.fulfilled_at == null ? null : String(row.fulfilled_at),
+  }));
+}

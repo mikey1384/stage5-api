@@ -2,6 +2,7 @@ import type Stripe from "stripe";
 import { getStripe } from "./stripe";
 import {
   listBackstopFulfilledWithoutWebhook,
+  listCreditGrantMismatches,
   listUnsettledCheckoutSessions,
   markCheckoutSessionExpired,
   markEventProcessedIfNew,
@@ -69,7 +70,9 @@ async function alertOnce(
  * 48 h, ask Stripe: paid -> fulfil (idempotent with the webhook and the poll),
  * expired -> record. A paid session found here more than N minutes after
  * payment means the webhook failed, so it alerts. It also alerts once for
- * sessions the app's poll had to fulfil whose webhook never arrived.
+ * sessions the app's poll had to fulfil whose webhook never arrived, and
+ * once for any fulfilled checkout whose granted credits differ from what
+ * the buyer paid for.
  */
 export async function runCheckoutSweep(
   env: Stage5ApiBindings,
@@ -194,6 +197,39 @@ export async function runCheckoutSweep(
           fulfilledAt: row.fulfilled_at,
         },
       })
+    ) {
+      report.alerted += 1;
+    }
+  }
+
+  // Whatever path fulfilled it, the buyer must have received exactly what
+  // the checkout was created for (pack credits x quantity).
+  const mismatches = await listCreditGrantMismatches({
+    sinceHours: CHECKOUT_SWEEP_WINDOW_HOURS,
+    limit: CHECKOUT_SWEEP_BATCH,
+  });
+  for (const mismatch of mismatches) {
+    if (
+      await alertOnce(
+        env,
+        `checkout-credit-mismatch-alert:${mismatch.checkoutSessionId}`,
+        {
+          title: "Paid checkout was credited a different amount than it was sold for",
+          severity: "critical",
+          context: {
+            source: BACKSTOP_SWEEP_EVENT_TYPE,
+            action:
+              "Compare the ledger grant with the checkout and correct the device's balance by hand. Nothing was changed automatically.",
+            sessionId: mismatch.checkoutSessionId,
+            paymentIntentId: mismatch.paymentIntentId,
+            deviceId: mismatch.deviceId,
+            packId: mismatch.packId,
+            expectedCredits: mismatch.expectedCredits,
+            grantedCredits: mismatch.grantedCredits,
+            fulfilledAt: mismatch.fulfilledAt,
+          },
+        },
+      )
     ) {
       report.alerted += 1;
     }
