@@ -306,11 +306,13 @@ export const cleanupOldTranscriptionJobs = async ({
 
 export const listOldTranscriptionJobs = async ({
   maxAgeHours = 24,
+  maxAgeMinutes,
   limit = 200,
   statuses,
   excludeJobIds,
 }: {
   maxAgeHours?: number;
+  maxAgeMinutes?: number;
   limit?: number;
   statuses?: Array<TranscriptionJobRecord["status"]>;
   excludeJobIds?: string[];
@@ -321,6 +323,12 @@ export const listOldTranscriptionJobs = async ({
     Number.isFinite(parsedMaxAgeHours) && parsedMaxAgeHours > 0
       ? parsedMaxAgeHours
       : 24;
+  const parsedMaxAgeMinutes =
+    maxAgeMinutes === undefined ? NaN : Math.floor(maxAgeMinutes);
+  const useMinutes =
+    Number.isFinite(parsedMaxAgeMinutes) && parsedMaxAgeMinutes > 0;
+  const ageAmount = useMinutes ? parsedMaxAgeMinutes : safeMaxAgeHours;
+  const ageUnit = useMinutes ? "minutes" : "hours";
   const safeLimit = Math.max(1, Math.floor(limit));
   const normalizedStatuses = (statuses || [])
     .map(status => String(status || "").trim())
@@ -341,7 +349,7 @@ export const listOldTranscriptionJobs = async ({
   const stmt = db.prepare(`
     SELECT *
       FROM transcription_jobs
-     WHERE updated_at < datetime('now', '-' || ? || ' hours')
+     WHERE updated_at < datetime('now', '-' || ? || ' ${ageUnit}')
            ${statusClause}
            ${excludedIdClause}
      ORDER BY updated_at ASC
@@ -349,7 +357,7 @@ export const listOldTranscriptionJobs = async ({
   `);
   const result = await stmt
     .bind(
-      safeMaxAgeHours,
+      ageAmount,
       ...normalizedStatuses,
       ...normalizedExcludedIds,
       safeLimit,

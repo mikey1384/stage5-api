@@ -34,12 +34,17 @@ export const FREE_PREVIEW_DISMISS_REASON_EVENTS = [
 export const CHECKOUT_PACK_COUNT_MISMATCH_EVENT =
   "checkout_pack_count_mismatch" as const;
 
+// A validated stage5-translator://open?url=... deep link (e.g. browser
+// bookmarklet) pre-filled the Home URL box (Translator 1.36+).
+export const BOOKMARKLET_URL_OPENED_EVENT = "bookmarklet_url_opened" as const;
+
 export const USAGE_COUNT_EVENTS = [
   ...PRODUCT_EVENT_NAMES,
   "app_first_open",
   ...HANDOFF_USAGE_COUNT_EVENTS,
   ...FREE_PREVIEW_DISMISS_REASON_EVENTS,
   CHECKOUT_PACK_COUNT_MISMATCH_EVENT,
+  BOOKMARKLET_URL_OPENED_EVENT,
 ] as const;
 
 const MAX_COUNT_PER_ENTRY = 500;

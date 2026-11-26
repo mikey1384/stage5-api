@@ -195,16 +195,19 @@ export async function cleanupAbandonedPendingUploadTranscriptionJobs({
 export async function cleanupStaleProcessingTranscriptionJobs({
   bucket,
   maxAgeHours = 24,
+  maxAgeMinutes,
   batchSize = 200,
   now = new Date(),
 }: {
   bucket: R2Bucket;
   maxAgeHours?: number;
+  maxAgeMinutes?: number;
   batchSize?: number;
   now?: Date;
 }): Promise<number> {
   const jobs = await listOldTranscriptionJobs({
     maxAgeHours,
+    maxAgeMinutes,
     limit: boundedBatchSize(batchSize),
     statuses: ["processing"],
   });

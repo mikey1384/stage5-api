@@ -3,6 +3,7 @@ import test, { before, beforeEach } from "node:test";
 
 import worker from "../src/index.ts";
 import {
+  BOOKMARKLET_URL_OPENED_EVENT,
   CHECKOUT_PACK_COUNT_MISMATCH_EVENT,
   FREE_PREVIEW_DISMISS_REASON_EVENTS,
   HANDOFF_USAGE_COUNT_EVENTS,
@@ -177,4 +178,23 @@ test("the checkout pack-count mismatch is accepted as an anonymous count only", 
     1,
   );
   assert.ok(!PRODUCT_EVENT_NAMES.includes(CHECKOUT_PACK_COUNT_MISMATCH_EVENT));
+});
+
+test("bookmarklet_url_opened is accepted as an anonymous count only", async () => {
+  assert.equal(BOOKMARKLET_URL_OPENED_EVENT, "bookmarklet_url_opened");
+  assert.equal(
+    (
+      await post({
+        appVersion: "1.36.0",
+        platform: "darwin",
+        counts: [{ event: BOOKMARKLET_URL_OPENED_EVENT, day: today, n: 2 }],
+      })
+    ).status,
+    204,
+  );
+  assert.equal(
+    rows().find((r) => r.event === BOOKMARKLET_URL_OPENED_EVENT)?.count,
+    2,
+  );
+  assert.ok(!PRODUCT_EVENT_NAMES.includes(BOOKMARKLET_URL_OPENED_EVENT));
 });

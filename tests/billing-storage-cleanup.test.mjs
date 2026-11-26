@@ -9,10 +9,13 @@ import {
 } from "../src/lib/billing-storage-cleanup.ts";
 import {
   getBillingReservation,
+  getTranscriptionJob,
   releaseBillingReservation,
 } from "../src/lib/db.ts";
 import { ensureDatabase } from "../src/lib/db/core.ts";
+import { generateFileKey } from "../src/lib/r2-config.ts";
 import { buildReplayArtifactKey } from "../src/lib/replay-artifacts.ts";
+import { buildR2TranscriptionReservationKey } from "../src/lib/transcription-billing.ts";
 import {
   createSqliteD1Database,
   resetSqliteD1Database,
@@ -642,5 +645,146 @@ test("scheduled cleanup runs even when reconciliation cron is disabled", async (
   assert.equal(
     JSON.parse(cleaned.meta).directReplayExpiredAt.length > 0,
     true,
+  );
+});
+
+test("scheduled cleanup fails stale processing transcription jobs after STALE_PROCESSING_TRANSCRIPTION_MINUTES and releases holds while leaving recent jobs untouched", async () => {
+  const deviceId = "81000000-0000-4000-8000-000000000011";
+  const staleJobId = "stale-processing-95m";
+  const recentJobId = "recent-processing-30m";
+  const staleKey = generateFileKey(deviceId, staleJobId);
+  const recentKey = generateFileKey(deviceId, recentJobId);
+
+  sqlite
+    .prepare("INSERT INTO credits (device_id, credit_balance) VALUES (?, ?)")
+    .run(deviceId, 50000);
+
+  sqlite
+    .prepare(
+      `INSERT INTO transcription_jobs (
+         job_id,
+         device_id,
+         client_request_key,
+         status,
+         file_key,
+         language,
+         duration_seconds,
+         created_at,
+         updated_at
+       )
+       VALUES (?, ?, ?, 'processing', ?, 'en', 3600, datetime('now', '-95 minutes'), datetime('now', '-95 minutes'))`,
+    )
+    .run(staleJobId, deviceId, "stale-client-key", staleKey);
+  sqlite
+    .prepare(
+      `INSERT INTO billing_reservations (
+         device_id,
+         service,
+         request_key,
+         reserved_spend,
+         settled_spend,
+         status,
+         meta,
+         created_at,
+         updated_at
+       )
+       VALUES (?, 'transcription', ?, 23583, NULL, 'reserved', '{}', datetime('now', '-95 minutes'), datetime('now', '-95 minutes'))`,
+    )
+    .run(deviceId, buildR2TranscriptionReservationKey(staleJobId));
+
+  sqlite
+    .prepare(
+      `INSERT INTO transcription_jobs (
+         job_id,
+         device_id,
+         client_request_key,
+         status,
+         file_key,
+         language,
+         duration_seconds,
+         created_at,
+         updated_at
+       )
+       VALUES (?, ?, ?, 'processing', ?, 'en', 600, datetime('now', '-30 minutes'), datetime('now', '-30 minutes'))`,
+    )
+    .run(recentJobId, deviceId, "recent-client-key", recentKey);
+  sqlite
+    .prepare(
+      `INSERT INTO billing_reservations (
+         device_id,
+         service,
+         request_key,
+         reserved_spend,
+         settled_spend,
+         status,
+         meta,
+         created_at,
+         updated_at
+       )
+       VALUES (?, 'transcription', ?, 5000, NULL, 'reserved', '{}', datetime('now', '-30 minutes'), datetime('now', '-30 minutes'))`,
+    )
+    .run(deviceId, buildR2TranscriptionReservationKey(recentJobId));
+
+  const deletedKeys = [];
+  let scheduledWork;
+  await worker.scheduled(
+    {},
+    {
+      DB: db,
+      RECONCILE_CRON_ENABLED: "0",
+      DIRECT_REPLAY_RETENTION_HOURS: "24",
+      STALE_BILLING_RESERVATION_MAX_AGE_HOURS: "24",
+      TRANSCRIPTION_JOB_RETENTION_HOURS: "24",
+      STALE_PROCESSING_TRANSCRIPTION_MINUTES: "90",
+      BILLING_STORAGE_CLEANUP_BATCH_SIZE: "200",
+      TRANSCRIPTION_BUCKET: {
+        async delete(key) {
+          if (Array.isArray(key)) {
+            deletedKeys.push(...key);
+          } else {
+            deletedKeys.push(key);
+          }
+        },
+      },
+    },
+    {
+      waitUntil(promise) {
+        scheduledWork = promise;
+      },
+    },
+  );
+
+  assert.ok(scheduledWork instanceof Promise);
+  await scheduledWork;
+
+  const staleJob = await getTranscriptionJob({ jobId: staleJobId });
+  assert.equal(staleJob?.status, "failed");
+  assert.equal(staleJob?.error, "storage-cleanup:processing-timeout");
+  assert.equal(
+    (await getBillingReservation({
+      deviceId,
+      service: "transcription",
+      requestKey: buildR2TranscriptionReservationKey(staleJobId),
+    }))?.status,
+    "released",
+  );
+  assert.equal(
+    sqlite
+      .prepare("SELECT credit_balance FROM credits WHERE device_id = ?")
+      .get(deviceId).credit_balance,
+    73583,
+  );
+  assert.ok(deletedKeys.includes(staleKey));
+  assert.equal(deletedKeys.includes(recentKey), false);
+
+  const recentJob = await getTranscriptionJob({ jobId: recentJobId });
+  assert.equal(recentJob?.status, "processing");
+  assert.equal(
+    (await getBillingReservation({
+      deviceId,
+      service: "transcription",
+      requestKey: buildR2TranscriptionReservationKey(recentJobId),
+    }))?.status,
+    "reserved",
   );
 });

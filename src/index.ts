@@ -205,6 +205,10 @@ export default {
               env.TRANSCRIPTION_JOB_RETENTION_HOURS,
               24,
             ),
+            staleProcessingTranscriptionMinutes: positiveIntegerSetting(
+              env.STALE_PROCESSING_TRANSCRIPTION_MINUTES,
+              90,
+            ),
             batchSize: positiveIntegerSetting(
               env.BILLING_STORAGE_CLEANUP_BATCH_SIZE,
               200,

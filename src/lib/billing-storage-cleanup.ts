@@ -516,6 +516,7 @@ export async function runBillingStorageCleanup({
   directReplayMaxAgeHours = 24,
   staleReservationMaxAgeHours = 24,
   transcriptionJobMaxAgeHours = 24,
+  staleProcessingTranscriptionMinutes,
   batchSize = 200,
   now = new Date(),
 }: {
@@ -523,6 +524,7 @@ export async function runBillingStorageCleanup({
   directReplayMaxAgeHours?: number;
   staleReservationMaxAgeHours?: number;
   transcriptionJobMaxAgeHours?: number;
+  staleProcessingTranscriptionMinutes?: number;
   batchSize?: number;
   now?: Date;
 }): Promise<BillingStorageCleanupReport> {
@@ -538,6 +540,10 @@ export async function runBillingStorageCleanup({
     transcriptionJobMaxAgeHours,
     24,
   );
+  const safeStaleProcessingTranscriptionMinutes =
+    staleProcessingTranscriptionMinutes === undefined
+      ? undefined
+      : clampPositiveInteger(staleProcessingTranscriptionMinutes, 90);
   const safeBatchSize = clampPositiveInteger(
     batchSize,
     200,
@@ -604,6 +610,9 @@ export async function runBillingStorageCleanup({
       await cleanupStaleProcessingTranscriptionJobs({
         bucket,
         maxAgeHours: safeTranscriptionJobMaxAgeHours,
+        ...(safeStaleProcessingTranscriptionMinutes !== undefined
+          ? { maxAgeMinutes: safeStaleProcessingTranscriptionMinutes }
+          : {}),
         batchSize: safeBatchSize,
         now,
       });
