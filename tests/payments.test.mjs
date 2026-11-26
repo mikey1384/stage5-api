@@ -1731,6 +1731,7 @@ test("fresh-device BYO unlock is readable through entitlements without a credits
     byoOpenAi: true,
     byoAnthropic: true,
     byoElevenLabs: true,
+    byoGemini: true,
   });
   assert.equal(
     count("SELECT COUNT(*) AS count FROM credits WHERE device_id = ?", [

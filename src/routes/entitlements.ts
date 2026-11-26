@@ -44,6 +44,7 @@ router.get("/:deviceId", async (c) => {
     const byoOpenAi = Boolean(record?.byo_openai);
     const byoAnthropic = Boolean(record?.byo_anthropic) || byoOpenAi;
     const byoElevenLabs = byoOpenAi;
+    const byoGemini = byoOpenAi;
     let stage5AnthropicReviewAvailable = false;
 
     try {
@@ -67,7 +68,7 @@ router.get("/:deviceId", async (c) => {
 
     return c.json({
       deviceId,
-      entitlements: { byoOpenAi, byoAnthropic, byoElevenLabs },
+      entitlements: { byoOpenAi, byoAnthropic, byoElevenLabs, byoGemini },
       capabilities: {
         stage5AnthropicReviewAvailable,
       },

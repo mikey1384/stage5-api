@@ -1,5 +1,5 @@
 import { encodingForModel } from "js-tiktoken";
-import { isClaudeModel } from "./constants";
+import { isClaudeModel, isGeminiModel } from "./constants";
 
 type TiktokenEncoder = {
   encode(value: string): number[];
@@ -131,7 +131,7 @@ export function estimateTranslationPromptTokenReserve({
 }): number {
   const { source, messageCount } = getPromptSource({ messages, payload });
 
-  if (isClaudeModel(model)) {
+  if (isClaudeModel(model) || isGeminiModel(model)) {
     return (
       getUtf8Length(source) +
       CLAUDE_PROMPT_BASE_OVERHEAD_TOKENS +
@@ -167,7 +167,7 @@ export function estimateTranslationCompletionTokensFallback({
   const text = getCompletionText(completion);
   let estimate: number;
 
-  if (isClaudeModel(model)) {
+  if (isClaudeModel(model) || isGeminiModel(model)) {
     estimate = getUtf8Length(text) + CLAUDE_COMPLETION_FALLBACK_OVERHEAD_TOKENS;
   } else {
     const encoder = getOpenAiEncoder(model);

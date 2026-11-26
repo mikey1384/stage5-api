@@ -82,9 +82,17 @@ export type ApiError = (typeof API_ERRORS)[keyof typeof API_ERRORS];
 
 // Helper to determine provider from model
 export function isClaudeModel(model: string | undefined): boolean {
-  return Boolean(model && model.startsWith("claude-"));
+  return Boolean(model && model.trim().toLowerCase().startsWith("claude-"));
 }
 
-export function getProviderFromModel(model: string): "Anthropic" | "OpenAI" {
-  return isClaudeModel(model) ? "Anthropic" : "OpenAI";
+export function isGeminiModel(model: string | undefined): boolean {
+  return Boolean(model && model.trim().toLowerCase().startsWith("gemini-"));
+}
+
+export function getProviderFromModel(
+  model: string
+): "Anthropic" | "Gemini" | "OpenAI" {
+  if (isClaudeModel(model)) return "Anthropic";
+  if (isGeminiModel(model)) return "Gemini";
+  return "OpenAI";
 }

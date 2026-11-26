@@ -182,3 +182,97 @@ test("current Claude generation is priced and allowed; Sonnet 5 uses its list pr
     EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS
   );
 });
+
+test("Gemini trial models are priced, allowed, UTF-8 estimated, and do not alter production defaults", async () => {
+  const { isAllowedTranslationModel, tokensToCredits } = await import("../src/lib/pricing.ts");
+  const { isGeminiModel, getProviderFromModel } = await import("../src/lib/constants.ts");
+  const {
+    DEFAULT_TRANSLATION_MAX_COMPLETION_TOKENS,
+    EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS,
+    resolveTranslationReservationMaxCompletionTokens,
+  } = await import("../src/lib/translation-model-selection.ts");
+  const { estimateTranslationPromptTokenReserve } = await import(
+    "../src/lib/translation-token-estimator.ts"
+  );
+
+  for (const model of [
+    "gemini-3.5-flash-lite",
+    "gemini-4-hydrogen",
+    "gemini-4-neon",
+    "gemini-4-carbon",
+  ]) {
+    assert.equal(isAllowedTranslationModel(model), true, model);
+    assert.equal(isGeminiModel(model), true, model);
+    assert.equal(getProviderFromModel(model), "Gemini", model);
+  }
+
+  // Gemini 4 Neon ($3 / $15) is 25% cheaper than Opus 5.5 ($4 / $20).
+  const neonCredits = tokensToCredits({
+    prompt: 1_000_000,
+    completion: 1_000_000,
+    model: "gemini-4-neon",
+  });
+  const opusCredits = tokensToCredits({
+    prompt: 1_000_000,
+    completion: 1_000_000,
+    model: "claude-opus-5-5",
+  });
+  assert.equal(neonCredits, Math.ceil((18 * 2) / (10 / 350_000)));
+  assert(neonCredits < opusCredits);
+
+  // Hydrogen ($1.50 / $7.50) is 25% cheaper than Sonnet 5.5 ($2 / $10).
+  assert(
+    tokensToCredits({ prompt: 100_000, completion: 50_000, model: "gemini-4-hydrogen" }) <
+      tokensToCredits({ prompt: 100_000, completion: 50_000, model: "claude-sonnet-5-5" })
+  );
+
+  // Flash-Lite ($0.30 / $2.50) is cheaper than Hydrogen ($1.50 / $7.50).
+  assert(
+    tokensToCredits({ prompt: 100_000, completion: 50_000, model: "gemini-3.5-flash-lite" }) <
+      tokensToCredits({ prompt: 100_000, completion: 50_000, model: "gemini-4-hydrogen" })
+  );
+
+  // Gemini 4 models always think -> extended reservation cap; Flash-Lite keeps default cap.
+  assert.equal(
+    resolveTranslationReservationMaxCompletionTokens({ model: "gemini-4-neon" }),
+    EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS
+  );
+  assert.equal(
+    resolveTranslationReservationMaxCompletionTokens({ model: "gemini-4-hydrogen" }),
+    EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS
+  );
+  assert.equal(
+    resolveTranslationReservationMaxCompletionTokens({ model: "gemini-4-carbon" }),
+    EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS
+  );
+  assert.equal(
+    resolveTranslationReservationMaxCompletionTokens({ model: "gemini-3.5-flash-lite" }),
+    DEFAULT_TRANSLATION_MAX_COMPLETION_TOKENS
+  );
+  assert.equal(
+    resolveTranslationReservationMaxCompletionTokens({
+      model: "gemini-3.5-flash-lite",
+      reasoning: { effort: "high" },
+    }),
+    EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS
+  );
+
+  // Gemini uses conservative UTF-8 prompt reserve matching Claude (not OpenAI tiktoken).
+  const messages = [{ role: "user", content: "안녕하세요, 번역 테스트입니다." }];
+  assert.equal(
+    estimateTranslationPromptTokenReserve({ model: "gemini-4-neon", messages }),
+    estimateTranslationPromptTokenReserve({ model: "claude-opus-5-5", messages })
+  );
+
+  // Production subtitle defaults stay on Haiku 5.5 / Opus 5.5 even if client asks for Gemini.
+  assert.equal(
+    resolveAuthoritativeTranslationModel({
+      requestedModel: "gemini-4-neon",
+      messages: REVIEW_MESSAGES,
+      canUseAnthropic: true,
+      translationPhase: "review",
+      qualityMode: true,
+    }),
+    "claude-opus-5-5"
+  );
+});

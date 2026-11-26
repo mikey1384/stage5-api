@@ -14,6 +14,13 @@ export const STAGE5_CLAUDE_OPUS_MODEL = "claude-opus-4-8";
 export const STAGE5_CLAUDE_SONNET_5_5_MODEL = "claude-sonnet-5-5";
 export const STAGE5_CLAUDE_OPUS_5_5_MODEL = "claude-opus-5-5";
 export const STAGE5_CLAUDE_HAIKU_5_5_MODEL = "claude-haiku-5-5";
+// Google Gemini models priced (and so allowed) for internal A/B trials and
+// future credit-mode routing. Production defaults stay on Claude until
+// measured trial results justify promotion.
+export const STAGE5_GEMINI_3_5_FLASH_LITE_MODEL = "gemini-3.5-flash-lite";
+export const STAGE5_GEMINI_4_HYDROGEN_MODEL = "gemini-4-hydrogen";
+export const STAGE5_GEMINI_4_NEON_MODEL = "gemini-4-neon";
+export const STAGE5_GEMINI_4_CARBON_MODEL = "gemini-4-carbon";
 // Vendor model and stable billing id are separate so in-flight reservations
 // and older clients keep the same Scribe pricing across model upgrades.
 export const ELEVENLABS_SCRIBE_MODEL_ID = "scribe_v3";
@@ -96,6 +103,23 @@ export const STAGE5_TRANSLATION_MODEL_PRICES = {
   [STAGE5_CLAUDE_HAIKU_5_5_MODEL]: {
     in: 0.1 / 1_000_000, // $0.10 per million tokens
     out: 0.5 / 1_000_000, // $0.50 per million tokens
+  },
+  [STAGE5_GEMINI_3_5_FLASH_LITE_MODEL]: {
+    in: 0.3 / 1_000_000, // $0.30 per million tokens
+    out: 2.5 / 1_000_000, // $2.50 per million tokens
+  },
+  [STAGE5_GEMINI_4_HYDROGEN_MODEL]: {
+    in: 1.5 / 1_000_000, // $1.50 per million tokens
+    out: 7.5 / 1_000_000, // $7.50 per million tokens
+  },
+  [STAGE5_GEMINI_4_NEON_MODEL]: {
+    in: 3 / 1_000_000, // $3.00 per million tokens
+    out: 15 / 1_000_000, // $15.00 per million tokens
+  },
+  // Standard list rate (post-launch promo ends 2026-11-30).
+  [STAGE5_GEMINI_4_CARBON_MODEL]: {
+    in: 4 / 1_000_000, // $4.00 per million tokens
+    out: 20 / 1_000_000, // $20.00 per million tokens
   },
 } as const;
 

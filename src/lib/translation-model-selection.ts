@@ -1,8 +1,11 @@
-import { isClaudeModel } from "./constants";
+import { isClaudeModel, isGeminiModel } from "./constants";
 import { isAllowedTranslationModel, normalizeTranslationModel } from "./pricing";
 import {
   STAGE5_CLAUDE_HAIKU_5_5_MODEL,
   STAGE5_CLAUDE_OPUS_5_5_MODEL,
+  STAGE5_GEMINI_4_CARBON_MODEL,
+  STAGE5_GEMINI_4_HYDROGEN_MODEL,
+  STAGE5_GEMINI_4_NEON_MODEL,
   STAGE5_REVIEW_TRANSLATION_MODEL,
 } from "./model-catalog";
 
@@ -115,7 +118,12 @@ export function resolveAuthoritativeTranslationModel({
     : STAGE5_REVIEW_TRANSLATION_MODEL;
 }
 
-const ALWAYS_THINKING_CLAUDE_MODELS = new Set<string>(["claude-opus-5-5"]);
+const ALWAYS_THINKING_MODELS = new Set<string>([
+  STAGE5_CLAUDE_OPUS_5_5_MODEL,
+  STAGE5_GEMINI_4_HYDROGEN_MODEL,
+  STAGE5_GEMINI_4_NEON_MODEL,
+  STAGE5_GEMINI_4_CARBON_MODEL,
+]);
 
 export function resolveTranslationReservationMaxCompletionTokens({
   model,
@@ -125,14 +133,14 @@ export function resolveTranslationReservationMaxCompletionTokens({
   reasoning?: unknown;
 }): number {
   const effort = String((reasoning as any)?.effort || "").trim().toLowerCase();
-  // Opus 5.5 thinks on every request (it can't be disabled), so it needs the
-  // extended allowance. Mirrors openai-relay's claudeModelAlwaysThinks.
+  const deepReasoning =
+    effort === "medium" || effort === "high" || effort === "xhigh";
+  // Opus 5.5 and Gemini 4 models think on every request (thinking cannot be
+  // disabled), so they need the extended allowance. Mirrors openai-relay's
+  // claudeModelAlwaysThinks / geminiModelAlwaysThinks.
   if (
-    isClaudeModel(model) &&
-    (effort === "medium" ||
-      effort === "high" ||
-      effort === "xhigh" ||
-      ALWAYS_THINKING_CLAUDE_MODELS.has(model))
+    ((isClaudeModel(model) || isGeminiModel(model)) && deepReasoning) ||
+    ALWAYS_THINKING_MODELS.has(model)
   ) {
     return EXTENDED_TRANSLATION_MAX_COMPLETION_TOKENS;
   }

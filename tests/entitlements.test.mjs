@@ -114,6 +114,38 @@ test("entitlements stage5 review capability follows relay truth when worker env 
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.capabilities.stage5AnthropicReviewAvailable, true);
+  assert.equal(body.entitlements.byoGemini, false);
+});
+
+test("entitlements exposes byoGemini alongside existing BYO flags when unlocked", async () => {
+  const deviceId = "94444444-4444-4444-8444-444444444444";
+  const apiToken = await registerDeviceApiToken({ deviceId });
+  await db
+    .prepare(
+      "INSERT INTO entitlements (device_id, byo_openai, byo_anthropic, unlocked_at, updated_at) VALUES (?, 1, 0, datetime('now'), datetime('now'))"
+    )
+    .bind(deviceId)
+    .run();
+
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        capabilities: { stage5AnthropicReviewAvailable: true },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+
+  const response = await apiRequest(`/entitlements/${deviceId}`, {
+    headers: authHeaders(apiToken),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.entitlements, {
+    byoOpenAi: true,
+    byoAnthropic: true,
+    byoElevenLabs: true,
+    byoGemini: true,
+  });
 });
 
 test("entitlements reuses cached relay review capability when probe fails", async () => {
